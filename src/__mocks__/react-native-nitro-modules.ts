@@ -15,6 +15,16 @@ export const mockLiteRTLM = {
     onToken("token", true);
     return Promise.resolve();
   }),
+  sendMessageWithImageAsync: jest.fn((msg, imagePath, onToken) => {
+    onToken("Mock vision ", false);
+    onToken("token", true);
+    return Promise.resolve();
+  }),
+  sendMessageWithAudioAsync: jest.fn((msg, audioPath, onToken) => {
+    onToken("Mock audio ", false);
+    onToken("token", true);
+    return Promise.resolve();
+  }),
   getHistory: jest.fn(() => []),
   resetConversation: jest.fn(),
   getStats: jest.fn(() => ({

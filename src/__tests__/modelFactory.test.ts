@@ -56,6 +56,34 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
 
+  it('should successfully proxy sendMessageWithImageAsync and record memory metrics when done', async () => {
+    const onToken = jest.fn();
+    await llm.sendMessageWithImageAsync("Vision prompt", "/path/to/image.jpg", onToken);
+
+    expect(onToken).toHaveBeenCalledWith("Mock vision ", false);
+    expect(onToken).toHaveBeenCalledWith("token", true);
+    expect(mockLiteRTLM.sendMessageWithImageAsync).toHaveBeenCalledWith(
+      "Vision prompt",
+      "/path/to/image.jpg",
+      expect.any(Function)
+    );
+    expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
+  });
+
+  it('should successfully proxy sendMessageWithAudioAsync and record memory metrics when done', async () => {
+    const onToken = jest.fn();
+    await llm.sendMessageWithAudioAsync("Audio prompt", "/path/to/audio.wav", onToken);
+
+    expect(onToken).toHaveBeenCalledWith("Mock audio ", false);
+    expect(onToken).toHaveBeenCalledWith("token", true);
+    expect(mockLiteRTLM.sendMessageWithAudioAsync).toHaveBeenCalledWith(
+      "Audio prompt",
+      "/path/to/audio.wav",
+      expect.any(Function)
+    );
+    expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
+  });
+
   it('should successfully access memoryTracker and getSnapshots when memory tracking is enabled', () => {
     expect(llm.memoryTracker).toBeDefined();
     expect(llm.memoryTracker?.getCapacity()).toBe(256);

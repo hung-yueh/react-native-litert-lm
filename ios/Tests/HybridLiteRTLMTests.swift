@@ -53,6 +53,52 @@ class HybridLiteRTLMTests: XCTestCase {
         }
     }
 
+    func testSendMessageWithImageAsyncRejectsWithoutModel() async throws {
+        do {
+            let promise = try bridge.sendMessageWithImageAsync(message: "hello", imagePath: "/tmp/image.jpg") { _, _ in }
+            _ = try await promise.await()
+            XCTFail("Should have failed without model")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "LiteRTLM")
+            XCTAssertEqual(nsError.code, 400)
+        }
+    }
+
+    func testSendMessageWithAudioAsyncRejectsWithoutModel() async throws {
+        do {
+            let promise = try bridge.sendMessageWithAudioAsync(message: "hello", audioPath: "/tmp/audio.wav") { _, _ in }
+            _ = try await promise.await()
+            XCTFail("Should have failed without model")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "LiteRTLM")
+            XCTAssertEqual(nsError.code, 400)
+        }
+    }
+
+    func testSendMessageWithImageAsyncRejectsFileNotFound() async throws {
+        do {
+            let promise = try bridge.sendMessageWithImageAsync(message: "hello", imagePath: "/nonexistent/image.jpg") { _, _ in }
+            _ = try await promise.await()
+            XCTFail("Should have failed without model")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "LiteRTLM")
+        }
+    }
+
+    func testSendMessageWithAudioAsyncRejectsFileNotFound() async throws {
+        do {
+            let promise = try bridge.sendMessageWithAudioAsync(message: "hello", audioPath: "/nonexistent/audio.wav") { _, _ in }
+            _ = try await promise.await()
+            XCTFail("Should have failed without model")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "LiteRTLM")
+        }
+    }
+
     func testInitialStats() {
         XCTAssertNoThrow(try bridge.getStats())
         if let stats = try? bridge.getStats() {

@@ -70,6 +70,28 @@ class HybridLiteRTLMTest {
     }
 
     @Test
+    fun testSendMessageWithImageAsyncRejectsWithoutModel() {
+        val promise = bridge.sendMessageWithImageAsync("hello", "/tmp/image.jpg") { _, _ -> }
+        assertNotNull("Promise should not be null", promise)
+        assertTrue("Promise should be completed", promise.isCompleted)
+        assertNotNull("Promise should have rejected without model", promise.error)
+        val errMsg = promise.error!!.message ?: promise.error!!.cause?.message ?: ""
+        assertTrue("Expected no-model error, got: $errMsg",
+            errMsg.contains("No model loaded"))
+    }
+
+    @Test
+    fun testSendMessageWithAudioAsyncRejectsWithoutModel() {
+        val promise = bridge.sendMessageWithAudioAsync("hello", "/tmp/audio.wav") { _, _ -> }
+        assertNotNull("Promise should not be null", promise)
+        assertTrue("Promise should be completed", promise.isCompleted)
+        assertNotNull("Promise should have rejected without model", promise.error)
+        val errMsg = promise.error!!.message ?: promise.error!!.cause?.message ?: ""
+        assertTrue("Expected no-model error, got: $errMsg",
+            errMsg.contains("No model loaded"))
+    }
+
+    @Test
     fun testAndroidInitialStats() {
         val stats = bridge.getStats()
         assertNotNull(stats)
