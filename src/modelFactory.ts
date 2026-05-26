@@ -132,6 +132,28 @@ export function createLLM(options?: {
         };
       }
 
+      if (prop === "sendMessageWithImageAsync") {
+        return (message: string, imagePath: string, onToken: (token: string, done: boolean) => void) => {
+          return original.call(target, message, imagePath, (token: string, done: boolean) => {
+            onToken(token, done);
+            if (done) {
+              recordMemorySnapshot();
+            }
+          });
+        };
+      }
+
+      if (prop === "sendMessageWithAudioAsync") {
+        return (message: string, audioPath: string, onToken: (token: string, done: boolean) => void) => {
+          return original.call(target, message, audioPath, (token: string, done: boolean) => {
+            onToken(token, done);
+            if (done) {
+              recordMemorySnapshot();
+            }
+          });
+        };
+      }
+
       if (SNAPSHOT_TRIGGERS.has(prop as string)) {
         return async (...args: any[]) => {
           const result = await original.apply(target, args);

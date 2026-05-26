@@ -501,6 +501,75 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
+    override fun sendMessageWithImageAsync(message: String, imagePath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
+        return Promise.parallel {
+            val latch = CountDownLatch(1)
+            val errorRef = AtomicReference<Throwable?>(null)
+
+            ensureLoaded()
+
+            Log.i(TAG, "sendMessageWithImageAsync: $message, path=$imagePath")
+
+            // Resize image to prevent OOM on high-resolution photos
+            val processedImagePath = resizeImageIfNeeded(imagePath)
+
+            val fullResponseBuilder = StringBuilder()
+            
+            val listener = StreamingCallbackListener(
+                onToken = { token, done ->
+                    onToken(token, done)
+                    if (done) {
+                        latch.countDown()
+                    }
+                },
+                responseBuilder = fullResponseBuilder,
+                history = history,
+                userMessage = message,
+                onStatsReady = { stats -> lastStats = stats },
+            )
+
+            try {
+                val textContent = Content.Text(message)
+                val userMsg = LiteRTMessage.user(Contents.of(textContent, Content.ImageFile(processedImagePath)))
+
+                history.add(Message(Role.USER, "$message [Image]"))
+
+                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+            } catch (e: Exception) {
+                // Clean up temp resized image to prevent cache dir bloat
+                if (processedImagePath != imagePath) {
+                    try {
+                        java.io.File(processedImagePath).delete()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to clean up temp image: ${e.message}")
+                    }
+                }
+
+                Log.e(TAG, "Failed to initiate async multimodal generation", e)
+                errorRef.set(e)
+                onToken("Error: ${e.message}", true)
+                latch.countDown()
+            }
+
+            // Wait for completion or error
+            latch.await()
+
+            // Clean up temp resized image to prevent cache dir bloat
+            if (processedImagePath != imagePath) {
+                try {
+                    java.io.File(processedImagePath).delete()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to clean up temp image: ${e.message}")
+                }
+            }
+
+            val err = errorRef.get()
+            if (err != null) {
+                throw RuntimeException("Async multimodal inference failed: ${err.message}", err)
+            }
+        }
+    }
+
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
         return Promise.parallel {
             Log.i(TAG, "downloadModel: $url -> $fileName")
@@ -619,6 +688,54 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 }
             } else {
                 Log.w(TAG, "Model not found for deletion: ${modelFile.absolutePath}")
+            }
+        }
+    }
+
+    override fun sendMessageWithAudioAsync(message: String, audioPath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
+        return Promise.parallel {
+            val latch = CountDownLatch(1)
+            val errorRef = AtomicReference<Throwable?>(null)
+
+            ensureLoaded()
+
+            Log.i(TAG, "sendMessageWithAudioAsync: $message, path=$audioPath")
+
+            val fullResponseBuilder = StringBuilder()
+
+            val listener = StreamingCallbackListener(
+                onToken = { token, done ->
+                    onToken(token, done)
+                    if (done) {
+                        latch.countDown()
+                    }
+                },
+                responseBuilder = fullResponseBuilder,
+                history = history,
+                userMessage = message,
+                onStatsReady = { stats -> lastStats = stats },
+            )
+
+            try {
+                val userMsg = LiteRTMessage.user(Contents.of(
+                    Content.Text(message),
+                    Content.AudioFile(audioPath)
+                ))
+
+                history.add(Message(Role.USER, "$message [Audio]"))
+
+                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initiate async audio generation", e)
+                errorRef.set(e)
+                onToken("Error: ${e.message}", true)
+                latch.countDown()
+            }
+
+            latch.await()
+            val err = errorRef.get()
+            if (err != null) {
+                throw RuntimeException("Async audio inference failed: ${err.message}", err)
             }
         }
     }

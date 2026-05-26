@@ -542,7 +542,285 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         return promise
     }
+
+    public func sendMessageWithImageAsync(message: String, imagePath: String, onToken: @escaping (_ token: String, _ done: Bool) -> Void) throws -> Promise<Void> {
+        let promise = Promise<Void>()
+        
+        queue.async {
+            guard let conversation = self.conversation else {
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 400, userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: No model loaded. Call loadModel() first."]))
+                return
+            }
+            
+            if !FileManager.default.fileExists(atPath: imagePath) {
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 404, userInfo: [NSLocalizedDescriptionKey: "Image file not found: \(imagePath)"]))
+                return
+            }
+            
+            let msgJson = self.buildImageMessageJson(text: message, imagePath: imagePath)
+            let startTime = Date()
+            
+            let historyUserContent = message + " [image: \(imagePath)]"
+            let context = StreamContext(
+                userMessage: message,
+                startTime: startTime,
+                onToken: onToken,
+                promise: promise,
+                parent: self
+            )
+            
+            let callbackData = Unmanaged.passRetained(context).toOpaque()
+            
+            let callback: LiteRtLmStreamCallback = { callbackData, chunk, isFinal, errorMsg in
+                guard let callbackData = callbackData else { return }
+                let ctx = Unmanaged<StreamContext>.fromOpaque(callbackData).takeUnretainedValue()
+                
+                if let errorMsg = errorMsg {
+                    let errorStr = String(cString: errorMsg)
+                    ctx.onToken("Error: \(errorStr)", true)
+                    ctx.promise.reject(withError: NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: errorStr]))
+                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                    return
+                }
+                
+                if isFinal {
+                    let endTime = Date()
+                    let totalTime = endTime.timeIntervalSince(ctx.startTime)
+                    
+                    let cleaned = ctx.parent.stripControlTokens(ctx.rawResponse)
+                    var finalCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !ctx.userMessage.isEmpty && finalCleaned.hasPrefix(ctx.userMessage) {
+                        finalCleaned = String(finalCleaned.dropFirst(ctx.userMessage.count))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    
+                    if finalCleaned.count > ctx.lastEmittedLength {
+                        let startIdx = finalCleaned.index(finalCleaned.startIndex, offsetBy: ctx.lastEmittedLength)
+                        let remaining = String(finalCleaned[startIdx...])
+                        ctx.onToken(remaining, false)
+                    }
+                    ctx.fullResponse = finalCleaned
+                    
+                    var completionTokens = Double(ctx.tokenCount)
+                    var tokensPerSecond = 0.0
+                    var ttft = 0.0
+                    if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
+                        let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
+                        if numDecodeTurns > 0 {
+                            let lastIdx = numDecodeTurns - 1
+                            tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
+                            completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                        }
+                        ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
+                        litert_lm_benchmark_info_delete(benchInfo)
+                    }
+
+                    let promptTokens = Double(ctx.userMessage.count) / 4.0
+                    if completionTokens == 0.0 {
+                        completionTokens = Double(ctx.fullResponse.count) / 4.0
+                    }
+                    ctx.parent.lastStats = GenerationStats(
+                        promptTokens: promptTokens,
+                        completionTokens: completionTokens,
+                        totalTokens: promptTokens + completionTokens,
+                        timeToFirstToken: ttft,
+                        totalTime: totalTime,
+                        tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
+                    )
+                    ctx.parent.history.append(Message(role: .user, content: historyUserContent))
+                    ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
+                    ctx.onToken("", true)
+                    ctx.promise.resolve()
+                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                    return
+                }
+
+                if let chunk = chunk {
+                    let token = String(cString: chunk)
+                    let raw: String
+                    if token.hasPrefix("{") && token.contains("\"role\"") {
+                        raw = ctx.parent.extractTextFromResponse(token)
+                    } else {
+                        raw = token
+                    }
+
+                    ctx.rawResponse += raw
+                    let cleaned = ctx.parent.stripControlTokens(ctx.rawResponse)
+                        .trimmingLeadingCharacters(in: .whitespacesAndNewlines)
+
+                    var processed = cleaned
+                    if !ctx.userMessage.isEmpty && processed.hasPrefix(ctx.userMessage) {
+                        processed = String(processed.dropFirst(ctx.userMessage.count))
+                            .trimmingLeadingCharacters(in: .whitespacesAndNewlines)
+                    }
+
+                    let safeLen = ctx.parent.safeEmitLength(processed)
+                    if safeLen > ctx.lastEmittedLength {
+                        let chars = Array(processed)
+                        let newText = String(chars[ctx.lastEmittedLength..<safeLen])
+                        ctx.lastEmittedLength = safeLen
+                        ctx.tokenCount += 1
+                        ctx.onToken(newText, false)
+                    }
+                }
+            }
+
+            let status = litert_lm_conversation_send_message_stream(
+                conversation,
+                msgJson,
+                nil,
+                nil,
+                callback,
+                callbackData
+            )
+            if status != 0 {
+                Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to start streaming conversation."]))
+            }
+        }
+
+        return promise
+    }
     
+    public func sendMessageWithAudioAsync(message: String, audioPath: String, onToken: @escaping (_ token: String, _ done: Bool) -> Void) throws -> Promise<Void> {
+        let promise = Promise<Void>()
+
+        queue.async {
+            guard let conversation = self.conversation else {
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 400, userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: No model loaded. Call loadModel() first."]))
+                return
+            }
+
+            if !FileManager.default.fileExists(atPath: audioPath) {
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 404, userInfo: [NSLocalizedDescriptionKey: "Audio file not found: \(audioPath)"]))
+                return
+            }
+
+            let msgJson = self.buildAudioMessageJson(text: message, audioPath: audioPath)
+            let startTime = Date()
+
+            let historyUserContent = message + " [audio: \(audioPath)]"
+            let context = StreamContext(
+                userMessage: message,
+                startTime: startTime,
+                onToken: onToken,
+                promise: promise,
+                parent: self
+            )
+
+            let callbackData = Unmanaged.passRetained(context).toOpaque()
+
+            let callback: LiteRtLmStreamCallback = { callbackData, chunk, isFinal, errorMsg in
+                guard let callbackData = callbackData else { return }
+                let ctx = Unmanaged<StreamContext>.fromOpaque(callbackData).takeUnretainedValue()
+
+                if let errorMsg = errorMsg {
+                    let errorStr = String(cString: errorMsg)
+                    ctx.onToken("Error: \(errorStr)", true)
+                    ctx.promise.reject(withError: NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: errorStr]))
+                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                    return
+                }
+
+                if isFinal {
+                    let endTime = Date()
+                    let totalTime = endTime.timeIntervalSince(ctx.startTime)
+
+                    let cleaned = ctx.parent.stripControlTokens(ctx.rawResponse)
+                    var finalCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !ctx.userMessage.isEmpty && finalCleaned.hasPrefix(ctx.userMessage) {
+                        finalCleaned = String(finalCleaned.dropFirst(ctx.userMessage.count))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+
+                    if finalCleaned.count > ctx.lastEmittedLength {
+                        let startIdx = finalCleaned.index(finalCleaned.startIndex, offsetBy: ctx.lastEmittedLength)
+                        let remaining = String(finalCleaned[startIdx...])
+                        ctx.onToken(remaining, false)
+                    }
+                    ctx.fullResponse = finalCleaned
+
+                    var completionTokens = Double(ctx.tokenCount)
+                    var tokensPerSecond = 0.0
+                    var ttft = 0.0
+                    if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
+                        let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
+                        if numDecodeTurns > 0 {
+                            let lastIdx = numDecodeTurns - 1
+                            tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
+                            completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                        }
+                        ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
+                        litert_lm_benchmark_info_delete(benchInfo)
+                    }
+
+                    let promptTokens = Double(ctx.userMessage.count) / 4.0
+                    if completionTokens == 0.0 {
+                        completionTokens = Double(ctx.fullResponse.count) / 4.0
+                    }
+                    ctx.parent.lastStats = GenerationStats(
+                        promptTokens: promptTokens,
+                        completionTokens: completionTokens,
+                        totalTokens: promptTokens + completionTokens,
+                        timeToFirstToken: ttft,
+                        totalTime: totalTime,
+                        tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
+                    )
+                    ctx.parent.history.append(Message(role: .user, content: historyUserContent))
+                    ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
+                    ctx.onToken("", true)
+                    ctx.promise.resolve()
+                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                    return
+                }
+
+                if let chunk = chunk {
+                    let token = String(cString: chunk)
+                    let raw: String
+                    if token.hasPrefix("{") && token.contains("\"role\"") {
+                        raw = ctx.parent.extractTextFromResponse(token)
+                    } else {
+                        raw = token
+                    }
+
+                    ctx.rawResponse += raw
+                    let cleaned = ctx.parent.stripControlTokens(ctx.rawResponse)
+                        .trimmingLeadingCharacters(in: .whitespacesAndNewlines)
+
+                    var processed = cleaned
+                    if !ctx.userMessage.isEmpty && processed.hasPrefix(ctx.userMessage) {
+                        processed = String(processed.dropFirst(ctx.userMessage.count))
+                            .trimmingLeadingCharacters(in: .whitespacesAndNewlines)
+                    }
+
+                    let safeLen = ctx.parent.safeEmitLength(processed)
+                    if safeLen > ctx.lastEmittedLength {
+                        let chars = Array(processed)
+                        let newText = String(chars[ctx.lastEmittedLength..<safeLen])
+                        ctx.lastEmittedLength = safeLen
+                        ctx.tokenCount += 1
+                        ctx.onToken(newText, false)
+                    }
+                }
+            }
+
+            let status = litert_lm_conversation_send_message_stream(
+                conversation,
+                msgJson,
+                nil,
+                nil,
+                callback,
+                callbackData
+            )
+            if status != 0 {
+                Unmanaged<StreamContext>.fromOpaque(callbackData).release()
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Failed to start streaming conversation."]))
+            }
+        }
+
+        return promise
+    }
+
     public func sendMessageWithAudio(message: String, audioPath: String) throws -> Promise<String> {
         let promise = Promise<String>()
         
