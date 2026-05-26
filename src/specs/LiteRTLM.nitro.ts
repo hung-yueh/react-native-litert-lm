@@ -227,6 +227,19 @@ export interface LiteRTLM extends HybridObject<{
   sendMessageWithImage(message: string, imagePath: string): Promise<string>;
 
   /**
+   * Send a text message with an image and get a streaming response.
+   * Tokens are delivered via callback as they are generated.
+   * @param message User message text.
+   * @param imagePath Absolute path to an image file.
+   * @param onToken Callback invoked for each token (token, isDone).
+   */
+  sendMessageWithImageAsync(
+    message: string,
+    imagePath: string,
+    onToken: (token: string, done: boolean) => void,
+  ): Promise<void>;
+
+  /**
    * Download a model file from a URL.
    * @param url URL to download from.
    * @param fileName Filename to save as (in app's files directory).
@@ -252,6 +265,19 @@ export interface LiteRTLM extends HybridObject<{
    * @returns The model's response text.
    */
   sendMessageWithAudio(message: string, audioPath: string): Promise<string>;
+
+  /**
+   * Send a text message with audio and get a streaming response.
+   * Tokens are delivered via callback as they are generated.
+   * @param message User message text.
+   * @param audioPath Absolute path to an audio file (WAV).
+   * @param onToken Callback invoked for each token (token, isDone).
+   */
+  sendMessageWithAudioAsync(
+    message: string,
+    audioPath: string,
+    onToken: (token: string, done: boolean) => void,
+  ): Promise<void>;
 
   /**
    * Send a unified multimodal message containing text and/or zero-copy binary buffers.
