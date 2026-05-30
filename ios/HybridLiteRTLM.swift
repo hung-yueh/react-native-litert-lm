@@ -117,7 +117,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     public func countTokens(text: String) throws -> Double {
-        return try queue.sync {
+        return queue.sync {
             guard let engine = self.engine else {
                 return -1.0
             }
@@ -406,42 +406,50 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                         ctx.onToken(remaining, false)
                     }
                     ctx.fullResponse = finalCleaned
-                    
-                    var completionTokens = Double(ctx.tokenCount)
-                    var tokensPerSecond = 0.0
-                    var ttft = 0.0
-                    
-                    if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
-                        let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
-                        if numDecodeTurns > 0 {
-                            let lastIdx = numDecodeTurns - 1
-                            tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
-                            completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+
+                    // This callback fires on an engine-internal thread (the C API
+                    // returns once the stream *starts*), so commit the shared
+                    // lastStats/history — and the conversation benchmark read — on
+                    // the serial engine queue to avoid racing getStats()/getHistory().
+                    // Resolving inside the same block guarantees JS observes the
+                    // final turn before the promise settles.
+                    ctx.parent.queue.async {
+                        var completionTokens = Double(ctx.tokenCount)
+                        var tokensPerSecond = 0.0
+                        var ttft = 0.0
+
+                        if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
+                            let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
+                            if numDecodeTurns > 0 {
+                                let lastIdx = numDecodeTurns - 1
+                                tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
+                                completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                            }
+                            ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
+                            litert_lm_benchmark_info_delete(benchInfo)
                         }
-                        ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
-                        litert_lm_benchmark_info_delete(benchInfo)
+
+                        let promptTokens = Double(ctx.userMessage.count) / 4.0
+                        if completionTokens == 0.0 {
+                            completionTokens = Double(ctx.fullResponse.count) / 4.0
+                        }
+
+                        ctx.parent.lastStats = GenerationStats(
+                            promptTokens: promptTokens,
+                            completionTokens: completionTokens,
+                            totalTokens: promptTokens + completionTokens,
+                            timeToFirstToken: ttft,
+                            totalTime: totalTime,
+                            tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
+                        )
+
+                        ctx.parent.history.append(Message(role: .user, content: ctx.userMessage))
+                        ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
+
+                        ctx.onToken("", true)
+                        ctx.promise.resolve()
+                        Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     }
-                    
-                    let promptTokens = Double(ctx.userMessage.count) / 4.0
-                    if completionTokens == 0.0 {
-                        completionTokens = Double(ctx.fullResponse.count) / 4.0
-                    }
-                    
-                    ctx.parent.lastStats = GenerationStats(
-                        promptTokens: promptTokens,
-                        completionTokens: completionTokens,
-                        totalTokens: promptTokens + completionTokens,
-                        timeToFirstToken: ttft,
-                        totalTime: totalTime,
-                        tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
-                    )
-                    
-                    ctx.parent.history.append(Message(role: .user, content: ctx.userMessage))
-                    ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
-                    
-                    ctx.onToken("", true)
-                    ctx.promise.resolve()
-                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     return
                 }
                 

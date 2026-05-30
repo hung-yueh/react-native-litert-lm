@@ -23,8 +23,10 @@ Pod::Spec.new do |s|
     "nitrogen/generated/shared/c++/**/*.{hpp,cpp}",
   ]
 
-  # Prebuilt LiteRT-LM C engine (static library).
-  # Downloaded from Google's release via: scripts/download-ios-frameworks.sh
+  # Prebuilt LiteRT-LM C engine (xcframework). Not shipped in the npm tarball;
+  # fetched on install by scripts/postinstall.js (asset/tag defined in
+  # scripts/framework-source.js). Manual/upstream fallback:
+  # scripts/download-ios-frameworks.sh.
   s.vendored_frameworks = 'ios/Frameworks/CLiteRTLM.xcframework'
 
   s.pod_target_xcconfig = {

@@ -7,10 +7,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUTPUT_DIR="$PROJECT_ROOT/ios/Frameworks"
 
-LITERT_LM_VERSION="$(node -e "console.log(require('$PROJECT_ROOT/package.json').litertLm.iosGitTag)")"
-RELEASE_URL="https://github.com/google-ai-edge/LiteRT-LM/releases/download/${LITERT_LM_VERSION}/CLiteRTLM.xcframework.zip"
+# Resolve the asset URL + output dir from the shared single source of truth
+# (scripts/framework-source.js) so this manual path can't drift from postinstall.
+RELEASE_URL="$(node -e "console.log(require('$SCRIPT_DIR/framework-source').ASSET_URL)")"
+OUTPUT_DIR="$(node -e "console.log(require('$SCRIPT_DIR/framework-source').FRAMEWORKS_DIR)")"
 
 # Skip if already present
 if [ -d "$OUTPUT_DIR/CLiteRTLM.xcframework" ]; then

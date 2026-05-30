@@ -5,8 +5,7 @@
     "requireCleanWorkingDir": false
   },
   "github": {
-    "release": true,
-    "assets": ["LiteRTLM-ios-frameworks.zip"]
+    "release": true
   },
   "npm": {
     "publish": true

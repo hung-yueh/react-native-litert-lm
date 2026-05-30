@@ -49,6 +49,7 @@
     "cpp",
     "nitrogen/generated",
     "scripts/postinstall.js",
+    "scripts/framework-source.js",
     "scripts/download-ios-frameworks.sh",
     "react-native.config.js",
     "react-native-litert-lm.podspec",
@@ -65,10 +66,12 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "lint": "eslint \"**/*.{js,ts,tsx}\" --fix",
-    "prepack": "npm run build",
+    "prepack": "npx nitrogen && npm run build",
     "specs": "npx nitrogen",
     "clean": "rm -rf lib android/build ios/build ios/Frameworks nitrogen/generated",
     "download-frameworks": "scripts/download-ios-frameworks.sh",
+    "check-framework-release": "node scripts/check-framework-release.js",
+    "prepublishOnly": "node scripts/check-framework-release.js",
     "android": "expo run:android",
     "android:clean": "cd android && ./gradlew clean",
     "ios": "expo run:ios",
@@ -82,7 +85,7 @@
     "jest": "^30.4.2",
     "react": "^19.2.6",
     "react-native": "^0.85.3",
-    "react-native-nitro-modules": "^0.35.4",
+    "react-native-nitro-modules": "^0.35.9",
     "react-test-renderer": "^19.2.6",
     "release-it": "^19.2.4",
     "ts-jest": "^29.4.10",
@@ -93,7 +96,7 @@
     "expo": ">=55.0.0",
     "react": "*",
     "react-native": "*",
-    "react-native-nitro-modules": "^0.35.4"
+    "react-native-nitro-modules": "^0.35.9"
   },
   "peerDependenciesMeta": {
     "expo": {

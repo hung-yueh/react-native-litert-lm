@@ -6,6 +6,9 @@ lib/
 build/
 *.tsbuildinfo
 
+# Test coverage reports
+coverage/
+
 # Native builds
 android/build/
 android/.gradle/
@@ -39,10 +42,10 @@ yarn-error.log*
 # Model files (large, should not be committed)
 *.litertlm
 
-# iOS frameworks (built from source or downloaded from releases)
+# iOS frameworks (downloaded from the LiteRT-LM release on install)
 ios/Frameworks/
-# Prebuilt framework zip (uploaded to GitHub Releases, not committed)
-LiteRTLM-ios-frameworks.zip
+# Temp download artifact from postinstall / download-ios-frameworks.sh
+.ios-frameworks-tmp.zip
 # Bazel build cache for LiteRT-LM source compilation
 .litert-lm-build/
 *.pte

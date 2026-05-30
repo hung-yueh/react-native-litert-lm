@@ -151,6 +151,12 @@ export function checkBackendSupport(backend: Backend): string | undefined {
  * Check if multimodal features (image/audio) are supported on the current platform.
  * Returns an error message if not supported, undefined if OK.
  *
+ * Both iOS (v0.12.0 CLiteRTLM xcframework) and Android (LiteRT-LM SDK) ship the
+ * vision/audio executor ops, so there is no platform-level block. Whether a
+ * given call succeeds depends on the **loaded model**: only multimodal models
+ * (e.g. Gemma 3n) bundle the vision/audio executors. Pass `multimodal: true` to
+ * `loadModel` for such models, or rely on filename sniffing ("3n"/"gemma3").
+ *
  * @returns Error message if multimodal is not supported, undefined if OK
  *
  * @example
@@ -165,9 +171,7 @@ export function checkBackendSupport(backend: Backend): string | undefined {
  * ```
  */
 export function checkMultimodalSupport(): string | undefined {
-  if (Platform.OS === "ios") {
-    return "Multimodal (image/audio) is not available on iOS. The XCFramework lacks compiled vision and audio executor ops.";
-  }
+  // Supported on both platforms with a multimodal model loaded.
   return undefined;
 }
 

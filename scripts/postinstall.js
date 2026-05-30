@@ -5,10 +5,15 @@
  * Downloads prebuilt LiteRT-LM iOS frameworks from this package's GitHub
  * releases when consumers run `npm install react-native-litert-lm`.
  *
+ * The framework is intentionally NOT shipped inside the npm tarball (it is
+ * ~40MB and irrelevant to Android-only consumers). The asset name, tag, and
+ * URL come from scripts/framework-source.js so they stay in lockstep with the
+ * release-time guardrail (scripts/check-framework-release.js).
+ *
  * Skips download if:
  *   - Not on macOS (iOS builds require macOS)
  *   - Frameworks already exist
- *   - CI environment with SKIP_IOS_FRAMEWORK_DOWNLOAD=1
+ *   - SKIP_IOS_FRAMEWORK_DOWNLOAD=1 (e.g. Android-only / CI builds)
  */
 
 const { execSync } = require('child_process');
@@ -16,14 +21,12 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const PACKAGE_JSON = require('../package.json');
-const PACKAGE_VERSION = PACKAGE_JSON.version;
-const GITHUB_REPO = 'hung-yueh/react-native-litert-lm';
-const ASSET_NAME = 'LiteRTLM-ios-frameworks.zip';
+const { ASSET_URL, FRAMEWORKS_DIR, FRAMEWORK_TAG } = require('./framework-source');
 
-const SCRIPT_DIR = __dirname;
-const PACKAGE_ROOT = path.resolve(SCRIPT_DIR, '..');
-const FRAMEWORKS_DIR = path.join(PACKAGE_ROOT, 'ios', 'Frameworks');
+/** ZIP local-file-header magic ("PK\x03\x04"). Guards against truncated downloads / HTML error pages. */
+const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+/** A valid framework zip is well over this; anything smaller is certainly an error page. */
+const MIN_VALID_BYTES = 1024 * 1024; // 1 MB
 
 function log(msg) {
   console.log(`[react-native-litert-lm] ${msg}`);
@@ -74,25 +77,46 @@ function downloadFile(url, destPath, maxRedirects = 5) {
       const file = fs.createWriteStream(destPath);
       res.pipe(file);
       file.on('finish', () => {
-        file.close();
-        resolve();
+        file.close(resolve);
       });
       file.on('error', reject);
     }).on('error', reject);
   });
 }
 
+/**
+ * Verify the downloaded file is a non-trivial ZIP before we trust it.
+ * Catches GitHub HTML error pages and truncated downloads that would
+ * otherwise fail cryptically at `unzip` or, worse, link a corrupt framework.
+ */
+function assertValidZip(zipPath) {
+  const { size } = fs.statSync(zipPath);
+  if (size < MIN_VALID_BYTES) {
+    throw new Error(`downloaded asset is only ${size} bytes — expected a multi-MB framework zip (likely an error page or truncated download)`);
+  }
+
+  const header = Buffer.alloc(4);
+  const fd = fs.openSync(zipPath, 'r');
+  try {
+    fs.readSync(fd, header, 0, 4, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (!header.equals(ZIP_MAGIC)) {
+    throw new Error('downloaded asset is not a valid ZIP (bad magic bytes)');
+  }
+}
+
 async function main() {
   if (shouldSkip()) return;
 
-  const releaseUrl = `https://github.com/${GITHUB_REPO}/releases/download/v${PACKAGE_VERSION}/${ASSET_NAME}`;
+  log(`Downloading iOS frameworks (engine ${FRAMEWORK_TAG}) from: ${ASSET_URL}`);
 
-  log(`Downloading iOS frameworks from: ${releaseUrl}`);
-
-  const tmpZip = path.join(PACKAGE_ROOT, '.ios-frameworks-tmp.zip');
+  const tmpZip = path.join(path.dirname(FRAMEWORKS_DIR), '.ios-frameworks-tmp.zip');
 
   try {
-    await downloadFile(releaseUrl, tmpZip);
+    await downloadFile(ASSET_URL, tmpZip);
+    assertValidZip(tmpZip);
 
     // Extract
     fs.mkdirSync(FRAMEWORKS_DIR, { recursive: true });
@@ -111,7 +135,6 @@ async function main() {
     log('Run: ./scripts/download-ios-frameworks.sh to download manually.');
 
     // Fail fast on macOS so users discover the problem now, not at Xcode link time.
-    // Skip SKIP_IOS_FRAMEWORK_DOWNLOAD is already checked above.
     if (process.platform === 'darwin') {
       log('Set SKIP_IOS_FRAMEWORK_DOWNLOAD=1 to suppress this error (e.g. Android-only builds).');
       process.exit(1);
