@@ -4,7 +4,7 @@
   "litertLm": {
     "version": "0.12.0",
     "androidMavenVersion": "0.12.0",
-    "iosGitTag": "v0.12.0"
+    "iosGitTag": "v0.3.6"
   },
   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",
   "license": "MIT",
