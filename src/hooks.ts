@@ -81,6 +81,7 @@ export function useModel(
   const validate = config?.validate;
   const multimodal = config?.multimodal;
   const tools = config?.tools;
+  const toolsKey = JSON.stringify(tools); // stable primitive for deps — avoids infinite re-renders from non-primitive array references
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
 
   // Build a stable config object from the destructured primitives
@@ -99,7 +100,7 @@ export function useModel(
         enableSpeculativeDecoding,
       }),
     }),
-    [backend, systemPrompt, maxTokens, temperature, topK, topP, validate, multimodal, tools, enableSpeculativeDecoding],
+    [backend, systemPrompt, maxTokens, temperature, topK, topP, validate, multimodal, enableSpeculativeDecoding, toolsKey],
   );
 
   /**
