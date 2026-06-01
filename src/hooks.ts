@@ -177,15 +177,13 @@ export function useModel(
           let fullResponse = "";
           try {
             modelRef.current?.sendMessageAsync(
-              prompt,
-              (token: string, done: boolean) => {
+              prompt, (token: string, done: boolean) => {
                 fullResponse += token;
                 if (done) {
                   refreshMemorySummary();
                   resolve(fullResponse);
                 }
-              },
-            ).catch(reject);
+              }).catch(reject);
           } catch (e: any) {
             reject(e);
           }
