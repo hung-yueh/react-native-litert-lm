@@ -150,4 +150,106 @@ describe('useModel React Hook Unit Tests', () => {
     hookResult.unmount();
     expect(mockLiteRTLM.close).toHaveBeenCalled();
   });
+
+  describe('nativeConfig field forwarding', () => {
+    async function loadWithConfig(config: any) {
+      let hookResult: any;
+      await TestRenderer.act(async () => {
+        hookResult = renderHook(() => useModel('https://example.com/model.litertlm', config));
+      });
+      // loadModel is called as: loadModel(pathOrUrl, nativeConfig, onProgress)
+      const [, nativeConfig] = mockLiteRTLM.loadModel.mock.calls[0];
+      return nativeConfig;
+    }
+
+    it('should forward validate to nativeConfig', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true, validate: true });
+      expect(nativeConfig).toHaveProperty('validate', true);
+    });
+
+    it('should forward multimodal to nativeConfig', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true, multimodal: true });
+      expect(nativeConfig).toHaveProperty('multimodal', true);
+    });
+
+    it('should forward enableSpeculativeDecoding to nativeConfig', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true, enableSpeculativeDecoding: true });
+      expect(nativeConfig).toHaveProperty('enableSpeculativeDecoding', true);
+    });
+
+    it('should forward tools array to nativeConfig', async () => {
+      const tools = [{ name: 'get_weather', description: 'Gets weather', parametersJson: '{}' }];
+      const nativeConfig = await loadWithConfig({ autoLoad: true, tools });
+      expect(nativeConfig).toHaveProperty('tools');
+      expect(nativeConfig.tools).toEqual(tools);
+    });
+
+    it('should omit validate from nativeConfig when not provided', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true });
+      expect(nativeConfig).not.toHaveProperty('validate');
+    });
+
+    it('should omit multimodal from nativeConfig when not provided', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true });
+      expect(nativeConfig).not.toHaveProperty('multimodal');
+    });
+
+    it('should omit enableSpeculativeDecoding from nativeConfig when not provided', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true });
+      expect(nativeConfig).not.toHaveProperty('enableSpeculativeDecoding');
+    });
+
+    it('should omit tools from nativeConfig when not provided', async () => {
+      const nativeConfig = await loadWithConfig({ autoLoad: true });
+      expect(nativeConfig).not.toHaveProperty('tools');
+    });
+
+    it('should not reload the model when tools array is a new reference with the same content (toolsKey stability)', async () => {
+      const tools = [{ name: 'get_weather', description: 'Gets weather', parametersJson: '{}' }];
+      let hookResult: any;
+
+      await TestRenderer.act(async () => {
+        hookResult = renderHook(
+          (props: any) => useModel('https://example.com/model.litertlm', props),
+          { autoLoad: true, tools },
+        );
+      });
+
+      const callCountAfterMount = mockLiteRTLM.loadModel.mock.calls.length;
+
+      // Re-render with a new array reference that has identical content
+      await TestRenderer.act(async () => {
+        hookResult.rerender({
+          autoLoad: true,
+          tools: [{ name: 'get_weather', description: 'Gets weather', parametersJson: '{}' }],
+        });
+      });
+
+      expect(mockLiteRTLM.loadModel.mock.calls.length).toBe(callCountAfterMount);
+    });
+
+    it('should reload the model when tools content actually changes', async () => {
+      const tools = [{ name: 'get_weather', description: 'Gets weather', parametersJson: '{}' }];
+      let hookResult: any;
+
+      await TestRenderer.act(async () => {
+        hookResult = renderHook(
+          (props: any) => useModel('https://example.com/model.litertlm', props),
+          { autoLoad: true, tools },
+        );
+      });
+
+      const callCountAfterMount = mockLiteRTLM.loadModel.mock.calls.length;
+
+      // Re-render with different tools content
+      await TestRenderer.act(async () => {
+        hookResult.rerender({
+          autoLoad: true,
+          tools: [{ name: 'search', description: 'Searches the web', parametersJson: '{}' }],
+        });
+      });
+
+      expect(mockLiteRTLM.loadModel.mock.calls.length).toBeGreaterThan(callCountAfterMount);
+    });
+  });
 });
