@@ -147,7 +147,13 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         }
         
         // os_proc_available_memory reports actual headroom available before Jetsam termination (iOS 13+)
-        let availableBytes = Double(os_proc_available_memory())
+        var availableBytes = Double(os_proc_available_memory())
+        #if targetEnvironment(simulator)
+        if availableBytes == 0 {
+            // iOS Simulator fallback: default to 4GB of simulated headroom, minus resident size
+            availableBytes = max(0.0, 4.0 * 1024.0 * 1024.0 * 1024.0 - residentBytes)
+        }
+        #endif
         
         // Flag memory warning at ~200MB remaining headroom
         let isLowMemory = availableBytes < 200.0 * 1024.0 * 1024.0
