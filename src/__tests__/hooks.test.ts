@@ -112,6 +112,7 @@ describe('useModel React Hook Unit Tests', () => {
     expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
       [{ type: "text", text: "Test prompt" }],
       undefined,
+      undefined,
     );
     expect(hookResult.result.current.memorySummary).toBeDefined();
   });

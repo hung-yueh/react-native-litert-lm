@@ -46,12 +46,22 @@ extension HybridLiteRTLM {
         userLabel: String,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
-        cleanup: @escaping () -> Void
+        cleanup: @escaping () -> Void,
+        options: ExecuteOptions? = nil
     ) {
+        // Per-message optional args must outlive the async stream — freed in
+        // the context's cleanup, which runs exactly once on completion/error.
+        let optionalArgs = makeOptionalArgs(options)
+        let fullCleanup = {
+            cleanup()
+            if let optionalArgs = optionalArgs {
+                litert_lm_conversation_optional_args_delete(optionalArgs)
+            }
+        }
         let ctx = ExecuteStreamContext(
             userLabel: userLabel, startTime: Date(),
             onToken: onToken, promise: promise, parent: self,
-            cleanup: cleanup
+            cleanup: fullCleanup
         )
         let ptr = Unmanaged.passRetained(ctx).toOpaque()
 
@@ -80,10 +90,10 @@ extension HybridLiteRTLM {
         }
 
         let status = litert_lm_conversation_send_message_stream(
-            conversation, msgJson, nil, nil, cb, ptr)
+            conversation, msgJson, nil, optionalArgs, cb, ptr)
         if status != 0 {
             Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
-            cleanup()
+            fullCleanup()
             promise.reject(withError: NSError(domain: "LiteRTLM", code: Int(status),
                 userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: execute streaming failed."]))
         }

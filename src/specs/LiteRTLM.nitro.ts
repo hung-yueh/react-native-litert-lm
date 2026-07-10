@@ -146,7 +146,105 @@ export interface LLMConfig {
    * @default false
    */
   enableSpeculativeDecoding?: boolean;
+
+  /**
+   * Number of CPU threads for text generation (CPU backend).
+   * Lower values reduce peak memory bandwidth pressure at some speed cost.
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK does not expose thread control.
+   */
+  numThreads?: number;
+
+  /**
+   * Prefill chunk size (CPU backend only). Smaller chunks reduce peak
+   * activation memory during long-prompt prefill at some latency cost.
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK does not expose this.
+   */
+  prefillChunkSize?: number;
+
+  /**
+   * Activation tensor data type. Lower precision reduces activation memory:
+   * 'f16' roughly halves activation memory vs 'f32'.
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK does not expose this.
+   */
+  activationDataType?: ActivationDataType;
+
+  /**
+   * Path to a LoRA adapter weights file to apply on top of the base model.
+   * Lets one base model serve multiple tasks without shipping full model copies.
+   */
+  loraPath?: string;
+
+  /**
+   * Path to an audio LoRA adapter weights file.
+   */
+  audioLoraPath?: string;
+
+  /**
+   * LoRA rank of the adapter (must match how the adapter was trained).
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK derives the rank internally.
+   */
+  loraRank?: number;
+
+  /**
+   * Stream tool-call tokens through the token callback as they are generated
+   * (LiteRT-LM v0.14+). Tool-call content arrives wrapped in channel markers;
+   * use `executeWithEvents()` to receive them as typed events instead of raw text.
+   * @default false
+   */
+  streamToolCalls?: boolean;
+
+  /**
+   * Channel name used to delimit streamed tool-call tokens.
+   * @default "tool_call"
+   */
+  toolCallChannelName?: string;
+
+  /**
+   * Skip the automatic pre-flight memory check in `loadModel()` and load even
+   * when the estimate says the model likely does not fit. JS-side only —
+   * the native engine ignores this field.
+   * @default false
+   */
+  forceLoad?: boolean;
 }
+
+/**
+ * Activation tensor data types (memory/precision trade-off).
+ */
+export type ActivationDataType = "f32" | "f16" | "i16" | "i8";
+
+/**
+ * Per-message options for `execute()` (LiteRT-LM v0.14+).
+ */
+export interface ExecuteOptions {
+  /**
+   * Cap the number of output tokens for this message only, overriding the
+   * session-level `maxOutputTokens`.
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK does not expose per-message
+   * output control; the session default applies there.
+   */
+  maxOutputTokens?: number;
+
+  /**
+   * Visual token budget for this message (multimodal models).
+   * Lower values reduce memory spent encoding images.
+   *
+   * @remarks **iOS only.**
+   */
+  visualTokenBudget?: number;
+}
+
+/**
+ * Severity of an OS memory-pressure notification.
+ * - 'moderate': the system is under pressure; consider freeing caches.
+ * - 'critical': the app is close to being killed; free memory now.
+ */
+export type MemoryWarningLevel = "moderate" | "critical";
 
 /**
  * A simple message in the conversation.
@@ -337,6 +435,36 @@ export interface LiteRTLM extends HybridObject<{
   getMemoryUsage(): MemoryUsage;
 
   /**
+   * Number of tokens currently held in the conversation KV cache
+   * (prompt + history + generated tokens). Returns -1 if unavailable.
+   *
+   * Combine with `maxContextTokens` to warn before the context window
+   * (and its memory) runs out — see `getMemoryForecast()` in the JS API.
+   */
+  getContextTokenCount(): number;
+
+  /**
+   * Release the loaded model and conversation, freeing all engine memory,
+   * while keeping this instance reusable — call `loadModel()` again to reload.
+   * Unlike `close()`, which permanently invalidates the instance.
+   */
+  unload(): Promise<void>;
+
+  /**
+   * Register a callback fired when the OS signals memory pressure
+   * (`onTrimMemory` on Android, dispatch memory-pressure source on iOS).
+   * Only one callback is active at a time; registering replaces the previous one.
+   */
+  setMemoryWarningCallback(
+    onWarning: (level: MemoryWarningLevel, usage: MemoryUsage) => void,
+  ): void;
+
+  /**
+   * Remove the memory warning callback registered via `setMemoryWarningCallback`.
+   */
+  clearMemoryWarningCallback(): void;
+
+  /**
    * Execute a unified multimodal inference request.
    *
    * A single deep entry point that replaces all modalality-specific send methods.
@@ -346,11 +474,13 @@ export interface LiteRTLM extends HybridObject<{
    *
    * @param parts Array of content parts (text, image, audio)
    * @param onToken Optional streaming callback - invoked per token with (token, isDone)
+   * @param options Optional per-message options (maxOutputTokens, visualTokenBudget)
    * @returns Promise resolving to the full response string
    */
   execute(
     parts: MultimodalPart[],
     onToken?: (token: string, done: boolean) => void,
+    options?: ExecuteOptions,
   ): Promise<string>;
 
   /**
@@ -373,6 +503,11 @@ export interface ModelStore extends HybridObject<{
 }> {
   isCached(fileName: string): boolean;
   getFilePath(fileName: string): string;
+  /**
+   * Size in bytes of an arbitrary file path (not restricted to the model cache).
+   * Returns -1 if the file does not exist. Used by the pre-flight memory estimator.
+   */
+  getFileSizeBytes(absolutePath: string): number;
   listCachedFiles(): ModelFile[];
   deleteFile(fileName: string): void;
   downloadFile(

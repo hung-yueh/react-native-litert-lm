@@ -60,6 +60,16 @@ export const ModelRegistry = {
   },
 
   /**
+   * Size in bytes of a file at an absolute path (not restricted to the cache).
+   * Returns -1 if the file does not exist.
+   *
+   * @param absolutePath Absolute filesystem path
+   */
+  getFileSizeBytes(absolutePath: string): number {
+    return nativeStore.getFileSizeBytes(absolutePath);
+  },
+
+  /**
    * Resolve a model path or URL.
    *
    * Sniffs the protocol. If it is an HTTPS URL, downloads it to the native

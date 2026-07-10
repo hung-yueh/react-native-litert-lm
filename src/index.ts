@@ -21,6 +21,9 @@ export type {
   /** New in v0.5: pass to execute() instead of individual send methods */
   MultimodalPart,
   PartType,
+  ActivationDataType,
+  MemoryWarningLevel,
+  ToolDefinition,
 } from "./specs/LiteRTLM.nitro";
 
 
@@ -32,7 +35,42 @@ export type {
 } from "./memoryTracker";
 export { createMemoryTracker, createNativeBuffer } from "./memoryTracker";
 
-export type { LiteRTLMInstance } from "./modelFactory";
+// Memory controls: pre-flight estimation, forecasting, and budgets
+export {
+  estimateMemory,
+  estimateKvCacheBytesPerToken,
+  forecastMemory,
+  evaluateBudget,
+  ESTIMATOR_CONSTANTS,
+} from "./memoryEstimator";
+export type {
+  MemoryEstimate,
+  MemoryEstimateInputs,
+  MemoryForecast,
+  MemoryForecastInputs,
+  MemoryBudget,
+  MemoryVerdict,
+  BudgetLevel,
+} from "./memoryEstimator";
+
+// Typed errors — branch on `error.code` instead of parsing messages
+export { LiteRTLMError, MemoryError, isMemoryError } from "./errors";
+export type { LiteRTLMErrorCode } from "./errors";
+
+// Typed streaming events (tool calls / thinking channels, LiteRT-LM v0.14+)
+export { createStreamEventParser, DEFAULT_CHANNELS } from "./streamEvents";
+export type {
+  StreamEvent,
+  StreamEventType,
+  StreamChannel,
+  StreamEventParser,
+} from "./streamEvents";
+
+export type {
+  LiteRTLMInstance,
+  CreateLLMOptions,
+  StreamEventCallback,
+} from "./modelFactory";
 export { ModelRegistry } from "./modelRegistry";
 export type { ModelDownloadOptions } from "./modelRegistry";
 export * from "./hooks";

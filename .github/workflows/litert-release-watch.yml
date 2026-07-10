@@ -1,0 +1,76 @@
+name: LiteRT-LM Release Watch
+
+# LiteRT-LM ships roughly monthly. This job compares the latest upstream
+# release against the version pinned in package.json (litertLm.version) and
+# opens an issue with the C-header API diff when a new release appears.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare pinned vs latest release
+        id: compare
+        run: |
+          PINNED=$(node -p "require('./package.json').litertLm.version")
+          LATEST_TAG=$(curl -fsSL https://api.github.com/repos/google-ai-edge/LiteRT-LM/releases/latest | node -p "JSON.parse(require('fs').readFileSync(0)).tag_name")
+          LATEST=${LATEST_TAG#v}
+          echo "pinned=$PINNED"  >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST"  >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "outdated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "outdated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build C-header API diff
+        if: steps.compare.outputs.outdated == 'true'
+        run: |
+          PINNED_TAG="v${{ steps.compare.outputs.pinned }}"
+          LATEST_TAG="${{ steps.compare.outputs.latest_tag }}"
+          curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$PINNED_TAG/c/engine.h" -o old.h || echo "" > old.h
+          curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$LATEST_TAG/c/engine.h" -o new.h
+          {
+            echo '### C API diff (`c/engine.h`, '"$PINNED_TAG"' → '"$LATEST_TAG"')'
+            echo '```diff'
+            diff -u old.h new.h | head -400 || true
+            echo '```'
+          } > header-diff.md
+
+      - name: Open (or skip existing) upgrade issue
+        if: steps.compare.outputs.outdated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Upgrade LiteRT-LM to ${{ steps.compare.outputs.latest_tag }}"
+          EXISTING=$(gh issue list --search "\"$TITLE\" in:title" --state open --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then
+            echo "Issue already open — skipping."
+            exit 0
+          fi
+          {
+            echo "Upstream released **${{ steps.compare.outputs.latest_tag }}**; this package pins **v${{ steps.compare.outputs.pinned }}**."
+            echo
+            echo "Checklist (see docs/LiteRT-LM v0.14.0 Upgrade.md for the pattern):"
+            echo "- [ ] Bump \`litertLm\` versions in package.json"
+            echo "- [ ] Re-vendor \`cpp/include\` headers"
+            echo "- [ ] Refresh \`ios/Frameworks\` via scripts/download-ios-frameworks.sh"
+            echo "- [ ] Review the header diff below for breaking C API changes"
+            echo "- [ ] Verify the Android Kotlin API (javap the new AAR)"
+            echo "- [ ] Run the on-device memory scenarios (scripts/device-memory-scenarios.md)"
+            echo
+            cat header-diff.md
+          } > body.md
+          gh issue create --title "$TITLE" --body-file body.md --label dependencies

@@ -31,14 +31,23 @@ describe('MemoryTracker Unit Tests', () => {
     expect(snapshots[0]).toEqual(snapshot1);
   });
 
-  it('should reject new snapshots and return false when capacity is reached', () => {
+  it('should wrap around as a ring buffer when capacity is reached, keeping the newest snapshots', () => {
     const tracker = createMemoryTracker(2);
-    
+
     expect(tracker.record({ timestamp: 1, nativeHeapBytes: 10, residentBytes: 20, availableMemoryBytes: 50 })).toBe(true);
     expect(tracker.record({ timestamp: 2, nativeHeapBytes: 20, residentBytes: 30, availableMemoryBytes: 40 })).toBe(true);
-    expect(tracker.record({ timestamp: 3, nativeHeapBytes: 30, residentBytes: 40, availableMemoryBytes: 30 })).toBe(false);
-    
+    // Ring buffer: third record overwrites the oldest instead of being rejected
+    expect(tracker.record({ timestamp: 3, nativeHeapBytes: 30, residentBytes: 40, availableMemoryBytes: 30 })).toBe(true);
+
     expect(tracker.getSnapshotCount()).toBe(2);
+    expect(tracker.getTotalRecorded()).toBe(3);
+
+    // Oldest (timestamp 1) evicted; chronological order preserved
+    const snapshots = tracker.getSnapshots();
+    expect(snapshots.map((s) => s.timestamp)).toEqual([2, 3]);
+    expect(tracker.getLatestSnapshot()?.timestamp).toBe(3);
+    // Peak scans only retained snapshots (40 from timestamp 3)
+    expect(tracker.getPeakMemory()).toBe(40);
   });
 
   it('should calculate correct peak resident memory size', () => {

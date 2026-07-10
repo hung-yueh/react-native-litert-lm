@@ -1,0 +1,6 @@
+{
+  "$comment": "Peak-RSS baselines for scripts/device-memory-scenarios.md Scenario 3. Populate per device on first run; fail the scenario if a run exceeds baseline × 1.10.",
+  "model": "gemma-3n-E2B-it-int4.litertlm",
+  "flow": "load + 20 streamed turns + 1 multimodal turn + unload",
+  "baselines": {}
+}

@@ -1,10 +1,10 @@
 {
   "name": "react-native-litert-lm",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "litertLm": {
-    "version": "0.12.0",
-    "androidMavenVersion": "0.12.0",
-    "iosGitTag": "v0.12.0"
+    "version": "0.14.0",
+    "androidMavenVersion": "0.14.0",
+    "iosGitTag": "v0.14.0"
   },
   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",
   "license": "MIT",
@@ -85,7 +85,7 @@
     "jest": "^30.4.2",
     "react": "^19.2.6",
     "react-native": "^0.85.3",
-    "react-native-nitro-modules": "^0.35.9",
+    "react-native-nitro-modules": "^0.36.1",
     "react-test-renderer": "^19.2.6",
     "release-it": "^19.2.4",
     "ts-jest": "^29.4.10",
@@ -96,7 +96,7 @@
     "expo": ">=55.0.0",
     "react": "*",
     "react-native": "*",
-    "react-native-nitro-modules": "^0.35.9"
+    "react-native-nitro-modules": "^0.36.1"
   },
   "peerDependenciesMeta": {
     "expo": {

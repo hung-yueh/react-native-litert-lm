@@ -37,6 +37,7 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
       [{ type: "text", text: "Test prompt" }],
       undefined,
+      undefined,
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
     expect(llm.memoryTracker?.getSnapshotCount()).toBe(1); // sendMessage records one
@@ -58,6 +59,7 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
       [{ type: "text", text: "Async prompt" }],
       expect.any(Function),
+      undefined,
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
@@ -74,6 +76,7 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
         { type: "image", path: "/path/to/image.jpg" },
       ],
       expect.any(Function),
+      undefined,
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
@@ -90,6 +93,7 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
         { type: "audio", path: "/path/to/audio.wav" },
       ],
       expect.any(Function),
+      undefined,
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
@@ -138,7 +142,7 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
       { type: 'image' as const, path: '/path/to/image.jpg', imageBuffer: new ArrayBuffer(10) }
     ];
     await llm.execute(parts);
-    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(parts, undefined);
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(parts, undefined, undefined);
   });
 
   it('should strip file:// prefix from paths in execute parts before forwarding to native execute', async () => {
@@ -148,6 +152,6 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     await llm.execute(parts);
     expect(mockLiteRTLM.execute).toHaveBeenCalledWith([
       { type: 'image' as const, path: '/path/to/image.jpg', imageBuffer: expect.any(ArrayBuffer) }
-    ], undefined);
+    ], undefined, undefined);
   });
 });

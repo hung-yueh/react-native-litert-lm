@@ -37,14 +37,18 @@ extension HybridLiteRTLM {
         onToken: @escaping (_ token: String, _ done: Bool) -> Void
     ) throws -> Promise<Void> {
         let voidPromise = Promise<Void>()
-        let resultPromise = try execute(parts: parts, onToken: onToken)
+        let resultPromise = try execute(parts: parts, onToken: onToken, options: nil)
         resultPromise
             .then { _ in voidPromise.resolve() }
             .catch { voidPromise.reject(withError: $0) }
         return voidPromise
     }
 
-    public func execute(parts: [MultimodalPart], onToken: ((_ token: String, _ done: Bool) -> Void)?) throws -> Promise<String> {
+    public func execute(
+        parts: [MultimodalPart],
+        onToken: ((_ token: String, _ done: Bool) -> Void)?,
+        options: ExecuteOptions?
+    ) throws -> Promise<String> {
         let promise = Promise<String>()
 
         // Preprocess all JSI-bound data on the caller thread synchronously
@@ -95,7 +99,8 @@ extension HybridLiteRTLM {
                     userLabel: userLabel,
                     onToken: onToken,
                     promise: promise,
-                    cleanup: cleanup
+                    cleanup: cleanup,
+                    options: options
                 )
             } else {
                 self.runExecuteBlocking(
@@ -103,7 +108,8 @@ extension HybridLiteRTLM {
                     msgJson: msgJson,
                     userLabel: userLabel,
                     promise: promise,
-                    cleanup: cleanup
+                    cleanup: cleanup,
+                    options: options
                 )
             }
         }
@@ -215,15 +221,35 @@ extension HybridLiteRTLM {
 
     // MARK: - Streaming / blocking runners
 
+    /// Build v0.14 per-message optional args from ExecuteOptions.
+    /// Caller must free the result with `litert_lm_conversation_optional_args_delete`.
+    func makeOptionalArgs(_ options: ExecuteOptions?) -> OpaquePointer? {
+        guard let options = options,
+              options.maxOutputTokens != nil || options.visualTokenBudget != nil,
+              let args = litert_lm_conversation_optional_args_create() else {
+            return nil
+        }
+        if let maxOut = options.maxOutputTokens {
+            litert_lm_conversation_optional_args_set_max_output_tokens(args, Int32(maxOut))
+        }
+        if let budget = options.visualTokenBudget {
+            litert_lm_conversation_optional_args_set_visual_token_budget(args, Int32(budget))
+        }
+        return args
+    }
+
     private func runExecuteBlocking(
         conversation: OpaquePointer,
         msgJson: String,
         userLabel: String,
         promise: Promise<String>,
-        cleanup: @escaping () -> Void
+        cleanup: @escaping () -> Void,
+        options: ExecuteOptions?
     ) {
         let startTime = Date()
-        guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, nil) else {
+        let optionalArgs = makeOptionalArgs(options)
+        defer { if let optionalArgs = optionalArgs { litert_lm_conversation_optional_args_delete(optionalArgs) } }
+        guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, optionalArgs) else {
             cleanup()
             promise.reject(withError: NSError(domain: "LiteRTLM", code: 500,
                 userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: execute failed."]))

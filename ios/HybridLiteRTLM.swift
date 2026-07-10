@@ -55,13 +55,31 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
     private var enableSpeculativeDecoding: Bool = false
-    
-    /// Approximate model weight size to inform the JS engine's garbage collection.
+    private var numThreads: Int?
+    private var prefillChunkSize: Int?
+    private var activationDataType: ActivationDataType?
+    private var loraPath: String?
+    private var audioLoraPath: String?
+    private var loraRank: Int?
+    private var streamToolCalls: Bool = false
+    private var toolCallChannelName: String = "tool_call"
+
+    /// Size of the loaded model file in bytes (0 when unloaded).
+    /// Read lock-free from `memorySize` (GC may query mid-load; a stale read
+    /// is harmless, blocking the JS thread behind a model load is not).
+    private var loadedModelSizeBytes: Int = 0
+
+    /// OS memory-pressure listener (DISPATCH_SOURCE_TYPE_MEMORYPRESSURE).
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Void)?
+
+    /// Actual model weight size to inform the JS engine's garbage collection.
     public var memorySize: Int {
-        return 1024 * 1024 * 1024 // ~1GB proxy
+        return loadedModelSizeBytes
     }
-    
+
     deinit {
+        stopMemoryPressureMonitoring()
         closeInternal()
     }
     
@@ -142,8 +160,64 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
+    public func getContextTokenCount() throws -> Double {
+        return queue.sync {
+            guard let conversation = self.conversation else { return -1.0 }
+            return Double(litert_lm_conversation_get_token_count(conversation))
+        }
+    }
+
+    public func unload() throws -> Promise<Void> {
+        let promise = Promise<Void>()
+        queue.async {
+            self.closeInternal()
+            promise.resolve()
+        }
+        return promise
+    }
+
+    public func setMemoryWarningCallback(
+        onWarning: @escaping (_ level: MemoryWarningLevel, _ usage: MemoryUsage) -> Void
+    ) throws {
+        queue.sync {
+            self.memoryWarningCallback = onWarning
+            self.startMemoryPressureMonitoring()
+        }
+    }
+
+    public func clearMemoryWarningCallback() throws {
+        queue.sync {
+            self.memoryWarningCallback = nil
+            self.stopMemoryPressureMonitoring()
+        }
+    }
+
+    /// Must be called on `queue`.
+    private func startMemoryPressureMonitoring() {
+        guard memoryPressureSource == nil else { return }
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical], queue: queue)
+        source.setEventHandler { [weak self] in
+            guard let self = self, let callback = self.memoryWarningCallback else { return }
+            let event = source.data
+            let level: MemoryWarningLevel = event.contains(.critical) ? .critical : .moderate
+            if let usage = try? self.getMemoryUsage() {
+                callback(level, usage)
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    private func stopMemoryPressureMonitoring() {
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
+    }
+
     public func close() throws {
         queue.sync {
+            self.memoryWarningCallback = nil
+            self.stopMemoryPressureMonitoring()
             closeInternal()
         }
     }
@@ -175,9 +249,25 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
                 self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
+                self.numThreads = config.numThreads.map { Int($0) }
+                self.prefillChunkSize = config.prefillChunkSize.map { Int($0) }
+                self.activationDataType = config.activationDataType
+                self.loraPath = config.loraPath
+                self.audioLoraPath = config.audioLoraPath
+                self.loraRank = config.loraRank.map { Int($0) }
+                self.streamToolCalls = config.streamToolCalls ?? false
+                if let ch = config.toolCallChannelName { self.toolCallChannelName = ch }
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
+                self.numThreads = nil
+                self.prefillChunkSize = nil
+                self.activationDataType = nil
+                self.loraPath = nil
+                self.audioLoraPath = nil
+                self.loraRank = nil
+                self.streamToolCalls = false
+                self.toolCallChannelName = "tool_call"
             }
             
             // Map main backend string
@@ -210,7 +300,26 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 
                 litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxContextTokens))
                 litert_lm_engine_settings_enable_benchmark(s)
-                
+
+                // Memory tuning knobs (v0.14 C API)
+                if let threads = self.numThreads {
+                    litert_lm_engine_settings_set_num_threads(s, Int32(threads))
+                }
+                if let chunk = self.prefillChunkSize {
+                    litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk))
+                }
+                if let adt = self.activationDataType {
+                    // Enum raw values match the C API: 0=F32, 1=F16, 2=I16, 3=I8
+                    litert_lm_engine_settings_set_activation_data_type(s, Int32(adt.rawValue))
+                }
+                if let rank = self.loraRank {
+                    litert_lm_engine_settings_set_lora_rank(s, Int32(rank))
+                    var ranks: [Int32] = [Int32(rank)]
+                    _ = ranks.withUnsafeBufferPointer { buf in
+                        litert_lm_engine_settings_set_supported_lora_ranks(s, buf.baseAddress, 1)
+                    }
+                }
+
                 if self.enableSpeculativeDecoding {
                     if let loadedFile = litert_lm_loaded_file_create((modelPath as NSString).utf8String) {
                         let hasMtp = litert_lm_loaded_file_has_speculative_decoding_support(loadedFile)
@@ -265,6 +374,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             self.engine = engine
             self.createNewConversation()
             self.loadedModelPath = modelPath
+            self.loadedModelSizeBytes =
+                (try? FileManager.default.attributesOfItem(atPath: modelPath)[.size] as? Int).flatMap { $0 } ?? 0
             
             guard self.conversation != nil else {
                 self.closeInternal()
@@ -281,7 +392,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     // Legacy inference — shapes mirror src/inferenceRouting.ts; JS createLLM routes via execute.
     public func sendMessage(message: String) throws -> Promise<String> {
-        try execute(parts: [.textPart(message)], onToken: nil)
+        try execute(parts: [.textPart(message)], onToken: nil, options: nil)
     }
 
     public func sendMessageAsync(
@@ -292,7 +403,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
 
     public func sendMessageWithImage(message: String, imagePath: String) throws -> Promise<String> {
-        try execute(parts: [.textPart(message), .imagePart(imagePath)], onToken: nil)
+        try execute(parts: [.textPart(message), .imagePart(imagePath)], onToken: nil, options: nil)
     }
 
     public func sendMessageWithImageAsync(
@@ -310,11 +421,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
 
     public func sendMessageWithAudio(message: String, audioPath: String) throws -> Promise<String> {
-        try execute(parts: [.textPart(message), .audioPart(audioPath)], onToken: nil)
+        try execute(parts: [.textPart(message), .audioPart(audioPath)], onToken: nil, options: nil)
     }
 
     public func sendMultimodalMessage(parts: [MultimodalPart]) throws -> Promise<String> {
-        try execute(parts: parts, onToken: nil)
+        try execute(parts: parts, onToken: nil, options: nil)
     }
 
     public func downloadModel(
@@ -371,17 +482,36 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
         
-        var sampler = LiteRtLmSamplerParams()
-        sampler.type = kLiteRtLmSamplerTypeTopP
-        sampler.top_k = Int32(self.topK)
-        sampler.top_p = Float(self.topP)
-        sampler.temperature = Float(self.temperature)
-        sampler.seed = 0
-        withUnsafePointer(to: &sampler) { samplerPtr in
-            litert_lm_session_config_set_sampler_params(sessionConfig, samplerPtr)
+        // v0.14: LiteRtLmSamplerParams is an opaque handle (create/set/delete)
+        if let sampler = litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP) {
+            litert_lm_sampler_params_set_top_k(sampler, Int32(self.topK))
+            litert_lm_sampler_params_set_top_p(sampler, Float(self.topP))
+            litert_lm_sampler_params_set_temperature(sampler, Float(self.temperature))
+            litert_lm_sampler_params_set_seed(sampler, 0)
+            litert_lm_session_config_set_sampler_params(sessionConfig, sampler)
+            litert_lm_sampler_params_delete(sampler)
         }
-        
+
+        if let loraPath = self.loraPath {
+            let status = loraPath.withCString { litert_lm_session_config_set_lora_path(sessionConfig, $0) }
+            if status != 0 {
+                NSLog("[LiteRTLM] Failed to set LoRA path (status %d): %@", status, loraPath)
+            }
+        }
+        if let audioLoraPath = self.audioLoraPath {
+            let status = audioLoraPath.withCString { litert_lm_session_config_set_audio_lora_path(sessionConfig, $0) }
+            if status != 0 {
+                NSLog("[LiteRTLM] Failed to set audio LoRA path (status %d): %@", status, audioLoraPath)
+            }
+        }
+
         litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
+
+        if self.streamToolCalls {
+            self.toolCallChannelName.withCString { channelC in
+                litert_lm_conversation_config_set_stream_tool_calls(convConfig, true, channelC)
+            }
+        }
         
         if let systemPrompt = self.systemPrompt {
             let systemMsgJson = "{\"role\":\"system\",\"content\":\"" + escapeJson(systemPrompt) + "\"}"
@@ -415,6 +545,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         isLoaded = false
         history.removeAll()
         loadedModelPath = nil
+        loadedModelSizeBytes = 0
         
         if let conversation = self.conversation {
             litert_lm_conversation_delete(conversation)

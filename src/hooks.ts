@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { LLMConfig } from "./index";
+import { LLMConfig, MemoryWarningLevel } from "./index";
 import { createLLM } from "./modelFactory";
 import type { LiteRTLMInstance } from "./modelFactory";
 import type { MemoryTracker, MemoryTrackerSummary } from "./memoryTracker";
+import type { MemoryEstimate, MemoryForecast } from "./memoryEstimator";
 import { ModelRegistry } from "./modelRegistry";
 import { extractFileName } from "./modelPath";
 
@@ -48,6 +49,22 @@ export interface UseModelResult {
    * Updates automatically after each inference call.
    */
   memorySummary: MemoryTrackerSummary | null;
+  /**
+   * Pre-flight memory estimate for the loaded model (null until loaded).
+   * Refreshed after each load.
+   */
+  memoryEstimate: MemoryEstimate | null;
+  /**
+   * Context-window / KV-cache growth forecast for the active conversation.
+   * Refreshed after each generate() call — watch `nearingLimit` to warn users
+   * before the context (and its memory) runs out.
+   */
+  memoryForecast: MemoryForecast | null;
+  /**
+   * Last OS memory-pressure warning received while this hook was mounted
+   * (null if none). Reset on each successful load.
+   */
+  memoryWarning: MemoryWarningLevel | null;
 }
 
 export function useModel(
@@ -61,6 +78,14 @@ export function useModel(
   const [error, setError] = useState<string | null>(null);
   const [memorySummary, setMemorySummary] =
     useState<MemoryTrackerSummary | null>(null);
+  const [memoryEstimate, setMemoryEstimate] = useState<MemoryEstimate | null>(
+    null,
+  );
+  const [memoryForecast, setMemoryForecast] = useState<MemoryForecast | null>(
+    null,
+  );
+  const [memoryWarning, setMemoryWarning] =
+    useState<MemoryWarningLevel | null>(null);
 
   // Destructure config into primitive values for stable dependency arrays.
   // This prevents infinite re-render loops when consumers pass inline config
@@ -161,6 +186,17 @@ export function useModel(
             setDownloadProgress(progress);
           },
         );
+        // Surface memory intel and subscribe to OS pressure warnings
+        setMemoryWarning(null);
+        setMemoryEstimate(modelRef.current.estimateMemory());
+        setMemoryForecast(modelRef.current.getMemoryForecast());
+        try {
+          modelRef.current.setMemoryWarningCallback((level) => {
+            setMemoryWarning(level);
+          });
+        } catch {
+          // Non-critical — older native builds may not support warnings
+        }
         setIsReady(true);
       }
     } catch (e: any) {
@@ -188,6 +224,7 @@ export function useModel(
           undefined
         );
         refreshMemorySummary();
+        setMemoryForecast(modelRef.current.getMemoryForecast());
         return response;
       } catch (e: any) {
         setError(e.message || "Generation failed");
@@ -227,5 +264,8 @@ export function useModel(
     load,
     memoryTracker: modelRef.current?.memoryTracker ?? null,
     memorySummary,
+    memoryEstimate,
+    memoryForecast,
+    memoryWarning,
   };
 }

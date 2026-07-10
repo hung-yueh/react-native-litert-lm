@@ -96,12 +96,19 @@ export const mockLiteRTLM = {
     availableMemoryBytes: 4000000,
     isLowMemory: false,
   })),
+  getContextTokenCount: jest.fn(() => 128),
+  unload: jest.fn().mockResolvedValue(undefined),
+  setMemoryWarningCallback: jest.fn(),
+  clearMemoryWarningCallback: jest.fn(),
   close: jest.fn(),
 };
 
 export const mockModelStore = {
   isCached: jest.fn((fileName: string) => false),
   getFilePath: jest.fn((fileName: string) => `/mock/path/${fileName}`),
+  // -1 = "file not found": legacy tests skip the pre-flight memory check.
+  // Estimator behavior is covered directly in memoryEstimator.test.ts.
+  getFileSizeBytes: jest.fn((_absolutePath: string) => -1),
   listCachedFiles: jest.fn(() => []),
   deleteFile: jest.fn((fileName: string) => {
     return mockLiteRTLM.deleteModel(fileName);

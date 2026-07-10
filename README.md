@@ -12,6 +12,9 @@ High-performance on-device LLM inference for React Native, powered by [LiteRT-LM
 - 🏎️ **GPU Acceleration** — Metal (iOS), OpenCL GPU delegate (Android, Pixel devices).
 - 🔄 **Streaming Support** — Non-blocking token-by-token callbacks.
 - 📊 **Real Memory Tracking** — OS-level memory metrics (RSS, native heap, available memory) via native APIs (complying with User Rule #3).
+- 🛡️ **Crash-Free Memory Controls** — Pre-flight memory estimation (`loadModel` rejects with a typed `MemoryError` instead of letting the OS kill your app), context/KV-cache forecasting, OS memory-pressure warnings, memory budgets, and deterministic `unload()`.
+- 🧩 **Typed Streaming Events** — `executeWithEvents()` splits the stream into `token` / `toolCall` / `thinking` events (LiteRT-LM v0.14 streaming tool calls).
+- 🎛️ **Memory Tuning Knobs** — `maxContextTokens`, `numThreads`, `prefillChunkSize`, `activationDataType`, per-message `maxOutputTokens`, and LoRA adapters (`loraPath`).
 - 📥 **Automatic Model Download** — Downloads models from URL with progress tracking and local caching.
 
 ## Demo
@@ -363,6 +366,112 @@ tracker.record({
 // Access the underlying native buffer (zero-copy transfer to native code)
 const buffer = tracker.getNativeBuffer();
 ```
+
+### Memory Controls (Crash-Free Loading)
+
+On-device LLMs are the easiest way to get your app OOM-killed. The memory
+controls make "will this fit?" a first-class, testable question.
+
+#### Pre-flight estimation
+
+`loadModel()` automatically estimates weights + KV cache + overhead against
+the OS-reported headroom (jetsam-aware `os_proc_available_memory` on iOS,
+`ActivityManager.MemoryInfo` on Android) and **rejects with a typed
+`MemoryError` instead of crashing**:
+
+```typescript
+import { isMemoryError } from "react-native-litert-lm";
+
+try {
+  await llm.loadModel(modelUrl, { maxContextTokens: 8192 });
+} catch (e) {
+  if (isMemoryError(e)) {
+    console.log(e.estimate.verdict); // 'critical'
+    console.log(e.estimate.recommendation); // what to do about it
+    // e.g. retry with a smaller context:
+    await llm.loadModel(modelUrl, { maxContextTokens: 2048 });
+  }
+}
+
+// Or check before downloading anything:
+import { estimateMemory } from "react-native-litert-lm";
+const estimate = estimateMemory({
+  modelFileSizeBytes: 2.58e9,
+  availableMemoryBytes: llm.getMemoryUsage().availableMemoryBytes,
+  config: { backend: "gpu", maxContextTokens: 4096 },
+});
+if (estimate.verdict !== "safe") showSmallerModelSuggestion();
+```
+
+Pass `{ forceLoad: true }` to skip the check.
+
+#### Context / KV-cache forecasting
+
+```typescript
+const forecast = llm.getMemoryForecast();
+// { contextTokensUsed, remainingTokens, contextUsedFraction,
+//   kvCacheBytesUsed, kvCacheBytesRemaining, nearingLimit }
+if (forecast?.nearingLimit) warnUserOrSummarizeHistory();
+```
+
+#### OS memory-pressure warnings & budgets
+
+```typescript
+// Native OS signals (onTrimMemory / dispatch memory-pressure source)
+llm.setMemoryWarningCallback((level, usage) => {
+  if (level === "critical") llm.unload(); // free ~GBs deterministically
+});
+
+// Or app-defined budgets evaluated after each inference
+const llm = createLLM({
+  enableMemoryTracking: true,
+  memoryBudget: {
+    warnAtFraction: 0.75,
+    criticalAtFraction: 0.9,
+    onBudgetExceeded: (level) => console.warn(`memory ${level}`),
+  },
+});
+```
+
+With the `useModel` hook all of this is reactive: `memoryEstimate`,
+`memoryForecast`, and `memoryWarning` are returned alongside `memorySummary`.
+
+#### Memory tuning knobs
+
+| Knob | Effect | Platform |
+| --- | --- | --- |
+| `maxContextTokens` | KV-cache size — the biggest lever | both |
+| `activationDataType: 'f16'` | ~halves activation/KV memory | iOS |
+| `prefillChunkSize` | caps peak prefill activation memory | iOS |
+| `numThreads` | CPU memory-bandwidth pressure | iOS |
+| `execute(..., { maxOutputTokens })` | per-message output cap | iOS |
+| `loraPath` | one base model + small adapters | both |
+
+### Typed Streaming Events (Tool Calls & Thinking)
+
+With `streamToolCalls: true` (LiteRT-LM v0.14+), tool-call tokens stream in
+real time wrapped in channel markers. `executeWithEvents()` parses them into
+typed events:
+
+```typescript
+await llm.loadModel(modelUrl, { tools, streamToolCalls: true });
+
+await llm.executeWithEvents(
+  [{ type: "text", text: "What's the weather in Tokyo?" }],
+  (event) => {
+    switch (event.type) {
+      case "token":    ui.appendText(event.text); break;
+      case "toolCall": toolBuffer += event.text; break;
+      case "thinking": ui.showReasoning(event.text); break;
+    }
+    if (event.done) runTool(JSON.parse(toolBuffer));
+  },
+);
+```
+
+Channel markers default to `<tool_call>…</tool_call>` /
+`<thinking>…</thinking>` and are configurable via
+`createLLM({ streamChannels })` for models with different delimiters.
 
 ## Supported Models
 

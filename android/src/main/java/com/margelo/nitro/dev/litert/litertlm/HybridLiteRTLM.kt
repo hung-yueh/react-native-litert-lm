@@ -31,8 +31,12 @@ import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.LoraConfig
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.ToolProvider
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
+import java.io.File
 
 
 
@@ -112,9 +116,19 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
+    private var loraPath: String? = null
+    private var audioLoraPath: String? = null
+
+    /** Size of the loaded model file in bytes (0 when unloaded). */
+    @Volatile
+    private var loadedModelSizeBytes: Long = 0L
+
+    /** OS memory-pressure listener registered on the application context. */
+    private var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Unit)? = null
+    private var componentCallbacks: ComponentCallbacks2? = null
 
     override val memorySize: Long
-        get() = 1024L * 1024L * 1024L // ~1GB (models are large)
+        get() = loadedModelSizeBytes
 
     // -------------------------------------------------------------------------
     // loadModel - Initialize LiteRT-LM Engine and Conversation
@@ -152,6 +166,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.systemPrompt?.let { systemPrompt = it }
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                    loraPath = cfg.loraPath
+                    audioLoraPath = cfg.audioLoraPath
+                    // numThreads / prefillChunkSize / activationDataType / loraRank are
+                    // iOS-only: the Kotlin SDK does not expose them (see LLMConfig docs).
                 }
     
                 try {
@@ -303,6 +321,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     createNewConversation()
                     Log.i(TAG, "Conversation created successfully")
                     loadedModelPath = modelPath
+                    loadedModelSizeBytes = try { File(modelPath).length() } catch (_: Exception) { 0L }
     
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to load model: ${e.message}", e)
@@ -316,7 +335,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
     // Legacy inference — shapes mirror src/inferenceRouting.ts; JS createLLM routes via execute.
     override fun sendMessage(message: String): Promise<String> =
-        execute(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = null)
+        execute(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = null, options = null)
 
     override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
         executeVoid(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = onToken)
@@ -369,12 +388,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         execute(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
             onToken = null,
+            options = null,
         )
 
     override fun sendMessageWithImageAsync(message: String, imagePath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
         executeVoid(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
             onToken = onToken,
+            options = null,
         )
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
@@ -397,12 +418,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         executeVoid(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
             onToken = onToken,
+            options = null,
         )
 
     override fun sendMessageWithAudio(message: String, audioPath: String): Promise<String> =
         execute(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
             onToken = null,
+            options = null,
         )
 
     // -------------------------------------------------------------------------
@@ -478,9 +501,85 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
     }
 
+    @OptIn(ExperimentalApi::class)
+    override fun getContextTokenCount(): Double {
+        return try {
+            conversation?.tokenCount?.toDouble() ?: -1.0
+        } catch (e: Exception) {
+            Log.w(TAG, "getContextTokenCount failed: ${e.message}")
+            -1.0
+        }
+    }
+
+    override fun unload(): Promise<Unit> {
+        return Promise.parallel {
+            Log.d(TAG, "Unloading model (instance stays reusable)")
+            cleanupInternal()
+        }
+    }
+
+    override fun setMemoryWarningCallback(onWarning: (MemoryWarningLevel, MemoryUsage) -> Unit) {
+        synchronized(initLock) {
+            memoryWarningCallback = onWarning
+            if (componentCallbacks == null) {
+                val context = LiteRTLMInitProvider.applicationContext
+                if (context == null) {
+                    Log.w(TAG, "setMemoryWarningCallback: no application context available")
+                    return
+                }
+                val callbacks = object : ComponentCallbacks2 {
+                    override fun onTrimMemory(level: Int) {
+                        val cb = memoryWarningCallback ?: return
+                        val warningLevel = when {
+                            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> MemoryWarningLevel.CRITICAL
+                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> MemoryWarningLevel.CRITICAL
+                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> MemoryWarningLevel.MODERATE
+                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> MemoryWarningLevel.MODERATE
+                            else -> return
+                        }
+                        try {
+                            cb(warningLevel, getMemoryUsage())
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Memory warning callback failed: ${e.message}")
+                        }
+                    }
+
+                    override fun onConfigurationChanged(newConfig: Configuration) {}
+
+                    @Deprecated("Deprecated in ComponentCallbacks")
+                    override fun onLowMemory() {
+                        val cb = memoryWarningCallback ?: return
+                        try {
+                            cb(MemoryWarningLevel.CRITICAL, getMemoryUsage())
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Memory warning callback failed: ${e.message}")
+                        }
+                    }
+                }
+                context.registerComponentCallbacks(callbacks)
+                componentCallbacks = callbacks
+            }
+        }
+    }
+
+    override fun clearMemoryWarningCallback() {
+        synchronized(initLock) {
+            memoryWarningCallback = null
+            componentCallbacks?.let { callbacks ->
+                try {
+                    LiteRTLMInitProvider.applicationContext?.unregisterComponentCallbacks(callbacks)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to unregister component callbacks: ${e.message}")
+                }
+            }
+            componentCallbacks = null
+        }
+    }
+
     override fun close() {
         Log.d(TAG, "Closing resources")
         isClosed = true
+        clearMemoryWarningCallback()
         cleanupInternal()
     }
 
@@ -490,8 +589,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 conversation?.close()
                 conversation = null
                 engine?.close()        // Direct call
-                engine = null 
+                engine = null
                 loadedModelPath = null
+                loadedModelSizeBytes = 0L
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing resources", e)
             }
@@ -537,7 +637,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 temperature = temperature.toDouble(),
             ),
             systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
-            tools = lmTools ?: emptyList()
+            tools = lmTools ?: emptyList(),
+            loraConfig = if (loraPath != null || audioLoraPath != null) {
+                LoraConfig(loraPath, audioLoraPath)
+            } else {
+                null
+            },
         )
         // TODO: maxOutputTokens is not configurable on Android — the Kotlin SDK's
         // ConversationConfig does not expose this parameter. Only EngineConfig.maxNumTokens
@@ -556,7 +661,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
 
     override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<String> {
-        return execute(parts = parts, onToken = null)
+        return execute(parts = parts, onToken = null, options = null)
     }
 
     /** Streaming adapter for legacy `Promise<Unit>` APIs — all inference runs through [execute]. */
@@ -566,7 +671,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     ): Promise<Unit> {
         val voidPromise = Promise<Unit>()
         try {
-            execute(parts, onToken)
+            execute(parts, onToken, null)
                 .then { voidPromise.resolve(Unit) }
                 .catch { voidPromise.reject(it) }
         } catch (e: Throwable) {
@@ -582,7 +687,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         val bytes: ByteArray?
     )
 
-    override fun execute(parts: Array<MultimodalPart>, onToken: ((token: String, done: Boolean) -> Unit)?): Promise<String> {
+    override fun execute(
+        parts: Array<MultimodalPart>,
+        onToken: ((token: String, done: Boolean) -> Unit)?,
+        options: ExecuteOptions?,
+    ): Promise<String> {
+        // Per-message options (maxOutputTokens, visualTokenBudget) are iOS-only:
+        // the Kotlin SDK's sendMessage does not accept per-message args.
+        if (options?.maxOutputTokens != null || options?.visualTokenBudget != null) {
+            Log.w(TAG, "execute options (maxOutputTokens/visualTokenBudget) are not supported on Android — session defaults apply")
+        }
         // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
         val preprocessed = parts.map { part ->
             val bytes = when (part.type) {

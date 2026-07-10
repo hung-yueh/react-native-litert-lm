@@ -1,0 +1,44 @@
+name: Test
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Typecheck, Lint, Unit Tests
+    runs-on: ubuntu-latest
+    env:
+      SKIP_IOS_FRAMEWORK_DOWNLOAD: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (with coverage thresholds)
+        run: npm test
+
+      - name: Nitrogen codegen drift check
+        run: |
+          npm run specs
+          if ! git diff --quiet -- nitrogen/generated; then
+            echo "::error::nitrogen/generated is out of date. Run 'npx nitrogen' and commit the result."
+            git diff --stat -- nitrogen/generated
+            exit 1
+          fi
+
+      - name: Framework release guardrail
+        run: npm run check-framework-release

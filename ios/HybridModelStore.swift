@@ -45,6 +45,14 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         try sanitizeFileName(fileName)
         return (modelsDirectory as NSString).appendingPathComponent(fileName)
     }
+
+    public func getFileSizeBytes(absolutePath: String) throws -> Double {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: absolutePath)
+        if let size = attrs?[.size] as? UInt64 {
+            return Double(size)
+        }
+        return -1.0
+    }
     
     public func listCachedFiles() throws -> [ModelFile] {
         let fileManager = FileManager.default

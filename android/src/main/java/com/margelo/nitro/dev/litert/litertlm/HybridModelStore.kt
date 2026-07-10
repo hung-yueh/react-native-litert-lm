@@ -45,6 +45,15 @@ class HybridModelStore : HybridModelStoreSpec() {
         return File(modelsDirectory, fileName).absolutePath
     }
 
+    override fun getFileSizeBytes(absolutePath: String): Double {
+        return try {
+            val file = File(absolutePath)
+            if (file.exists() && file.isFile) file.length().toDouble() else -1.0
+        } catch (e: Exception) {
+            -1.0
+        }
+    }
+
     override fun listCachedFiles(): Array<ModelFile> {
         return try {
             val dir = modelsDirectory

@@ -54,10 +54,17 @@ const BYTES_PER_FIELD = Float64Array.BYTES_PER_ELEMENT; // 8
 export interface MemoryTracker {
   /**
    * Record a new memory snapshot.
+   * The tracker is a ring buffer: when full, the oldest snapshot is
+   * overwritten so long-running sessions keep the most recent history.
    * @param snapshot The memory usage data to record
-   * @returns true if recorded, false if buffer is full
+   * @returns always true (kept for backward compatibility)
    */
   record(snapshot: MemorySnapshot): boolean;
+
+  /**
+   * Total snapshots ever recorded (may exceed capacity once wrapped).
+   */
+  getTotalRecorded(): number;
 
   /**
    * Get all recorded snapshots as structured objects.
@@ -143,40 +150,53 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
   const nativeBuffer = NitroModules.createNativeArrayBuffer(bufferSize);
   const view = new Float64Array(nativeBuffer);
 
-  let currentIndex = 0;
+  // Ring buffer state: `totalRecorded` grows forever; the physical slot for
+  // logical entry i (0 = oldest retained) is derived from it.
+  let totalRecorded = 0;
+
+  const count = () => Math.min(totalRecorded, maxSnapshots);
+  /** Physical slot offset of logical (chronological) index i. */
+  const offsetOf = (i: number): number => {
+    const start = totalRecorded > maxSnapshots ? totalRecorded % maxSnapshots : 0;
+    return ((start + i) % maxSnapshots) * FIELDS_PER_SNAPSHOT;
+  };
+
+  const snapshotAt = (i: number): MemorySnapshot => {
+    const offset = offsetOf(i);
+    return {
+      timestamp: view[offset]!,
+      nativeHeapBytes: view[offset + 1]!,
+      residentBytes: view[offset + 2]!,
+      availableMemoryBytes: view[offset + 3]!,
+    };
+  };
 
   return {
     record(snapshot: MemorySnapshot): boolean {
-      if (currentIndex >= maxSnapshots) {
-        return false;
-      }
-
-      const offset = currentIndex * FIELDS_PER_SNAPSHOT;
+      const offset = (totalRecorded % maxSnapshots) * FIELDS_PER_SNAPSHOT;
       view[offset] = snapshot.timestamp;
       view[offset + 1] = snapshot.nativeHeapBytes;
       view[offset + 2] = snapshot.residentBytes;
       view[offset + 3] = snapshot.availableMemoryBytes;
-      currentIndex++;
-
+      totalRecorded++;
       return true;
     },
 
     getSnapshots(): MemorySnapshot[] {
+      const n = count();
       const snapshots: MemorySnapshot[] = [];
-      for (let i = 0; i < currentIndex; i++) {
-        const offset = i * FIELDS_PER_SNAPSHOT;
-        snapshots.push({
-          timestamp: view[offset]!,
-          nativeHeapBytes: view[offset + 1]!,
-          residentBytes: view[offset + 2]!,
-          availableMemoryBytes: view[offset + 3]!,
-        });
+      for (let i = 0; i < n; i++) {
+        snapshots.push(snapshotAt(i));
       }
       return snapshots;
     },
 
     getSnapshotCount(): number {
-      return currentIndex;
+      return count();
+    },
+
+    getTotalRecorded(): number {
+      return totalRecorded;
     },
 
     getCapacity(): number {
@@ -184,9 +204,10 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
     },
 
     getPeakMemory(): number {
+      const n = count();
       let peak = 0;
-      for (let i = 0; i < currentIndex; i++) {
-        const rss = view[i * FIELDS_PER_SNAPSHOT + 2]!;
+      for (let i = 0; i < n; i++) {
+        const rss = view[offsetOf(i) + 2]!;
         if (rss > peak) {
           peak = rss;
         }
@@ -195,14 +216,9 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
     },
 
     getLatestSnapshot(): MemorySnapshot | undefined {
-      if (currentIndex === 0) return undefined;
-      const offset = (currentIndex - 1) * FIELDS_PER_SNAPSHOT;
-      return {
-        timestamp: view[offset]!,
-        nativeHeapBytes: view[offset + 1]!,
-        residentBytes: view[offset + 2]!,
-        availableMemoryBytes: view[offset + 3]!,
-      };
+      const n = count();
+      if (n === 0) return undefined;
+      return snapshotAt(n - 1);
     },
 
     getNativeBuffer(): ArrayBuffer {
@@ -215,10 +231,11 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
 
     reset(): void {
       view.fill(0);
-      currentIndex = 0;
+      totalRecorded = 0;
     },
 
     getSummary(): MemoryTrackerSummary {
+      const n = count();
       let peakRss = 0;
       let peakHeap = 0;
       let sumRss = 0;
@@ -226,8 +243,8 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
       let lastRss = 0;
       let lastHeap = 0;
 
-      for (let i = 0; i < currentIndex; i++) {
-        const offset = i * FIELDS_PER_SNAPSHOT;
+      for (let i = 0; i < n; i++) {
+        const offset = offsetOf(i);
         const heap = view[offset + 1]!;
         const rss = view[offset + 2]!;
 
@@ -235,16 +252,16 @@ export function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker {
         if (heap > peakHeap) peakHeap = heap;
         sumRss += rss;
         if (i === 0) firstRss = rss;
-        if (i === currentIndex - 1) {
+        if (i === n - 1) {
           lastRss = rss;
           lastHeap = heap;
         }
       }
 
       return {
-        snapshotCount: currentIndex,
+        snapshotCount: n,
         peakResidentBytes: peakRss,
-        averageResidentBytes: currentIndex > 0 ? sumRss / currentIndex : 0,
+        averageResidentBytes: n > 0 ? sumRss / n : 0,
         currentResidentBytes: lastRss,
         peakNativeHeapBytes: peakHeap,
         currentNativeHeapBytes: lastHeap,
