@@ -125,6 +125,7 @@ jobs:
             -scheme react-native-litert-lm \
             -sdk iphonesimulator \
             -configuration Debug \
+            ONLY_ACTIVE_ARCH=YES \
             build
 
       - name: Perform CodeQL Analysis

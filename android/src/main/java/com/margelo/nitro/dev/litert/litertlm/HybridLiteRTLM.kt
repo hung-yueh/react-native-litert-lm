@@ -395,7 +395,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         executeVoid(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
             onToken = onToken,
-            options = null,
         )
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
@@ -418,7 +417,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         executeVoid(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
             onToken = onToken,
-            options = null,
         )
 
     override fun sendMessageWithAudio(message: String, audioPath: String): Promise<String> =
@@ -504,7 +502,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     @OptIn(ExperimentalApi::class)
     override fun getContextTokenCount(): Double {
         return try {
-            conversation?.tokenCount?.toDouble() ?: -1.0
+            conversation?.sizeInTokens?.toDouble() ?: -1.0
         } catch (e: Exception) {
             Log.w(TAG, "getContextTokenCount failed: ${e.message}")
             -1.0
