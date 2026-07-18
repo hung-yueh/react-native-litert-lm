@@ -499,14 +499,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
     }
 
-    @OptIn(ExperimentalApi::class)
     override fun getContextTokenCount(): Double {
-        return try {
-            conversation?.sizeInTokens?.toDouble() ?: -1.0
-        } catch (e: Exception) {
-            Log.w(TAG, "getContextTokenCount failed: ${e.message}")
-            -1.0
-        }
+        // The LiteRT-LM Kotlin SDK does not expose a conversation-level token
+        // count (the C API has litert_lm_conversation_get_token_count but the
+        // Kotlin wrapper omits it). Return -1 to signal "unknown" — callers
+        // already handle this gracefully.
+        return -1.0
     }
 
     override fun unload(): Promise<Unit> {
