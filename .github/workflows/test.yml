@@ -76,6 +76,10 @@ jobs:
         run: npm install
         working-directory: example
 
+      # nitrogen/generated is codegen output and not checked in
+      - name: Generate Nitro bindings
+        run: npm run specs
+
       # example/android is Expo prebuild output and not checked in
       - name: Generate android project
         run: npx expo prebuild --platform android --no-install
