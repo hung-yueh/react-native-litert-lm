@@ -23,7 +23,6 @@ import {
   estimateMemory,
   checkBackendSupport,
   checkMultimodalSupport,
-  isMemoryError,
   GEMMA_3N_E2B_IT_INT4,
   GEMMA_4_E2B_IT,
   type MemoryEstimate,
@@ -44,8 +43,8 @@ const TEST_AUDIO_ASSET = require("./test.wav");
 const MODELS = {
   gemma3n: {
     label: "Gemma 3n E2B",
-    size: "1.3 GB",
-    sizeBytes: 1_400_000_000,
+    size: "3.7 GB",
+    sizeBytes: 3_655_827_456,
     url: GEMMA_3N_E2B_IT_INT4,
     fileName: "gemma-3n-E2B-it-int4.litertlm",
   },

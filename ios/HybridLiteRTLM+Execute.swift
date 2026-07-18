@@ -78,12 +78,8 @@ extension HybridLiteRTLM {
         let userLabel = preprocessed.map { $0.label }.joined(separator: " ").trimmingCharacters(in: .whitespaces)
 
         queue.async {
-            guard let conversation = self.conversation else {
-                promise.reject(withError: NSError(domain: "LiteRTLM", code: 400,
-                    userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: No model loaded. Call loadModel() first."]))
-                return
-            }
-
+            // Validate and materialize media inputs first so callers get a
+            // specific file-not-found error even when no model is loaded.
             let payload: (json: String, tempFiles: [String])
             do { payload = try self.buildExecutePayload(preprocessed) }
             catch { promise.reject(withError: error); return }
@@ -91,6 +87,13 @@ extension HybridLiteRTLM {
             let msgJson = payload.json
             let tempFiles = payload.tempFiles
             let cleanup = { tempFiles.forEach { try? FileManager.default.removeItem(atPath: $0) } }
+
+            guard let conversation = self.conversation else {
+                cleanup()
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 400,
+                    userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: No model loaded. Call loadModel() first."]))
+                return
+            }
 
             if let onToken = onToken {
                 self.runExecuteStreaming(
@@ -190,13 +193,19 @@ extension HybridLiteRTLM {
         return (jsonString, temps)
     }
 
-    private func scaleImageIfNeeded(_ imagePath: String, maxDimension: Int = 1024) -> String {
+    // internal (not private) so unit tests can exercise the scaling path directly
+    func scaleImageIfNeeded(_ imagePath: String, maxDimension: Int = 1024) -> String {
         guard let image = UIImage(contentsOfFile: imagePath) else { return imagePath }
         let w = Int(image.size.width), h = Int(image.size.height)
         guard max(w, h) > maxDimension else { return imagePath }
         let scale = CGFloat(maxDimension) / CGFloat(max(w, h))
         let newSize = CGSize(width: CGFloat(w) * scale, height: CGFloat(h) * scale)
-        let renderer = UIGraphicsImageRenderer(size: newSize)
+        // Force scale 1: the default renderer format uses the device screen
+        // scale (2–3×), which would emit up to 3072px for a 1024pt target and
+        // defeat the downscale entirely.
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
         let scaled = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
         let tmp = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("litert_scaled_\(UUID().uuidString).jpg")

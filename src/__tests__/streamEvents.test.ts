@@ -111,6 +111,59 @@ describe("createStreamEventParser — channel extraction", () => {
   });
 });
 
+describe("createStreamEventParser — adversarial inputs", () => {
+  it("treats nested start markers inside a channel as channel content", () => {
+    const events = collect([
+      "<tool_call>a<thinking>b</thinking>c</tool_call>ok",
+    ]);
+    // Inside tool_call only </tool_call> matters; thinking markers are content.
+    expect(textOf(events, "toolCall")).toBe("a<thinking>b</thinking>c");
+    expect(textOf(events, "thinking")).toBe("");
+    expect(textOf(events, "token")).toBe("ok");
+  });
+
+  it("handles an empty channel without emitting spurious events", () => {
+    const events = collect(["before<tool_call></tool_call>after"]);
+    expect(textOf(events, "toolCall")).toBe("");
+    expect(textOf(events, "token")).toBe("beforeafter");
+    expect(events.filter((e) => e.type === "toolCall")).toHaveLength(0);
+  });
+
+  it("holds back a partial END marker inside a channel across chunks", () => {
+    const parser = createStreamEventParser();
+    const events: StreamEvent[] = [];
+    events.push(...parser.push("<tool_call>{\"x\":1}</tool_"));
+    // "</tool_" could complete to "</tool_call>" — must not leak into toolCall text
+    expect(textOf(events, "toolCall")).toBe('{"x":1}');
+    events.push(...parser.push("call>done"));
+    events.push(...parser.finish());
+    expect(textOf(events, "toolCall")).toBe('{"x":1}');
+    expect(textOf(events, "token")).toBe("done");
+  });
+
+  it("keeps a marker-lookalike that never completes inside channel content", () => {
+    const events = collect(["<thinking>a </thin", "ker> b</thinking>c"]);
+    expect(textOf(events, "thinking")).toBe("a </thinker> b");
+    expect(textOf(events, "token")).toBe("c");
+  });
+
+  it("flushes an unterminated thinking channel started in the last chunk", () => {
+    const events = collect(["answer<thinking>never closed"]);
+    expect(textOf(events, "token")).toBe("answer");
+    expect(textOf(events, "thinking")).toBe("never closed");
+    expect(events[events.length - 1]!.done).toBe(true);
+  });
+
+  it("handles back-to-back channels with no plain text between them", () => {
+    const events = collect([
+      "<thinking>t</thinking><tool_call>c</tool_call>",
+    ]);
+    expect(textOf(events, "thinking")).toBe("t");
+    expect(textOf(events, "toolCall")).toBe("c");
+    expect(textOf(events, "token")).toBe("");
+  });
+});
+
 describe("createStreamEventParser — custom channels", () => {
   it("supports custom marker definitions", () => {
     const parser = createStreamEventParser([

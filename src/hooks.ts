@@ -104,6 +104,15 @@ export function useModel(
   const multimodal = config?.multimodal;
   const tools = config?.tools;
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
+  const streamToolCalls = config?.streamToolCalls;
+  const toolCallChannelName = config?.toolCallChannelName;
+  const numThreads = config?.numThreads;
+  const prefillChunkSize = config?.prefillChunkSize;
+  const activationDataType = config?.activationDataType;
+  const loraPath = config?.loraPath;
+  const audioLoraPath = config?.audioLoraPath;
+  const loraRank = config?.loraRank;
+  const forceLoad = config?.forceLoad;
   const toolsKey = tools ? JSON.stringify(tools) : undefined;
 
   // Build a stable config object from the destructured primitives
@@ -122,7 +131,18 @@ export function useModel(
       ...(enableSpeculativeDecoding !== undefined && {
         enableSpeculativeDecoding,
       }),
+      ...(streamToolCalls !== undefined && { streamToolCalls }),
+      ...(toolCallChannelName !== undefined && { toolCallChannelName }),
+      ...(numThreads !== undefined && { numThreads }),
+      ...(prefillChunkSize !== undefined && { prefillChunkSize }),
+      ...(activationDataType !== undefined && { activationDataType }),
+      ...(loraPath !== undefined && { loraPath }),
+      ...(audioLoraPath !== undefined && { audioLoraPath }),
+      ...(loraRank !== undefined && { loraRank }),
+      ...(forceLoad !== undefined && { forceLoad }),
     }),
+    // `tools` is tracked via its serialized `toolsKey` so inline arrays stay stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       backend,
       systemPrompt,
@@ -135,6 +155,15 @@ export function useModel(
       multimodal,
       toolsKey,
       enableSpeculativeDecoding,
+      streamToolCalls,
+      toolCallChannelName,
+      numThreads,
+      prefillChunkSize,
+      activationDataType,
+      loraPath,
+      audioLoraPath,
+      loraRank,
+      forceLoad,
     ],
   );
 

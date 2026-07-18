@@ -58,3 +58,8 @@ ios/Frameworks/
 
 # Documentation
 docs/
+# AI agent instructions & skills (local only)
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+.claude/

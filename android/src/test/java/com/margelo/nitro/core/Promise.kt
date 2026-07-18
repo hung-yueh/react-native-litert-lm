@@ -43,4 +43,37 @@ class Promise<T> {
             callbacks.forEach { it(null, exception) }
         }
     }
+
+    // Mirror the real Nitro Promise continuation API (then/catch return `this`
+    // for chaining) so production code compiled against react-native-nitro-modules
+    // links against this stub under Robolectric.
+    fun then(listener: (result: T) -> Unit): Promise<T> {
+        synchronized(this) {
+            if (isCompleted) {
+                if (error == null) {
+                    @Suppress("UNCHECKED_CAST")
+                    listener(result as T)
+                }
+            } else {
+                callbacks.add { value, err ->
+                    if (err == null) {
+                        @Suppress("UNCHECKED_CAST")
+                        listener(value as T)
+                    }
+                }
+            }
+        }
+        return this
+    }
+
+    fun catch(listener: (throwable: Throwable) -> Unit): Promise<T> {
+        synchronized(this) {
+            if (isCompleted) {
+                error?.let(listener)
+            } else {
+                callbacks.add { _, err -> if (err != null) listener(err) }
+            }
+        }
+        return this
+    }
 }

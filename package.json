@@ -65,7 +65,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "lint": "eslint \"**/*.{js,ts,tsx}\" --fix",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "prepack": "npx nitrogen && npm run build",
     "specs": "npx nitrogen",
     "clean": "rm -rf lib android/build ios/build ios/Frameworks nitrogen/generated",
@@ -82,6 +83,8 @@
     "@types/jest": "^30.0.0",
     "@types/react": "~19.2.10",
     "@types/react-test-renderer": "^19.1.0",
+    "eslint": "^10.7.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "jest": "^30.4.2",
     "react": "^19.2.6",
     "react-native": "^0.85.3",
@@ -90,7 +93,8 @@
     "release-it": "^19.2.4",
     "ts-jest": "^29.4.10",
     "ts-node": "^10.9.2",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.64.0"
   },
   "peerDependencies": {
     "expo": ">=55.0.0",

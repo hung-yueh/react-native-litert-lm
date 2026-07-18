@@ -16,7 +16,7 @@ jest.mock('react-native', () => ({
 
 // Helper to render and test hooks using react-test-renderer
 function renderHook<P, R>(callback: (props: P) => R, initialProps?: P) {
-  let result = { current: null as unknown as R };
+  const result = { current: null as unknown as R };
   
   const TestComponent = ({ props }: { props: P }) => {
     result.current = callback(props);
@@ -175,6 +175,39 @@ describe('useModel React Hook Unit Tests', () => {
     });
   });
 
+  it('should forward streamToolCalls and tuning knobs to loadModel', async () => {
+    let hookResult: any;
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', {
+        autoLoad: true,
+        streamToolCalls: true,
+        toolCallChannelName: 'my_tool_call',
+        numThreads: 4,
+        prefillChunkSize: 256,
+        activationDataType: 'f16',
+        loraPath: '/lora/adapter.bin',
+        audioLoraPath: '/lora/audio.bin',
+        loraRank: 16,
+        forceLoad: true,
+      }));
+    });
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
+    const config = mockLiteRTLM.loadModel.mock.calls[0][1];
+    expect(config).toMatchObject({
+      streamToolCalls: true,
+      toolCallChannelName: 'my_tool_call',
+      numThreads: 4,
+      prefillChunkSize: 256,
+      activationDataType: 'f16',
+      loraPath: '/lora/adapter.bin',
+      audioLoraPath: '/lora/audio.bin',
+      loraRank: 16,
+      forceLoad: true,
+    });
+  });
+
   it('should pass legacy maxTokens through when new fields are not set', async () => {
     let hookResult: any;
 
@@ -213,5 +246,122 @@ describe('useModel React Hook Unit Tests', () => {
       maxContextTokens: 4096,
       maxOutputTokens: 1024,
     });
+  });
+});
+
+describe('useModel lifecycle races', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('closes the instance when unmounted while a load is in flight', async () => {
+    let resolveLoad!: () => void;
+    mockLiteRTLM.loadModel.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveLoad = resolve; }),
+    );
+
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() =>
+        useModel('https://example.com/model.litertlm', { autoLoad: true }),
+      );
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(1);
+    expect(hookResult.result.current.isReady).toBe(false);
+
+    await TestRenderer.act(async () => {
+      hookResult.unmount();
+    });
+    expect(mockLiteRTLM.close).toHaveBeenCalled();
+
+    // Late resolution after unmount must not throw or crash the renderer.
+    await TestRenderer.act(async () => {
+      resolveLoad();
+    });
+  });
+
+  it('reloads when the config changes', async () => {
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(
+        (props: { temperature: number }) =>
+          useModel('https://example.com/model.litertlm', {
+            autoLoad: true,
+            temperature: props.temperature,
+          }),
+        { temperature: 0.5 },
+      );
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(1);
+    expect(mockLiteRTLM.loadModel.mock.calls[0][1]).toMatchObject({ temperature: 0.5 });
+
+    await TestRenderer.act(async () => {
+      hookResult.rerender({ temperature: 0.9 });
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(2);
+    expect(mockLiteRTLM.loadModel.mock.calls[1][1]).toMatchObject({ temperature: 0.9 });
+  });
+
+  it('does not reload when an equivalent inline config is re-rendered', async () => {
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(
+        (props: { tick: number }) => {
+          // Inline object + inline tools array on every render — the hook's
+          // primitive destructuring / toolsKey must keep this stable.
+          void props.tick;
+          return useModel('https://example.com/model.litertlm', {
+            autoLoad: true,
+            temperature: 0.5,
+            tools: [{ name: 't', description: 'd', parametersJson: '{}' }],
+          });
+        },
+        { tick: 1 },
+      );
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(1);
+
+    await TestRenderer.act(async () => {
+      hookResult.rerender({ tick: 2 });
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers from a failed load when load() is retried', async () => {
+    mockLiteRTLM.loadModel.mockRejectedValueOnce(new Error('boom'));
+
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() =>
+        useModel('https://example.com/model.litertlm', { autoLoad: true }),
+      );
+    });
+    expect(hookResult.result.current.error).toBe('boom');
+    expect(hookResult.result.current.isReady).toBe(false);
+
+    await TestRenderer.act(async () => {
+      await hookResult.result.current.load();
+    });
+    expect(hookResult.result.current.error).toBeNull();
+    expect(hookResult.result.current.isReady).toBe(true);
+  });
+
+  it('supports calling load() repeatedly without autoLoad', async () => {
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() =>
+        useModel('https://example.com/model.litertlm', { autoLoad: false }),
+      );
+    });
+    expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
+
+    await TestRenderer.act(async () => {
+      await hookResult.result.current.load();
+    });
+    await TestRenderer.act(async () => {
+      await hookResult.result.current.load();
+    });
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(2);
+    expect(hookResult.result.current.isReady).toBe(true);
   });
 });

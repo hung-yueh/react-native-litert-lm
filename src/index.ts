@@ -1,14 +1,5 @@
-import { NitroModules } from "react-native-nitro-modules";
 import { Platform } from "react-native";
-import type {
-  LiteRTLM,
-  LLMConfig,
-  Message,
-  Backend,
-  Role,
-  GenerationStats,
-  MemoryUsage,
-} from "./specs/LiteRTLM.nitro";
+import type { Backend } from "./specs/LiteRTLM.nitro";
 
 export type {
   LiteRTLM,
@@ -224,8 +215,10 @@ export function checkMultimodalSupport(): string | undefined {
 }
 
 /**
- * Download URL for the Gemma 3n E2B IT INT4 model (~1.3 GB).
+ * Download URL for the Gemma 3n E2B IT INT4 model (~3.66 GB as served).
  * Public — hosted on litert.dev, no authentication required.
+ * Note: on iOS this exceeds the ~2 GB threshold, so the Extended Virtual
+ * Addressing entitlement is required (same as Gemma 4).
  */
 export const GEMMA_3N_E2B_IT_INT4 =
   "https://litert.dev/gemma-3n-E2B-it-int4.litertlm";

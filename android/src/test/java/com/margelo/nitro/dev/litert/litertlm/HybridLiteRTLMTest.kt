@@ -119,4 +119,146 @@ class HybridLiteRTLMTest {
         while (!promise2.isCompleted) { Thread.sleep(10) }
         assertNull(loadedPathField.get(bridge))
     }
+
+    // ── Memory pressure: onTrimMemory → MemoryWarningLevel mapping ──────────
+
+    private fun registeredCallbacks(): android.content.ComponentCallbacks2 {
+        val field = HybridLiteRTLM::class.java.getDeclaredField("componentCallbacks")
+        field.isAccessible = true
+        return field.get(bridge) as android.content.ComponentCallbacks2
+    }
+
+    @Test
+    fun testTrimMemoryLevelMapping() {
+        val received = mutableListOf<MemoryWarningLevel>()
+        bridge.setMemoryWarningCallback { level, usage ->
+            assertTrue(usage.residentBytes >= 0.0)
+            received.add(level)
+        }
+        val callbacks = registeredCallbacks()
+
+        // TRIM_MEMORY_RUNNING_MODERATE (5) / RUNNING_LOW (10) → MODERATE
+        callbacks.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE)
+        callbacks.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW)
+        // RUNNING_CRITICAL (15) and COMPLETE (80) → CRITICAL
+        callbacks.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+        callbacks.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        // Below every threshold → no event
+        callbacks.onTrimMemory(0)
+
+        assertEquals(
+            listOf(
+                MemoryWarningLevel.MODERATE,
+                MemoryWarningLevel.MODERATE,
+                MemoryWarningLevel.CRITICAL,
+                MemoryWarningLevel.CRITICAL,
+            ),
+            received,
+        )
+    }
+
+    @Test
+    fun testLowMemoryMapsToCritical() {
+        val received = mutableListOf<MemoryWarningLevel>()
+        bridge.setMemoryWarningCallback { level, _ -> received.add(level) }
+        @Suppress("DEPRECATION")
+        registeredCallbacks().onLowMemory()
+        assertEquals(listOf(MemoryWarningLevel.CRITICAL), received)
+    }
+
+    @Test
+    fun testClearMemoryWarningCallbackStopsEvents() {
+        val received = mutableListOf<MemoryWarningLevel>()
+        bridge.setMemoryWarningCallback { level, _ -> received.add(level) }
+        val callbacks = registeredCallbacks()
+        bridge.clearMemoryWarningCallback()
+        callbacks.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        assertTrue(received.isEmpty())
+    }
+
+    // ── Config plumbing: loadModel must land config in engine state ─────────
+
+    @Test
+    fun testLoadModelAppliesConfigBeforeEngineCreation() {
+        val config = LLMConfig(
+            systemPrompt = "You are terse.",
+            backend = Backend.CPU,
+            maxContextTokens = 8192.0,
+            maxOutputTokens = 512.0,
+            maxTokens = null,
+            temperature = 0.3,
+            topK = 12.0,
+            topP = 0.8,
+            multimodal = null,
+            tools = null,
+            enableSpeculativeDecoding = true,
+            numThreads = null,
+            prefillChunkSize = null,
+            activationDataType = null,
+            loraPath = "/lora/adapter.bin",
+            audioLoraPath = null,
+            loraRank = null,
+            streamToolCalls = null,
+            toolCallChannelName = null,
+            forceLoad = null,
+        )
+
+        // The model file doesn't exist, so the load rejects — but config is
+        // applied before engine creation and must stick.
+        val promise = bridge.loadModel("/nonexistent/model.litertlm", config)
+        while (!promise.isCompleted) { Thread.sleep(10) }
+        assertNotNull("Load of a nonexistent model should reject", promise.error)
+
+        fun field(name: String): Any? {
+            val f = HybridLiteRTLM::class.java.getDeclaredField(name)
+            f.isAccessible = true
+            return f.get(bridge)
+        }
+        assertEquals("You are terse.", field("systemPrompt"))
+        assertEquals(0.3, field("temperature") as Double, 1e-9)
+        assertEquals(12, field("topK"))
+        assertEquals(0.8, field("topP") as Double, 1e-9)
+        assertEquals(8192, field("maxContextTokens"))
+        assertEquals(512, field("maxOutputTokens"))
+        assertEquals(true, field("enableSpeculativeDecoding"))
+        assertEquals("/lora/adapter.bin", field("loraPath"))
+    }
+
+    // ── Concurrency smoke: overlapping calls must not crash ─────────────────
+
+    @Test
+    fun testConcurrentExecuteAndUnloadDoesNotCrash() {
+        val errors = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val threads = listOf(
+            Thread {
+                repeat(20) {
+                    try {
+                        val p = bridge.sendMessageAsync("hi") { _, _ -> }
+                        while (!p.isCompleted) { Thread.sleep(1) }
+                    } catch (t: Throwable) {
+                        // A "no model loaded" rejection is the expected outcome;
+                        // anything else (NPE, deadlock timeout, JNI crash) is not.
+                        if (t.message?.contains("No model loaded") != true) {
+                            errors.add(t)
+                        }
+                    }
+                }
+            },
+            Thread {
+                repeat(20) {
+                    try {
+                        bridge.unload()
+                        bridge.resetConversation()
+                    } catch (t: Throwable) {
+                        if (t.message?.contains("No model loaded") != true) {
+                            errors.add(t)
+                        }
+                    }
+                }
+            },
+        )
+        threads.forEach { it.start() }
+        threads.forEach { it.join(15_000) }
+        assertTrue("Concurrent execute/unload raised: ${errors.firstOrNull()}", errors.isEmpty())
+    }
 }

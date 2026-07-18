@@ -460,6 +460,9 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     if self.isLoaded {
                         self.closeInternal()
                     }
+                    // The backing file is gone — clear the stale path even if
+                    // no engine was live (closeInternal handles the loaded case).
+                    self.loadedModelPath = nil
                 }
                 promise.resolve()
             } catch {

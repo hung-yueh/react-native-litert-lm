@@ -178,6 +178,14 @@ class HybridModelStore : HybridModelStoreSpec() {
                 input.close()
                 connection.disconnect()
 
+                // A dropped connection can end the read loop early without an
+                // exception — never install a truncated model file.
+                if (contentLength > 0 && totalBytesRead != contentLength) {
+                    throw RuntimeException(
+                        "Incomplete download: got $totalBytesRead of $contentLength bytes"
+                    )
+                }
+
                 // Atomic rename
                 if (tempFile.renameTo(modelFile)) {
                     Log.i(tag, "Download complete and verified at: ${modelFile.absolutePath}")

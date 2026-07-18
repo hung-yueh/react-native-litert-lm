@@ -5,8 +5,8 @@ High-performance **on-device LLM inference** for React Native, powered by [LiteR
 ## Highlights
 
 - 🛡️ **Crash-free memory handling** — pre-flight estimation, live tracking, context forecasting, OS pressure warnings, budgets, and deterministic `unload()`. [See below.](#memory-handling)
-- ⚡ **Zero-copy multimodal** — native `ArrayBuffer` mapped straight to FFI inputs for image/audio, no base64 heap copies.
-- 🧩 **Typed streaming events** — `token` / `toolCall` / `thinking` events (LiteRT-LM v0.14 streaming tool calls).
+- ⚡ **Binary multimodal input** — pass image/audio as native `ArrayBuffer`s, no base64 heap blow-up (buffers are staged to temp files for the engine's file-based API).
+- 🧩 **Typed streaming events** — `token` / `toolCall` / `thinking` events (LiteRT-LM v0.14 streaming tool calls; channel streaming is iOS-only today, Android streams plain tokens).
 - 🏎️ **GPU acceleration** — Metal (iOS), OpenCL delegate (Android/Pixel), with automatic CPU fallback.
 - 🧠 **Speculative decoding & tool calling** — multi-token prediction and JSON-schema function calls.
 - 📥 **Automatic model download** — HTTPS download with progress and local caching.
@@ -115,7 +115,7 @@ const llm = createLLM({ enableMemoryTracking: true, maxMemorySnapshots: 256 });
 const { peakResidentBytes, currentResidentBytes } = llm.memoryTracker!.getSummary();
 ```
 
-`getMemoryForecast()` combines the engine's exact KV-cache token count with the cost model to warn *before* the context window runs out:
+`getMemoryForecast()` combines the engine's KV-cache token count (exact on iOS; approximated on Android, where the SDK doesn't expose tokenizer counts) with the cost model to warn *before* the context window runs out:
 
 ```typescript
 const forecast = llm.getMemoryForecast();
@@ -125,7 +125,7 @@ if (forecast?.nearingLimit) summarizeHistoryOrWarn();
 
 ### 3. React — pressure warnings, budgets & teardown
 
-Subscribe to real OS memory-pressure signals (`onTrimMemory` on Android, dispatch memory-pressure source on iOS), or set app-defined budgets:
+Subscribe to real OS memory-pressure signals (`onTrimMemory` on Android, dispatch memory-pressure source on iOS) — the callback fires with level `'moderate'` or `'critical'` — or set app-defined budgets:
 
 ```typescript
 llm.setMemoryWarningCallback((level, usage) => {
@@ -174,7 +174,7 @@ llm.sendMessageAsync("Tell me a story", (token, done) => {
 
 ### Typed streaming events (tool calls & thinking)
 
-With `streamToolCalls: true` (LiteRT-LM v0.14+), tool-call and reasoning tokens stream inside channel markers. `executeWithEvents()` parses them into typed events:
+With `streamToolCalls: true` (LiteRT-LM v0.14+, **iOS only** — the Android SDK doesn't expose the tool-call channel yet), tool-call and reasoning tokens stream inside channel markers. `executeWithEvents()` parses them into typed events:
 
 ```typescript
 await llm.loadModel(modelUrl, { tools, streamToolCalls: true });
@@ -191,9 +191,9 @@ await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (even
 
 Markers default to `<tool_call>…</tool_call>` / `<thinking>…</thinking>` and are configurable via `createLLM({ streamChannels })`.
 
-### Multimodal (zero-copy)
+### Multimodal (binary buffers)
 
-Native-backed `ArrayBuffer`s map straight to FFI input buffers — no base64 copies:
+Pass native-backed `ArrayBuffer`s directly — no base64 encoding. (Internally the engine's API is file-based, so buffers are staged to temp files that are cleaned up after inference.)
 
 ```typescript
 const buf = await (await fetch(Image.resolveAssetSource(require("./photo.jpg")).uri)).arrayBuffer();
@@ -231,11 +231,11 @@ All exported URLs are **public — no auth required**. Pass any to `useModel()` 
 | --- | --- | --- | --- | --- |
 | `GEMMA_4_E2B_IT` | Gemma 4 E2B (multimodal) | 2.58 GB | 4 GB+ | HuggingFace |
 | `GEMMA_4_E4B_IT` | Gemma 4 E4B (higher quality) | 3.65 GB | 6 GB+ | HuggingFace |
-| `GEMMA_3N_E2B_IT_INT4` | Gemma 3n E2B (int4, multimodal) | ~1.3 GB | 4 GB+ | litert.dev |
+| `GEMMA_3N_E2B_IT_INT4` | Gemma 3n E2B (int4, multimodal) | ~3.66 GB | 6 GB+ | litert.dev |
 
 Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manually from [HuggingFace](https://huggingface.co/litert-community).
 
-> **iOS:** models over ~2 GB need the [Extended Virtual Addressing entitlement](#ios-entitlements). Gemma 3n E2B (~1.3 GB) works without it.
+> **iOS:** models over ~2 GB need the [Extended Virtual Addressing entitlement](#ios-entitlements) — that includes all three models above. For a sub-2 GB option, download Gemma 3 1B manually from [HuggingFace](https://huggingface.co/litert-community).
 
 ## API Reference
 
@@ -250,7 +250,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | `temperature` / `topK` / `topP` | `0.7` / `40` / `0.95` | Sampling |
 | `maxContextTokens` | `4096` | Total KV-cache budget (tokens) |
 | `maxOutputTokens` | `1024` | Max tokens generated per response |
-| `streamToolCalls` | `false` | Emit typed tool-call/thinking events |
+| `streamToolCalls` | `false` | Emit typed tool-call/thinking events (iOS only) |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 
@@ -270,7 +270,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | react-native-nitro-modules | 0.36.0+ |
 | LiteRT-LM engine | 0.14.0 |
 | Android | API 26+, arm64-v8a — CPU (all), GPU (OpenCL/Pixel only), NPU |
-| iOS | 15.0+, arm64 — CPU, GPU (Metal, always available) |
+| iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |
 
 > **Android GPU** requires OpenCL, unavailable on most Samsung/Qualcomm devices — check with `checkBackendSupport('gpu')`; the engine auto-falls back to CPU.
 
@@ -295,18 +295,22 @@ React Native (TypeScript)
    CLiteRTLM.xcframework       litertlm-android AAR
 ```
 
-- **iOS** — native Swift calling the C FFI directly, dispatched on a serial `dev.litert.engine` queue so the JSI thread never blocks; raw pointers are freed deterministically in `deinit`/`close()`/`unload()` for zero leaks. RSS read via `mach_task_basic_info`.
+- **iOS** — native Swift calling the C FFI directly; inference, load, and unload are dispatched on a serial `dev.litert.engine` queue so generation never blocks the JSI thread (lightweight accessors like `getStats()` use a synchronous hop onto that queue). Raw pointers are freed deterministically in `deinit`/`close()`/`unload()` for zero leaks. RSS read via `mach_task_basic_info`.
 - **Android** — stateless Kotlin conforming to `HybridLiteRTLMSpec`, with Proguard keep rules and optional `libOpenCL.so` loading for the GPU delegate.
 
 ## Testing
 
 Multi-tier suite that runs on CI without a device:
 
-- **JS/TS (Jest):** `npm test` — memory estimator (golden values), forecast/budget logic, stream-event parsing, ring-buffer tracker, hook & factory behavior, HTTPS/path-traversal guards.
-- **Android (Robolectric):** `cd example/android && ./gradlew :react-native-litert-lm:testDebugUnitTest`.
-- **iOS (XCTest):** `cd example/ios && xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16'`.
+- **JS/TS (Jest):** `npm test` — memory estimator (golden values), forecast/budget logic, stream-event parsing, ring-buffer tracker, hook & factory behavior, HTTPS guard.
+- **Android (Robolectric):** `cd example/android && ./gradlew :react-native-litert-lm:testDebugUnitTest` — covers path-traversal/HTTPS guards, memory telemetry, and error paths. Requires a JDK 21+ test launcher (the litertlm-android AAR is built for Java 21); Gradle picks one up via toolchain auto-detection, or set `org.gradle.java.installations.paths`.
+- **iOS (XCTest):** the test spec isn't part of Expo's generated Podfile — add `pod 'react-native-litert-lm', :path => '../..', :testspecs => ['Tests']` to `example/ios/Podfile`, run `pod install`, then `cd example/ios && xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6'`.
 
-On-device memory scenarios (OOM prevention, pressure simulation, peak-RSS regression budget) are documented in [`scripts/device-memory-scenarios.md`](scripts/device-memory-scenarios.md).
+The Jest tier also includes a **config-parity contract test** (every `LLMConfig` key must be forwarded by `useModel` or explicitly excluded) and a **device-baseline guardrail** that validates the memory cost model against peak-RSS numbers recorded in [`scripts/memory-baseline.json`](scripts/memory-baseline.json).
+
+**Real inference smoke test (opt-in):** the iOS suite includes an end-to-end generation test, skipped unless you point it at a local model: `LITERTLM_TEST_MODEL=$HOME/models/gemma3-1b.litertlm xcodebuild test …`.
+
+On-device memory scenarios (OOM prevention, pressure simulation, peak-RSS regression budget) are documented in [`scripts/device-memory-scenarios.md`](scripts/device-memory-scenarios.md), and the scripted example-app integration pass lives in [`scripts/e2e-example-flow.md`](scripts/e2e-example-flow.md).
 
 ## Example App
 

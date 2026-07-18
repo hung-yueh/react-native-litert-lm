@@ -170,6 +170,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     audioLoraPath = cfg.audioLoraPath
                     // numThreads / prefillChunkSize / activationDataType / loraRank are
                     // iOS-only: the Kotlin SDK does not expose them (see LLMConfig docs).
+                    if (cfg.streamToolCalls == true) {
+                        Log.w(TAG, "streamToolCalls is not supported on Android: the Kotlin " +
+                            "SDK does not expose the tool-call streaming channel. Typed " +
+                            "toolCall/thinking events require iOS; tokens stream as plain text.")
+                    }
                 }
     
                 try {
@@ -409,6 +414,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 if (engine != null) {
                     cleanupInternal()
                 }
+                // The backing file is gone — clear the stale path even if no
+                // engine was live (cleanupInternal handles the loaded case).
+                loadedModelPath = null
             }
         }
     }

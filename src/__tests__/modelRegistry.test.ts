@@ -70,4 +70,51 @@ describe('ModelRegistry Unit Tests', () => {
     expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
     expect(path).toBe('/local/path/model.bin');
   });
+
+  it('resolveModel should forward progress callbacks from the native store', async () => {
+    mockModelStore.downloadFile.mockImplementationOnce(
+      async (_url: string, _file: string, _headers: string, onProgress: (p: number) => void) => {
+        onProgress(0.25);
+        onProgress(0.5);
+        onProgress(1);
+        return '/downloaded/model.bin';
+      },
+    );
+    const seen: number[] = [];
+    await ModelRegistry.resolveModel('https://example.com/model.bin', {
+      onProgress: (p) => seen.push(p),
+    });
+    expect(seen).toEqual([0.25, 0.5, 1]);
+  });
+
+  it('resolveModel should propagate native download failures', async () => {
+    mockModelStore.downloadFile.mockRejectedValueOnce(new Error('HTTP 404'));
+    await expect(
+      ModelRegistry.resolveModel('https://example.com/missing.bin'),
+    ).rejects.toThrow('HTTP 404');
+  });
+
+  it('resolveModel should reject URLs with no filename component', async () => {
+    await expect(
+      ModelRegistry.resolveModel('https://example.com/models/'),
+    ).rejects.toThrow('Invalid model URL');
+    expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it('resolveModel should default headers to an empty JSON object', async () => {
+    mockModelStore.downloadFile.mockResolvedValueOnce('/downloaded/model.bin');
+    await ModelRegistry.resolveModel('https://example.com/model.bin');
+    expect(mockModelStore.downloadFile).toHaveBeenCalledWith(
+      'https://example.com/model.bin',
+      'model.bin',
+      '{}',
+      expect.any(Function),
+    );
+  });
+
+  it('resolveModel should strip query strings from the cached filename', async () => {
+    mockModelStore.downloadFile.mockResolvedValueOnce('/downloaded/model.bin');
+    await ModelRegistry.resolveModel('https://example.com/model.bin?token=abc&x=1');
+    expect(mockModelStore.downloadFile.mock.calls[0][1]).toBe('model.bin');
+  });
 });

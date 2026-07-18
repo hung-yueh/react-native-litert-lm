@@ -28,6 +28,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint
+        run: npm run lint
+
       - name: Unit tests (with coverage thresholds)
         run: npm test
 
@@ -42,3 +45,37 @@ jobs:
 
       - name: Framework release guardrail
         run: npm run check-framework-release
+
+  android-unit-tests:
+    name: Android Unit Tests (Robolectric)
+    runs-on: ubuntu-latest
+    env:
+      SKIP_IOS_FRAMEWORK_DOWNLOAD: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # litertlm-android is built for Java 21, so the Robolectric test JVM
+      # must be 21+ (see android/build.gradle toolchain block).
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install example dependencies
+        run: npm install
+        working-directory: example
+
+      - name: Run Robolectric unit tests
+        run: ./gradlew :react-native-litert-lm:testDebugUnitTest
+        working-directory: example/android

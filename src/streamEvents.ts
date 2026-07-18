@@ -31,7 +31,7 @@ export interface StreamChannel {
   end: string;
 }
 
-/** Default channel markers (override via `executeWithEvents` options). */
+/** Default channel markers (override via `createLLM({ streamChannels })`). */
 export const DEFAULT_CHANNELS: StreamChannel[] = [
   { type: "toolCall", start: "<tool_call>", end: "</tool_call>" },
   { type: "thinking", start: "<thinking>", end: "</thinking>" },
