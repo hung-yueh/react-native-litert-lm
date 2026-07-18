@@ -76,6 +76,11 @@ jobs:
         run: npm install
         working-directory: example
 
+      # example/android is Expo prebuild output and not checked in
+      - name: Generate android project
+        run: npx expo prebuild --platform android --no-install
+        working-directory: example
+
       - name: Run Robolectric unit tests
         run: ./gradlew :react-native-litert-lm:testDebugUnitTest
         working-directory: example/android
