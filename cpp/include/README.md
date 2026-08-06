@@ -6,11 +6,11 @@ copies pinned to the LiteRT-LM version in `package.json` (`litertLm.version`).
 
 ## If Headers Are Missing
 
-If you get compilation errors like `litert_lm_engine.h: No such file or directory`, re-download the headers (replace `v0.14.0` with the pinned version):
+If you get compilation errors like `litert_lm_engine.h: No such file or directory`, re-download the headers (replace `v0.15.0` with the pinned version):
 
 ```bash
-curl -sL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/v0.14.0/c/engine.h" -o litert_lm_engine.h
-curl -sL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/v0.14.0/schema/capabilities/capabilities_c.h" -o capabilities_c.h
+curl -sL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/v0.15.0/c/engine.h" -o litert_lm_engine.h
+curl -sL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/v0.15.0/schema/capabilities/capabilities_c.h" -o capabilities_c.h
 ```
 
 The expected directory structure:

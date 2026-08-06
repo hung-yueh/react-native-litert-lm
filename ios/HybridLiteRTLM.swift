@@ -286,8 +286,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             
             var rawEngine: OpaquePointer? = nil
             
-            // Set LiteRT C Log Level to WARNING (2) for clean production output
-            litert_lm_set_min_log_level(2)
+            // Set LiteRT C Log Level to WARNING for clean production output.
+            // v0.15: takes a typed LiteRtLmLogSeverity (previously a raw int,
+            // where 2 was INFO — WARNING is the intended level).
+            litert_lm_set_min_log_level(kLiteRtLmLogSeverityWarning)
             
             // Creation helper with scoped FFI pointer lifetime
             let createEngine = { (main: String, vision: String?, audio: String?) -> OpaquePointer? in
@@ -315,8 +317,16 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk))
                 }
                 if let adt = self.activationDataType {
-                    // Enum raw values match the C API: 0=F32, 1=F16, 2=I16, 3=I8
-                    litert_lm_engine_settings_set_activation_data_type(s, Int32(adt.rawValue))
+                    // v0.15: takes a typed LiteRtLmActivationDataType (raw values
+                    // unchanged: 0=F32, 1=F16, 2=I16, 3=I8)
+                    let cType: LiteRtLmActivationDataType
+                    switch adt.rawValue {
+                    case 1: cType = kLiteRtLmActivationDataTypeFloat16
+                    case 2: cType = kLiteRtLmActivationDataTypeInt16
+                    case 3: cType = kLiteRtLmActivationDataTypeInt8
+                    default: cType = kLiteRtLmActivationDataTypeFloat32
+                    }
+                    litert_lm_engine_settings_set_activation_data_type(s, cType)
                 }
                 if let rank = self.loraRank {
                     litert_lm_engine_settings_set_lora_rank(s, Int32(rank))

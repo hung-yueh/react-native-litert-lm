@@ -71,8 +71,13 @@ jobs:
       - name: Compile Swift
         run: |
           WORKSPACE=$(find example/ios -name "*.xcworkspace" -maxdepth 1 | head -1)
+          # CLiteRTLM.xcframework ships an arm64-only simulator slice; a generic
+          # simulator build (arm64 + x86_64) finds no matching slice and the
+          # CLiteRTLM module resolves for neither arch. Same flags as codeql.yml.
           xcodebuild -workspace "$WORKSPACE" \
             -scheme react-native-litert-lm \
             -sdk iphonesimulator \
             -configuration Debug \
+            ARCHS=arm64 \
+            EXCLUDED_ARCHS=x86_64 \
             build

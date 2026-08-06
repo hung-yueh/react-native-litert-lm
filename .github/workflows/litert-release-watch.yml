@@ -63,7 +63,7 @@ jobs:
           {
             echo "Upstream released **${{ steps.compare.outputs.latest_tag }}**; this package pins **v${{ steps.compare.outputs.pinned }}**."
             echo
-            echo "Checklist (see docs/LiteRT-LM v0.14.0 Upgrade.md for the pattern):"
+            echo "Checklist (see docs/LiteRT-LM v0.15.0 Upgrade.md for the pattern):"
             echo "- [ ] Bump \`litertLm\` versions in package.json"
             echo "- [ ] Re-vendor \`cpp/include\` headers"
             echo "- [ ] Refresh \`ios/Frameworks\` via scripts/download-ios-frameworks.sh"

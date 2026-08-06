@@ -647,18 +647,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             } else {
                 null
             },
+            // Available since LiteRT-LM 0.15.0 (previously iOS-only)
+            maxOutputToken = maxOutputTokens,
         )
-        // TODO: maxOutputTokens is not configurable on Android — the Kotlin SDK's
-        // ConversationConfig does not expose this parameter. Only EngineConfig.maxNumTokens
-        // (context budget) is supported. maxOutputTokens is effective on iOS only.
-        //
-        // Upstream is actively adding max_output_tokens across API surfaces:
-        //   - C API:    PR #2470 (merged 2026-06-04)
-        //   - Python:   PR #2476 (merged 2026-06-04)
-        //   - OpenAI:   PR #2433 (in progress)
-        //   - Kotlin:   Not yet available — track at https://github.com/google-ai-edge/LiteRT-LM
-        //
-        // Once the Kotlin SDK exposes this, wire it via ConversationConfig here.
         conversation = engine!!.createConversation(convConfig)
     }
 
@@ -696,10 +687,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         onToken: ((token: String, done: Boolean) -> Unit)?,
         options: ExecuteOptions?,
     ): Promise<String> {
-        // Per-message options (maxOutputTokens, visualTokenBudget) are iOS-only:
-        // the Kotlin SDK's sendMessage does not accept per-message args.
+        // Per-message overrides (maxOutputTokens, visualTokenBudget) are not wired
+        // on Android yet — the session-level maxOutputTokens from LLMConfig applies.
+        // The Kotlin SDK supports per-call maxOutputToken since 0.15.0; wiring it
+        // here is tracked as a follow-up.
         if (options?.maxOutputTokens != null || options?.visualTokenBudget != null) {
-            Log.w(TAG, "execute options (maxOutputTokens/visualTokenBudget) are not supported on Android — session defaults apply")
+            Log.w(TAG, "per-message execute options (maxOutputTokens/visualTokenBudget) are not supported on Android — session config applies")
         }
         // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
         val preprocessed = parts.map { part ->
