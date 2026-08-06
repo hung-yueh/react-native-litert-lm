@@ -37,6 +37,10 @@ Pod::Spec.new do |s|
       '"$(PODS_TARGET_SRCROOT)/nitrogen/generated/ios"',
     ].join(' '),
     'OTHER_LDFLAGS' => '$(inherited) -ObjC',
+    # CLiteRTLM.xcframework has no x86_64 simulator slice (ARM-only policy);
+    # without this, generic simulator builds compile both archs and the
+    # CLiteRTLM module resolves for neither.
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'x86_64',
   }
 
   # Load nitrogen autolinking
