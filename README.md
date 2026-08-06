@@ -268,7 +268,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | --- | --- |
 | React Native | 0.76+ |
 | react-native-nitro-modules | 0.36.0+ |
-| LiteRT-LM engine | 0.14.0 |
+| LiteRT-LM engine | 0.15.0 |
 | Android | API 26+, arm64-v8a — CPU (all), GPU (OpenCL/Pixel only), NPU |
 | iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |
 

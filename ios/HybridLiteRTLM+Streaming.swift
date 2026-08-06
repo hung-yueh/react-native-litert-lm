@@ -65,11 +65,14 @@ extension HybridLiteRTLM {
         )
         let ptr = Unmanaged.passRetained(ctx).toOpaque()
 
-        let cb: LiteRtLmStreamCallback = { ptr, chunk, isFinal, errorMsg in
-            guard let ptr = ptr else { return }
+        // v0.15: the callback receives an opaque LiteRtLmStreamChunk; text,
+        // finality, and errors are read through accessors. The chunk (and any
+        // string it returns) is only valid for the duration of the call.
+        let cb: LiteRtLmStreamCallback = { ptr, chunk in
+            guard let ptr = ptr, let chunk = chunk else { return }
             let ctx = Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).takeUnretainedValue()
 
-            if let errorMsg = errorMsg {
+            if let errorMsg = litert_lm_stream_chunk_get_error(chunk) {
                 let msg = String(cString: errorMsg)
                 ctx.onToken("Error: \(msg)", true)
                 ctx.cleanup()
@@ -79,13 +82,13 @@ extension HybridLiteRTLM {
                 return
             }
 
-            if isFinal {
+            if litert_lm_stream_chunk_is_final(chunk) {
                 ctx.parent.finalizeExecuteStream(ctx: ctx, streamPtr: ptr)
                 return
             }
 
-            if let chunk = chunk {
-                ctx.parent.emitExecuteStreamChunk(ctx: ctx, chunk: chunk)
+            if let text = litert_lm_stream_chunk_get_text(chunk) {
+                ctx.parent.emitExecuteStreamChunk(ctx: ctx, chunk: text)
             }
         }
 
