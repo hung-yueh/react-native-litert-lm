@@ -332,6 +332,11 @@ export interface ExecuteOptions {
   /**
    * Token IDs that must never be generated in this response —
    * their logits are forced to -inf.
+   *
+   * @remarks **iOS only.** Ignored (with a warning) on Android: LiteRT-LM
+   * 0.15.0's `SuppressTokensConfig` JNI binding looks up a Kotlin-mangled
+   * `internal` accessor and aborts the process, so the library refuses to
+   * use it there until upstream fixes the mismatch.
    */
   suppressTokens?: number[];
 

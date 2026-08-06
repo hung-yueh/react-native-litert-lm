@@ -63,7 +63,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         responseSchema: String? = nil,
         responseRegex: String? = nil,
         repetitionPenalty: Double? = nil,
-        noRepeatNgramSize: Double? = nil
+        noRepeatNgramSize: Double? = nil,
+        suppressTokens: [Double]? = nil,
+        thinking: ThinkingOptions? = nil
     ) -> ExecuteOptions {
         ExecuteOptions(
             maxOutputTokens: maxOutputTokens,
@@ -76,8 +78,8 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             penaltyWindowSize: nil,
             noRepeatNgramSize: noRepeatNgramSize,
             noRepeatNgramWindowSize: nil,
-            suppressTokens: nil,
-            thinking: nil
+            suppressTokens: suppressTokens,
+            thinking: thinking
         )
     }
 
@@ -224,13 +226,18 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         let bridge = try await ensureLoaded()
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
 
+        // Includes suppressTokens + thinking, which the C API supports directly
+        // (the Kotlin SDK's SuppressTokensConfig binding is broken upstream in
+        // 0.15.0, so Android ignores that one — see HybridLiteRTLM.kt).
         let response = try await run(
             bridge,
             "Describe the moon in one sentence.",
             options: Self.makeOptions(
                 maxOutputTokens: 48,
                 repetitionPenalty: 1.2,
-                noRepeatNgramSize: 3
+                noRepeatNgramSize: 3,
+                suppressTokens: [128010],
+                thinking: ThinkingOptions(enabled: false, tokenBudget: 0)
             )
         )
         print("[integration] controls response: \(response)")

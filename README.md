@@ -270,9 +270,14 @@ await llm.execute(parts, onToken, {
   presencePenalty: 0.5,            // OpenAI-style subtractive
   frequencyPenalty: 0.3,
   noRepeatNgramSize: 3,            // ban exact 3-gram repeats
-  suppressTokens: [128010],        // token IDs forced to -inf
+  suppressTokens: [128010],        // token IDs forced to -inf (iOS only)
 });
 ```
+
+> `suppressTokens` is **iOS only**. On Android it is ignored with a warning:
+> LiteRT-LM 0.15.0's `SuppressTokensConfig` JNI binding looks up a
+> Kotlin-mangled `internal` accessor and aborts the process, so the library
+> refuses to use it there until upstream fixes it.
 
 Session-wide thinking defaults go in the load config: `loadModel(url, { thinking: { tokenBudget: 1024 } })`.
 Thinking content still streams as typed `thinking` events through `executeWithEvents()`.

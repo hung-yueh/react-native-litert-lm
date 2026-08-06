@@ -20,6 +20,10 @@ android {
     defaultConfig {
         minSdk 26  // LiteRT-LM requires API 26+
         consumerProguardFiles 'consumer-rules.pro'
+        // On-device inference tests (src/androidTest) — Robolectric can't run
+        // the LiteRT-LM engine. Skipped unless a .litertlm bundle is pushed to
+        // the test app's external files dir; see HybridLiteRTLMInstrumentedTest.
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         
         externalNativeBuild {
             cmake {
@@ -65,6 +69,11 @@ android {
     packaging {
         jniLibs {
             keepDebugSymbols.add("**/*.so")
+            // The androidTest APK pulls these from several inputs at once (our
+            // CMake output, ReactAndroid, fbjni). They are the same ABI-compatible
+            // libraries — take the first instead of failing the merge.
+            pickFirsts.add("**/libc++_shared.so")
+            pickFirsts.add("**/libfbjni.so")
         }
     }
     
@@ -114,4 +123,12 @@ dependencies {
     // Local HTTPS server for HybridModelStore download tests
     testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
     testImplementation 'com.squareup.okhttp3:okhttp-tls:4.12.0'
+
+    // On-device instrumented tests (real engine, real model)
+    androidTestImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    // Nitro's Promise goes through fbjni HybridData, whose NativeLoader an RN
+    // app initializes at startup — the test APK does it explicitly.
+    androidTestImplementation 'com.facebook.soloader:nativeloader:0.12.1'
 }
