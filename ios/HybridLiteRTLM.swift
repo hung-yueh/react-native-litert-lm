@@ -576,11 +576,13 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         if let systemPrompt = systemPromptOverride ?? self.systemPrompt {
             // The engine wraps this payload itself ({"role":"system","content":<payload>}),
-            // so pass content only, in the canonical {"type":"text","text":…} form the
-            // upstream engine test uses. The previous {"role":…,"content":…} payload got
-            // double-wrapped and the chat template rendered the prompt as empty.
-            let contentObj: [String: Any] = ["type": "text", "text": systemPrompt]
-            if let data = try? JSONSerialization.data(withJSONObject: contentObj),
+            // so pass content only, as a content-part ARRAY: the Gemma chat template
+            // iterates non-string content as a list of {type, text} parts. (Verified
+            // by integration test: a bare {"type":"text","text":…} object — the form
+            // upstream's engine_test stores — does NOT render; the array form does.
+            // The old {"role":…,"content":…} payload double-wrapped and rendered empty.)
+            let contentParts: [[String: Any]] = [["type": "text", "text": systemPrompt]]
+            if let data = try? JSONSerialization.data(withJSONObject: contentParts),
                let systemMsgJson = String(data: data, encoding: .utf8) {
                 systemMsgJson.withCString { systemMsgC in
                     litert_lm_conversation_config_set_system_message(convConfig, systemMsgC)
@@ -685,18 +687,39 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         }
         do {
             if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
+                var textResult = ""
                 if let content = json["content"] {
                     if let contentString = content as? String {
-                        return stripControlTokens(contentString)
+                        textResult += contentString
                     } else if let contentArray = content as? [[String: Any]] {
-                        var textResult = ""
                         for part in contentArray {
                             if let type = part["type"] as? String, type == "text", let text = part["text"] as? String {
                                 textResult += text
                             }
                         }
-                        return stripControlTokens(textResult)
                     }
+                }
+                // Tool calls arrive as {"role":"assistant","tool_calls":[{"type":
+                // "function","function":{"name":…,"arguments":{…}}}]} (verified on
+                // Gemma 4 E2B). Surface them in the <tool_call>{json}</tool_call>
+                // marker protocol the JS event parser understands instead of
+                // leaking the raw message JSON into the token stream.
+                if let toolCalls = json["tool_calls"] as? [[String: Any]] {
+                    for call in toolCalls {
+                        let function = (call["function"] as? [String: Any]) ?? call
+                        var payload: [String: Any] = [:]
+                        payload["name"] = function["name"] ?? ""
+                        payload["arguments"] = function["arguments"] ?? [String: Any]()
+                        if let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                           let payloadJson = String(data: payloadData, encoding: .utf8) {
+                            textResult += "<tool_call>\(payloadJson)</tool_call>"
+                        }
+                    }
+                }
+                // A message-shaped payload never leaks raw JSON — if it carried
+                // neither text nor tool calls, it contributes nothing.
+                if json["role"] != nil || json["content"] != nil || json["tool_calls"] != nil {
+                    return stripControlTokens(textResult)
                 }
             }
         } catch {}
