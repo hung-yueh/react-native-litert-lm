@@ -95,9 +95,21 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return queue.sync { history }
     }
     
-    public func resetConversation() throws {
+    public func resetConversation(historyJson: String?, systemPrompt: String?) throws {
         queue.sync {
             history.removeAll()
+            // Mirror the replayed transcript into the wrapper's own history so
+            // getHistory() stays truthful for the restored conversation.
+            if let historyJson = historyJson,
+               let data = historyJson.data(using: .utf8),
+               let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                for item in items {
+                    guard let roleStr = item["role"] as? String,
+                          let content = item["content"] as? String else { continue }
+                    let role: Role = roleStr == "model" ? .model : (roleStr == "system" ? .system : .user)
+                    history.append(Message(role: role, content: content))
+                }
+            }
             lastStats = GenerationStats(
                 promptTokens: 0.0,
                 completionTokens: 0.0,
@@ -107,7 +119,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 tokensPerSecond: 0.0
             )
             if isLoaded && engine != nil {
-                createNewConversation()
+                createNewConversation(
+                    initialMessagesJson: historyJson,
+                    systemPromptOverride: systemPrompt
+                )
             }
         }
     }
@@ -491,7 +506,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     // MARK: - Internal Engine Helpers
     
-    private func createNewConversation() {
+    private func createNewConversation(
+        initialMessagesJson: String? = nil,
+        systemPromptOverride: String? = nil
+    ) {
         guard let engine = self.engine else { return }
         
         if let oldConv = self.conversation {
@@ -556,7 +574,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             litert_lm_thinking_config_delete(thinkingConfig)
         }
         
-        if let systemPrompt = self.systemPrompt {
+        if let systemPrompt = systemPromptOverride ?? self.systemPrompt {
             // The engine wraps this payload itself ({"role":"system","content":<payload>}),
             // so pass content only, in the canonical {"type":"text","text":…} form the
             // upstream engine test uses. The previous {"role":…,"content":…} payload got
@@ -567,6 +585,14 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 systemMsgJson.withCString { systemMsgC in
                     litert_lm_conversation_config_set_system_message(convConfig, systemMsgC)
                 }
+            }
+        }
+
+        if let messagesJson = initialMessagesJson, !messagesJson.isEmpty {
+            // Seed the conversation with a prior transcript (multi-conversation
+            // switching). The engine re-prefills these on the next message.
+            messagesJson.withCString { messagesC in
+                litert_lm_conversation_config_set_messages(convConfig, messagesC)
             }
         }
         

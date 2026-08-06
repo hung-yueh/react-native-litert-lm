@@ -277,6 +277,34 @@ await llm.execute(parts, onToken, {
 Session-wide thinking defaults go in the load config: `loadModel(url, { thinking: { tokenBudget: 1024 } })`.
 Thinking content still streams as typed `thinking` events through `executeWithEvents()`.
 
+### Multiple conversations, one engine
+
+`createConversation()` gives you independent chats sharing a single loaded
+model — no double model load, ideal for "New Chat" UIs and agent side-chains:
+
+```typescript
+const support = llm.createConversation({ systemPrompt: 'You are a support agent.' });
+const summarizer = llm.createConversation({ systemPrompt: 'You summarize tersely.' });
+
+await support.execute([{ type: 'text', text: 'My app crashes on launch.' }]);
+await summarizer.execute([{ type: 'text', text: 'Summarize: …' }]); // context switch
+await support.execute([{ type: 'text', text: 'It happens on iOS 18.' }]); // remembers the crash report
+
+support.getHistory();     // this conversation's transcript
+await summarizer.release(); // drop a side-chain when done
+```
+
+How it works: the engine holds one native context at a time. Switching
+conversations replays the target's transcript into a fresh context, so the
+**next message after a switch pays a re-prefill cost** (roughly seconds on
+long transcripts — engine-side prefix caching that would make this near-free
+is [in progress upstream](https://github.com/google-ai-edge/LiteRT-LM/issues/2807)).
+Frequent A/B ping-ponging with long histories will feel it; occasional
+switching won't. Multimodal turns replay as `[Image]`/`[Audio]` text
+placeholders. Once conversations are in use, inference calls are serialized
+so a switch can never interrupt a generation; top-level `llm.execute()` acts
+as its own "default" conversation.
+
 ## Supported Models
 
 All exported URLs are **public — no auth required**. Pass any to `useModel()` / `loadModel()`.
@@ -311,6 +339,8 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 
 **Inference:** `sendMessage(text)`, `sendMessageAsync(text, cb)`, `sendMessageWithImage/Audio(text, path)`, `sendMultimodalMessage(parts)`, `execute(parts, onToken?, options?)`, `executeWithEvents(parts, onEvent, options?)`.
+
+**Conversations:** `createConversation(options?)` → handle with `execute`, `executeWithEvents`, `getHistory()`, `release()` — independent chats sharing one engine (see [Multiple conversations](#multiple-conversations-one-engine)).
 
 **Memory:** `estimateMemory(inputs)`, `getMemoryUsage()`, `getMemoryForecast()`, `getContextTokenCount()`, `setMemoryWarningCallback(cb)` / `clearMemoryWarningCallback()`, `memoryTracker`.
 

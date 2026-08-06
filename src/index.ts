@@ -61,6 +61,8 @@ export type {
   LiteRTLMInstance,
   CreateLLMOptions,
   StreamEventCallback,
+  ConversationHandle,
+  ConversationOptions,
 } from "./modelFactory";
 export { ModelRegistry } from "./modelRegistry";
 export type { ModelDownloadOptions } from "./modelRegistry";

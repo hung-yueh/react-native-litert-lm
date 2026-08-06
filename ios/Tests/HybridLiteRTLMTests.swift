@@ -287,7 +287,7 @@ class HybridLiteRTLMTests: XCTestCase {
             group.addTask {
                 for _ in 0..<20 {
                     _ = try? self.bridge.unload()
-                    try? self.bridge.resetConversation()
+                    try? self.bridge.resetConversation(historyJson: nil, systemPrompt: nil)
                 }
             }
         }

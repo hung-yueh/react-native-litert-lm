@@ -457,11 +457,41 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    override fun resetConversation() {
+    override fun resetConversation(historyJson: String?, systemPrompt: String?) {
         synchronized(history) {
             history.clear()
+            // Mirror the replayed transcript into the wrapper's own history so
+            // getHistory() stays truthful for the restored conversation.
+            parseTranscript(historyJson).forEach { (role, content) ->
+                val nitroRole = when (role) {
+                    "model" -> Role.MODEL
+                    "system" -> Role.SYSTEM
+                    else -> Role.USER
+                }
+                history.add(Message(nitroRole, content))
+            }
         }
-        createNewConversation()
+        createNewConversation(
+            initialMessagesJson = historyJson,
+            systemPromptOverride = systemPrompt,
+        )
+    }
+
+    /** Parse a `[{role, content}]` transcript JSON into (role, content) pairs. */
+    private fun parseTranscript(historyJson: String?): List<Pair<String, String>> {
+        if (historyJson.isNullOrEmpty()) return emptyList()
+        return try {
+            val arr = org.json.JSONArray(historyJson)
+            (0 until arr.length()).mapNotNull { i ->
+                val obj = arr.optJSONObject(i) ?: return@mapNotNull null
+                val role = obj.optString("role", "user")
+                val content = obj.optString("content", "")
+                role to content
+            }
+        } catch (e: JSONException) {
+            Log.e(TAG, "resetConversation: unparseable historyJson — starting empty", e)
+            emptyList()
+        }
     }
 
     override fun isReady(): Boolean {
@@ -621,7 +651,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    private fun createNewConversation() {
+    private fun createNewConversation(
+        initialMessagesJson: String? = null,
+        systemPromptOverride: String? = null,
+    ) {
         ensureLoaded()
         // v0.10.2 enforces single-session: close existing conversation first
         conversation?.let { oldConv ->
@@ -669,7 +702,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 topP = topP.toDouble(),
                 temperature = temperature.toDouble(),
             ),
-            systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
+            systemInstruction = (systemPromptOverride ?: systemPrompt)
+                ?.let { Contents.of(Content.Text(it)) },
+            // Seed with a prior transcript (multi-conversation switching); the
+            // engine re-prefills these on the next message.
+            initialMessages = parseTranscript(initialMessagesJson).map { (role, content) ->
+                if (role == "model") LiteRTMessage.model(content) else LiteRTMessage.user(content)
+            },
             tools = lmTools ?: emptyList(),
             // The SDK defaults to auto-running tool calls against OpenApiTool.execute()
             // (a stub here). Tool execution belongs to the JS side — surface the

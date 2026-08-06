@@ -513,8 +513,18 @@ export interface LiteRTLM extends HybridObject<{
 
   /**
    * Clear the conversation context and start fresh.
+   *
+   * Optionally seed the fresh context from a prior transcript and/or override
+   * the session `systemPrompt` — the native primitive behind
+   * `createConversation()` multi-conversation switching.
+   *
+   * @param historyJson JSON array of `{role: 'user'|'model', content: string}`
+   *   turns to seed the new conversation with. The seeded transcript is
+   *   re-prefilled by the engine on the next message.
+   * @param systemPrompt Override the session-level system prompt for the new
+   *   conversation (undefined = keep the session default).
    */
-  resetConversation(): void;
+  resetConversation(historyJson?: string, systemPrompt?: string): void;
 
   /**
    * Check if a model is loaded and ready for inference.

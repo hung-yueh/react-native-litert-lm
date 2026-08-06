@@ -251,7 +251,7 @@ class HybridLiteRTLMTest {
                 repeat(20) {
                     try {
                         bridge.unload()
-                        bridge.resetConversation()
+                        bridge.resetConversation(null, null)
                     } catch (t: Throwable) {
                         if (t.message?.contains("No model loaded") != true) {
                             errors.add(t)
