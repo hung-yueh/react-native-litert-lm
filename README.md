@@ -6,16 +6,12 @@ High-performance **on-device LLM inference** for React Native, powered by [LiteR
 
 - 🛡️ **Crash-free memory handling** — pre-flight estimation, live tracking, context forecasting, OS pressure warnings, budgets, and deterministic `unload()`. [See below.](#memory-handling)
 - ⚡ **Binary multimodal input** — pass image/audio as native `ArrayBuffer`s, no base64 heap blow-up (buffers are staged to temp files for the engine's file-based API).
-- 🧩 **Typed streaming events** — `token` / `toolCall` / `thinking` events (LiteRT-LM v0.14 streaming tool calls; channel streaming is iOS-only today, Android streams plain tokens).
-- 🏎️ **GPU acceleration** — Metal (iOS), OpenCL delegate (Android/Pixel), with automatic CPU fallback.
+- 🧩 **Typed streaming events** — `token` / `toolCall` / `thinking` events on both platforms, parsed from the engine's channel markers.
+- 🎯 **Guaranteed structured output** — constrain any response to a JSON Schema or regex (constrained decoding, both platforms) — the output *cannot* come back malformed.
+- 💬 **Multiple conversations, one engine** — independent chats without loading the model twice.
+- 🏎️ **GPU acceleration** — Metal (iOS), OpenCL delegate (Android), with automatic CPU fallback.
 - 🧠 **Speculative decoding & tool calling** — multi-token prediction and JSON-schema function calls.
 - 📥 **Automatic model download** — HTTPS download with progress and local caching.
-
-## Demo
-
-> Gemma 4 E2B on a Samsung Galaxy S22 (Snapdragon 8 Gen 1, 4 GB RAM) — CPU backend, streaming inference.
-
-<video src="https://github.com/user-attachments/assets/1da527ce-0432-4f8b-8899-474f81b2feea" width="300" controls></video>
 
 ## Installation
 
@@ -154,7 +150,7 @@ Every knob's memory impact, documented. `maxContextTokens` is the biggest lever.
 | `activationDataType: 'f16'` | ~halves activation/KV memory | iOS |
 | `prefillChunkSize` | caps peak prefill activation memory | iOS |
 | `numThreads` | CPU memory-bandwidth pressure | iOS |
-| `execute(…, { maxOutputTokens })` | per-message output cap | iOS |
+| `execute(…, { maxOutputTokens })` | per-message output cap | both |
 | `loraPath` | one base model + small adapters | both |
 
 ### With the `useModel` hook
@@ -174,10 +170,14 @@ llm.sendMessageAsync("Tell me a story", (token, done) => {
 
 ### Typed streaming events (tool calls & thinking)
 
-With `streamToolCalls: true` (LiteRT-LM v0.14+, **iOS only** — the Android SDK doesn't expose the tool-call channel yet), tool-call and reasoning tokens stream inside channel markers. `executeWithEvents()` parses them into typed events:
+`executeWithEvents()` turns the raw token stream into typed events. Tool calls
+the model emits arrive as `toolCall` events on **both platforms**; setting
+`streamToolCalls: true` additionally streams tool-call and reasoning tokens
+*as they are generated* (iOS only — on Android a tool call surfaces once it is
+complete, which is what most callers want anyway):
 
 ```typescript
-await llm.loadModel(modelUrl, { tools, streamToolCalls: true });
+await llm.loadModel(modelUrl, { tools }); // + streamToolCalls: true for token-level streaming on iOS
 
 await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (event) => {
   switch (event.type) {
@@ -337,7 +337,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | `temperature` / `topK` / `topP` | `0.7` / `40` / `0.95` | Sampling |
 | `maxContextTokens` | `4096` | Total KV-cache budget (tokens) |
 | `maxOutputTokens` | `1024` | Max tokens generated per response |
-| `streamToolCalls` | `false` | Emit typed tool-call/thinking events (iOS only) |
+| `streamToolCalls` | `false` | Stream tool-call/thinking tokens mid-generation (iOS only; completed tool calls surface as typed events on both) |
 | `enableStructuredOutput` | `false` | Initialize constrained decoding for per-message `responseSchema`/`responseRegex` |
 | `thinking` | engine default | `{ enabled, tokenBudget }` reasoning controls (Gemma 4) |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
@@ -360,10 +360,10 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | React Native | 0.76+ |
 | react-native-nitro-modules | 0.36.0+ |
 | LiteRT-LM engine | 0.15.0 |
-| Android | API 26+, arm64-v8a — CPU (all), GPU (OpenCL/Pixel only), NPU |
+| Android | API 26+, arm64-v8a — CPU (all), GPU (where OpenCL is present), NPU |
 | iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |
 
-> **Android GPU** requires OpenCL, unavailable on most Samsung/Qualcomm devices — check with `checkBackendSupport('gpu')`; the engine auto-falls back to CPU.
+> **Android GPU** requires the device to ship `libOpenCL.so`, which varies by vendor and SoC rather than by brand (present on a Galaxy S22 / Snapdragon 8 Gen 1, absent on plenty of other devices). Probe it with `checkBackendSupport('gpu')` before committing to the GPU backend; the engine auto-falls back to CPU either way.
 
 ### iOS Entitlements
 
@@ -387,7 +387,7 @@ React Native (TypeScript)
 ```
 
 - **iOS** — native Swift calling the C FFI directly; inference, load, and unload are dispatched on a serial `dev.litert.engine` queue so generation never blocks the JSI thread (lightweight accessors like `getStats()` use a synchronous hop onto that queue). Raw pointers are freed deterministically in `deinit`/`close()`/`unload()` for zero leaks. RSS read via `mach_task_basic_info`.
-- **Android** — stateless Kotlin conforming to `HybridLiteRTLMSpec`, with Proguard keep rules and optional `libOpenCL.so` loading for the GPU delegate.
+- **Android** — stateless Kotlin conforming to `HybridLiteRTLMSpec`, with Proguard keep rules and optional `libOpenCL.so` probing for the GPU delegate (with a CPU fallback chain when engine creation fails).
 
 ## Testing
 
@@ -399,7 +399,20 @@ Multi-tier suite that runs on CI without a device:
 
 The Jest tier also includes a **config-parity contract test** (every `LLMConfig` key must be forwarded by `useModel` or explicitly excluded) and a **device-baseline guardrail** that validates the memory cost model against peak-RSS numbers recorded in [`scripts/memory-baseline.json`](scripts/memory-baseline.json).
 
-**Real inference smoke test (opt-in):** the iOS suite includes an end-to-end generation test, skipped unless you point it at a local model: `LITERTLM_TEST_MODEL=$HOME/models/gemma3-1b.litertlm xcodebuild test …`.
+### Real-inference integration suites (opt-in)
+
+Both platforms have a suite that loads an actual `.litertlm` bundle and asserts
+on real generations — streaming, system prompt, schema/regex constrained
+output, transcript replay, generation controls and tool-call events. Both skip
+cleanly when no model is present, so CI stays device-free.
+
+- **iOS** ([`ios/Tests/HybridLiteRTLMIntegrationTests.swift`](ios/Tests/HybridLiteRTLMIntegrationTests.swift)) — runs in the simulator:
+
+  ```bash
+  cd example/ios && TEST_RUNNER_LITERTLM_TEST_MODEL=$HOME/.litert-models/gemma-4-E2B-it.litertlm xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17'
+  ```
+
+- **Android** ([`android/src/androidTest/…/HybridLiteRTLMInstrumentedTest.kt`](android/src/androidTest/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLMInstrumentedTest.kt)) — needs a real device or emulator, since Robolectric cannot run the engine. Install the APK **before** pushing the model and drive it with `am instrument`: `connectedAndroidTest` uninstalls the test APK when it finishes, deleting the pushed model with it. Full command sequence is in the suite's header comment.
 
 On-device memory scenarios (OOM prevention, pressure simulation, peak-RSS regression budget) are documented in [`scripts/device-memory-scenarios.md`](scripts/device-memory-scenarios.md), and the scripted example-app integration pass lives in [`scripts/e2e-example-flow.md`](scripts/e2e-example-flow.md).
 
