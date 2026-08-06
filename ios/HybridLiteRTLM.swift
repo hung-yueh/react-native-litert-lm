@@ -63,6 +63,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var loraRank: Int?
     private var streamToolCalls: Bool = false
     var enableStructuredOutput: Bool = false
+    private var thinkingOptions: ThinkingOptions?
     private var toolCallChannelName: String = "tool_call"
 
     /// Size of the loaded model file in bytes (0 when unloaded).
@@ -265,6 +266,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 self.streamToolCalls = config.streamToolCalls ?? false
                 if let ch = config.toolCallChannelName { self.toolCallChannelName = ch }
                 self.enableStructuredOutput = config.enableStructuredOutput ?? false
+                self.thinkingOptions = config.thinking
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
@@ -277,6 +279,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 self.streamToolCalls = false
                 self.toolCallChannelName = "tool_call"
                 self.enableStructuredOutput = false
+                self.thinkingOptions = nil
             }
             
             // Map main backend string
@@ -542,11 +545,28 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             var provider = kLiteRtLmConstraintProviderTypeLlGuidance
             litert_lm_conversation_config_set_constraint_provider(convConfig, &provider)
         }
+
+        if let thinking = self.thinkingOptions,
+           let thinkingConfig = litert_lm_thinking_config_create() {
+            litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
+            if let budget = thinking.tokenBudget {
+                litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
+            }
+            litert_lm_conversation_config_set_thinking_config(convConfig, thinkingConfig)
+            litert_lm_thinking_config_delete(thinkingConfig)
+        }
         
         if let systemPrompt = self.systemPrompt {
-            let systemMsgJson = "{\"role\":\"system\",\"content\":\"" + escapeJson(systemPrompt) + "\"}"
-            systemMsgJson.withCString { systemMsgC in
-                litert_lm_conversation_config_set_system_message(convConfig, systemMsgC)
+            // The engine wraps this payload itself ({"role":"system","content":<payload>}),
+            // so pass content only, in the canonical {"type":"text","text":…} form the
+            // upstream engine test uses. The previous {"role":…,"content":…} payload got
+            // double-wrapped and the chat template rendered the prompt as empty.
+            let contentObj: [String: Any] = ["type": "text", "text": systemPrompt]
+            if let data = try? JSONSerialization.data(withJSONObject: contentObj),
+               let systemMsgJson = String(data: data, encoding: .utf8) {
+                systemMsgJson.withCString { systemMsgC in
+                    litert_lm_conversation_config_set_system_message(convConfig, systemMsgC)
+                }
             }
         }
         
@@ -557,6 +577,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let data = tool.parametersJson.data(using: .utf8),
                    let parsedParams = try? JSONSerialization.jsonObject(with: data, options: []) {
                     functionMap["parameters"] = parsedParams
+                } else {
+                    // Don't silently drop the schema — the model would see a
+                    // tool with no parameters and hallucinate arguments.
+                    NSLog("[LiteRTLM] Tool '%@' has unparseable parametersJson — sending empty schema", tool.name)
+                    functionMap["parameters"] = [String: Any]()
                 }
                 toolsArray.append(["type": "function", "function": functionMap])
             }
@@ -605,23 +630,6 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         "<start_of_turn>",
         "<eos>"
     ]
-    
-    func escapeJson(_ input: String) -> String {
-        var output = ""
-        for char in input {
-            switch char {
-            case "\"": output += "\\\""
-            case "\\": output += "\\\\"
-            case "\n": output += "\\n"
-            case "\r": output += "\\r"
-            case "\t": output += "\\t"
-            case "\u{0008}": output += "\\b"
-            case "\u{000c}": output += "\\f"
-            default: output.append(char)
-            }
-        }
-        return output
-    }
     
     func stripControlTokens(_ text: String) -> String {
         var result = text

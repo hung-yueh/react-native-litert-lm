@@ -23,9 +23,13 @@ internal class StreamingCallbackListener(
     private var tokenCount = 0
 
     override fun onMessage(message: com.google.ai.edge.litertlm.Message) {
+        // Text content plus any SDK-parsed tool calls (arriving on the final
+        // message), the latter wrapped in the marker protocol the JS event
+        // parser understands.
         val chunk = message.contents.contents
             .filterIsInstance<Content.Text>()
-            .joinToString("") { it.text }
+            .joinToString("") { it.text } +
+            serializeToolCallMarkers(message.toolCalls)
 
         if (firstTokenTime == 0L && chunk.isNotEmpty()) {
             firstTokenTime = System.nanoTime()

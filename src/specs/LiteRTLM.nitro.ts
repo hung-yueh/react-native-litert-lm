@@ -92,11 +92,8 @@ export interface LLMConfig {
   /**
    * Maximum number of tokens the model generates per response.
    * For compiled bundles, must not exceed the bundle's compiled decode-chunk size.
-   *
-   * @remarks
-   * **iOS only** — the Android Kotlin SDK does not currently expose per-session
-   * output token control. On Android this value is accepted but has no effect;
-   * the engine uses its own default.
+   * Applies on both platforms (LiteRT-LM 0.15+); override per message via
+   * `ExecuteOptions.maxOutputTokens`.
    *
    * @default 1024
    */
@@ -155,6 +152,12 @@ export interface LLMConfig {
    * @default false
    */
   enableStructuredOutput?: boolean;
+
+  /**
+   * Session-default thinking/reasoning controls (Gemma 4, LiteRT-LM 0.15+).
+   * Override per message via `ExecuteOptions.thinking`.
+   */
+  thinking?: ThinkingOptions;
 
   /**
    * Number of CPU threads for text generation (CPU backend).
@@ -227,15 +230,33 @@ export interface LLMConfig {
 export type ActivationDataType = "f32" | "f16" | "i16" | "i8";
 
 /**
+ * Thinking/reasoning generation controls (Gemma 4 models, LiteRT-LM 0.15+).
+ * Set in `LLMConfig.thinking` as the session default, or per message via
+ * `ExecuteOptions.thinking`.
+ */
+export interface ThinkingOptions {
+  /**
+   * Whether thinking/reasoning generation is enabled.
+   * @default true (engine default)
+   */
+  enabled?: boolean;
+
+  /**
+   * Token budget for reasoning generation. `-1` means unlimited.
+   * Lower budgets reduce latency and memory at some quality cost on
+   * reasoning-heavy prompts.
+   * @default -1
+   */
+  tokenBudget?: number;
+}
+
+/**
  * Per-message options for `execute()` (LiteRT-LM v0.14+).
  */
 export interface ExecuteOptions {
   /**
    * Cap the number of output tokens for this message only, overriding the
-   * session-level `maxOutputTokens`.
-   *
-   * @remarks **iOS only** — the Android Kotlin SDK does not expose per-message
-   * output control; the session default applies there.
+   * session-level `maxOutputTokens`. Both platforms (LiteRT-LM 0.15+).
    */
   maxOutputTokens?: number;
 
@@ -269,6 +290,56 @@ export interface ExecuteOptions {
    * Ignored when `responseSchema` is also set.
    */
   responseRegex?: string;
+
+  /**
+   * Multiplicative repetition penalty for this message (HuggingFace style).
+   * `1.0` = no penalty; values are clamped to ≥ 1.0 by the engine.
+   * Applies only to tokens generated in this response.
+   */
+  repetitionPenalty?: number;
+
+  /**
+   * Subtractive presence penalty (OpenAI style): subtracted from a token's
+   * logit once it has appeared in the generated window. Positive values
+   * discourage repetition. @default 0
+   */
+  presencePenalty?: number;
+
+  /**
+   * Subtractive frequency penalty (OpenAI style): subtracted per prior
+   * occurrence of the token in the generated window. @default 0
+   */
+  frequencyPenalty?: number;
+
+  /**
+   * How many recent generated tokens the penalties consider.
+   * `0` = the entire generation history. @default 0
+   */
+  penaltyWindowSize?: number;
+
+  /**
+   * Ban exact n-gram repeats of this size during generation
+   * (`0` disables). Useful against looping output.
+   */
+  noRepeatNgramSize?: number;
+
+  /**
+   * Window of recent tokens checked for repeating n-grams.
+   * `0` = entire generation history. @default 0
+   */
+  noRepeatNgramWindowSize?: number;
+
+  /**
+   * Token IDs that must never be generated in this response —
+   * their logits are forced to -inf.
+   */
+  suppressTokens?: number[];
+
+  /**
+   * Thinking/reasoning override for this message
+   * (defaults to `LLMConfig.thinking`).
+   */
+  thinking?: ThinkingOptions;
 }
 
 /**

@@ -32,8 +32,15 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.LoraConfig
+import com.google.ai.edge.litertlm.NoRepeatNgramConfig
 import com.google.ai.edge.litertlm.OpenApiTool
+import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
 import com.google.ai.edge.litertlm.ResponseFormat
+import com.google.ai.edge.litertlm.SuppressTokensConfig
+import com.google.ai.edge.litertlm.ThinkingConfig
+import com.google.ai.edge.litertlm.tool
+import org.json.JSONException
+import org.json.JSONObject
 import com.google.ai.edge.litertlm.ToolProvider
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
@@ -115,6 +122,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var maxContextTokens: Int = 4096
     private var maxOutputTokens: Int = 1024
     private var enableStructuredOutput: Boolean = false
+    private var sessionThinking: ThinkingOptions? = null
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
@@ -169,14 +177,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
                     enableStructuredOutput = cfg.enableStructuredOutput ?: false
+                    sessionThinking = cfg.thinking
                     loraPath = cfg.loraPath
                     audioLoraPath = cfg.audioLoraPath
                     // numThreads / prefillChunkSize / activationDataType / loraRank are
                     // iOS-only: the Kotlin SDK does not expose them (see LLMConfig docs).
                     if (cfg.streamToolCalls == true) {
-                        Log.w(TAG, "streamToolCalls is not supported on Android: the Kotlin " +
-                            "SDK does not expose the tool-call streaming channel. Typed " +
-                            "toolCall/thinking events require iOS; tokens stream as plain text.")
+                        Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
+                            "wired on Android yet. Completed tool calls ARE surfaced as typed " +
+                            "toolCall events when generation finishes; only token-by-token " +
+                            "tool-call streaming is iOS-only for now.")
                     }
                 }
     
@@ -622,17 +632,33 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             }
             conversation = null
         }
-        // Map tools
-        val lmTools: List<ToolProvider>? = tools?.map { tool ->
+        // Map tools. The SDK's tool() adapter requires a {name, description,
+        // parameters} description JSON — parameters alone makes it throw, and
+        // the old `as ToolProvider` cast of an OpenApiTool always threw
+        // ClassCastException (OpenApiTool is an interface, ToolProvider an
+        // unrelated abstract class).
+        val lmTools: List<ToolProvider>? = tools?.map { toolDef ->
             val apiTool = object : OpenApiTool {
                 override fun getToolDescriptionJsonString(): String {
-                    return tool.parametersJson
+                    val params = try {
+                        JSONObject(toolDef.parametersJson)
+                    } catch (e: JSONException) {
+                        Log.e(TAG, "Tool '${toolDef.name}' has unparseable parametersJson — sending empty schema", e)
+                        JSONObject()
+                    }
+                    return JSONObject()
+                        .put("name", toolDef.name)
+                        .put("description", toolDef.description)
+                        .put("parameters", params)
+                        .toString()
                 }
                 override fun execute(paramsJsonString: String): String {
+                    // Never invoked: automaticToolCalling is disabled — tool
+                    // execution happens on the JS side.
                     return "{}"
                 }
             }
-            (apiTool as Any) as ToolProvider
+            tool(apiTool)
         }
 
         // Create conversation with explicit SamplerConfig (required by Gallery pattern).
@@ -645,6 +671,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             ),
             systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
             tools = lmTools ?: emptyList(),
+            // The SDK defaults to auto-running tool calls against OpenApiTool.execute()
+            // (a stub here). Tool execution belongs to the JS side — surface the
+            // calls instead (see execute()).
+            automaticToolCalling = false,
             loraConfig = if (loraPath != null || audioLoraPath != null) {
                 LoraConfig(loraPath, audioLoraPath)
             } else {
@@ -655,6 +685,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             // Initializes the LLGuidance constraint provider for per-call
             // responseFormat (structured output)
             enableResponseFormat = enableStructuredOutput,
+            thinkingConfig = sessionThinking?.toSdkThinkingConfig(),
         )
         conversation = engine!!.createConversation(convConfig)
     }
@@ -795,6 +826,31 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
                 }
 
+                // v0.15: per-turn generation controls
+                val repetitionPenaltyConfig = if (
+                    options?.repetitionPenalty != null || options?.presencePenalty != null ||
+                    options?.frequencyPenalty != null || options?.penaltyWindowSize != null
+                ) {
+                    RepetitionPenaltyConfig(
+                        repetitionPenalty = options?.repetitionPenalty?.toFloat(),
+                        presencePenalty = options?.presencePenalty?.toFloat(),
+                        frequencyPenalty = options?.frequencyPenalty?.toFloat(),
+                        windowSize = options?.penaltyWindowSize?.toInt(),
+                    )
+                } else null
+                val noRepeatNgramConfig = if (
+                    options?.noRepeatNgramSize != null || options?.noRepeatNgramWindowSize != null
+                ) {
+                    NoRepeatNgramConfig(
+                        noRepeatNgramSize = options?.noRepeatNgramSize?.toInt(),
+                        windowSize = options?.noRepeatNgramWindowSize?.toInt(),
+                    )
+                } else null
+                val suppressTokensConfig = options?.suppressTokens
+                    ?.let { SuppressTokensConfig(it.map { id -> id.toInt() }) }
+                val perCallThinking = options?.thinking?.toSdkThinkingConfig()
+                val perCallMaxOutput = options?.maxOutputTokens?.toInt()
+
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
@@ -817,6 +873,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         conversation!!.sendMessageAsync(
                             message = userMsg,
                             callback = listener,
+                            repetitionPenaltyConfig = repetitionPenaltyConfig,
+                            noRepeatNgramConfig = noRepeatNgramConfig,
+                            suppressTokensConfig = suppressTokensConfig,
+                            maxOutputToken = perCallMaxOutput,
+                            thinkingConfig = perCallThinking,
                             responseFormat = responseFormat,
                         )
                     } catch (e: Exception) {
@@ -835,15 +896,25 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     val startTime = System.nanoTime()
                     val responseMsg = conversation!!.sendMessage(
                         message = userMsg,
+                        repetitionPenaltyConfig = repetitionPenaltyConfig,
+                        noRepeatNgramConfig = noRepeatNgramConfig,
+                        suppressTokensConfig = suppressTokensConfig,
+                        maxOutputToken = perCallMaxOutput,
+                        thinkingConfig = perCallThinking,
                         responseFormat = responseFormat,
                     )
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
 
-                    val response = responseMsg.contents.contents
+                    val textResponse = responseMsg.contents.contents
                         .filterIsInstance<Content.Text>()
                         .joinToString("") { it.text }
 
-                    history.add(Message(Role.MODEL, response))
+                    // Surface parsed tool calls (previously silently dropped) in the
+                    // same <tool_call>{json}</tool_call> marker protocol the JS
+                    // layer parses into typed events.
+                    val response = textResponse + serializeToolCallMarkers(responseMsg.toolCalls)
+
+                    history.add(Message(Role.MODEL, textResponse))
 
                     val promptTokens = userTextRepresentation.length / 4.0
                     val completionTokens = response.length / 4.0
@@ -872,3 +943,24 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return -1.0
     }
 }
+
+/** Map the Nitro ThinkingOptions to the LiteRT-LM SDK config (engine defaults: enabled, unlimited budget). */
+private fun ThinkingOptions.toSdkThinkingConfig(): ThinkingConfig =
+    ThinkingConfig(
+        enableThinking = enabled ?: true,
+        thinkingTokenBudget = tokenBudget?.toInt() ?: -1,
+    )
+
+/**
+ * Serialize SDK-parsed tool calls as `<tool_call>{"name":…,"arguments":{…}}</tool_call>`
+ * markers — the shape `executeWithEvents()` documents and parses on the JS side.
+ */
+internal fun serializeToolCallMarkers(
+    toolCalls: List<com.google.ai.edge.litertlm.ToolCall>?,
+): String =
+    toolCalls.orEmpty().joinToString("") { call ->
+        val json = JSONObject()
+            .put("name", call.name)
+            .put("arguments", JSONObject(call.arguments))
+        "<tool_call>$json</tool_call>"
+    }

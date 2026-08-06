@@ -243,10 +243,20 @@ extension HybridLiteRTLM {
     /// Caller must free the result with `litert_lm_conversation_optional_args_delete`.
     func makeOptionalArgs(_ options: ExecuteOptions?) -> OpaquePointer? {
         guard let options = options else { return nil }
+        let hasPenalty = options.repetitionPenalty != nil
+            || options.presencePenalty != nil
+            || options.frequencyPenalty != nil
+            || options.penaltyWindowSize != nil
+        let hasNgram = options.noRepeatNgramSize != nil
+            || options.noRepeatNgramWindowSize != nil
         let hasAny = options.maxOutputTokens != nil
             || options.visualTokenBudget != nil
             || options.responseSchema != nil
             || options.responseRegex != nil
+            || options.suppressTokens != nil
+            || options.thinking != nil
+            || hasPenalty
+            || hasNgram
         guard hasAny, let args = litert_lm_conversation_optional_args_create() else {
             return nil
         }
@@ -265,6 +275,53 @@ extension HybridLiteRTLM {
             regex.withCString {
                 litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeRegex, $0)
             }
+        }
+        // v0.15: per-turn generation controls. Each opaque config is copied by
+        // the engine on set, so it is deleted immediately after (same
+        // create/set/delete convention as the sampler params).
+        if hasPenalty, let penalty = litert_lm_repetition_penalty_config_create() {
+            if let v = options.repetitionPenalty {
+                litert_lm_repetition_penalty_config_set_repetition_penalty(penalty, Float(v))
+            }
+            if let v = options.presencePenalty {
+                litert_lm_repetition_penalty_config_set_presence_penalty(penalty, Float(v))
+            }
+            if let v = options.frequencyPenalty {
+                litert_lm_repetition_penalty_config_set_frequency_penalty(penalty, Float(v))
+            }
+            if let v = options.penaltyWindowSize {
+                litert_lm_repetition_penalty_config_set_window_size(penalty, Int32(v))
+            }
+            litert_lm_conversation_optional_args_set_repetition_penalty_config(args, penalty)
+            litert_lm_repetition_penalty_config_delete(penalty)
+        }
+        if hasNgram, let ngram = litert_lm_no_repeat_ngram_config_create() {
+            if let v = options.noRepeatNgramSize {
+                litert_lm_no_repeat_ngram_config_set_no_repeat_ngram_size(ngram, Int32(v))
+            }
+            if let v = options.noRepeatNgramWindowSize {
+                litert_lm_no_repeat_ngram_config_set_window_size(ngram, Int32(v))
+            }
+            litert_lm_conversation_optional_args_set_no_repeat_ngram_config(args, ngram)
+            litert_lm_no_repeat_ngram_config_delete(ngram)
+        }
+        if let tokens = options.suppressTokens,
+           let suppress = litert_lm_suppress_tokens_config_create() {
+            let ids = tokens.map { Int32($0) }
+            ids.withUnsafeBufferPointer { buf in
+                litert_lm_suppress_tokens_config_set_suppress_tokens(suppress, buf.baseAddress, buf.count)
+            }
+            litert_lm_conversation_optional_args_set_suppress_tokens_config(args, suppress)
+            litert_lm_suppress_tokens_config_delete(suppress)
+        }
+        if let thinking = options.thinking,
+           let thinkingConfig = litert_lm_thinking_config_create() {
+            litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
+            if let budget = thinking.tokenBudget {
+                litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
+            }
+            litert_lm_conversation_optional_args_set_thinking_config(args, thinkingConfig)
+            litert_lm_thinking_config_delete(thinkingConfig)
         }
         return args
     }

@@ -258,6 +258,25 @@ await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
 `responseSchema` takes precedence when both are set. Using either without
 `enableStructuredOutput` rejects with a clear error.
 
+### Generation controls (thinking, anti-repetition)
+
+Per message via `ExecuteOptions` (both platforms, LiteRT-LM 0.15+):
+
+```typescript
+await llm.execute(parts, onToken, {
+  maxOutputTokens: 256,            // per-message output cap
+  thinking: { enabled: true, tokenBudget: 512 }, // reasoning budget (Gemma 4)
+  repetitionPenalty: 1.2,          // ≥ 1.0, HuggingFace-style multiplicative
+  presencePenalty: 0.5,            // OpenAI-style subtractive
+  frequencyPenalty: 0.3,
+  noRepeatNgramSize: 3,            // ban exact 3-gram repeats
+  suppressTokens: [128010],        // token IDs forced to -inf
+});
+```
+
+Session-wide thinking defaults go in the load config: `loadModel(url, { thinking: { tokenBudget: 1024 } })`.
+Thinking content still streams as typed `thinking` events through `executeWithEvents()`.
+
 ## Supported Models
 
 All exported URLs are **public — no auth required**. Pass any to `useModel()` / `loadModel()`.
@@ -287,6 +306,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | `maxOutputTokens` | `1024` | Max tokens generated per response |
 | `streamToolCalls` | `false` | Emit typed tool-call/thinking events (iOS only) |
 | `enableStructuredOutput` | `false` | Initialize constrained decoding for per-message `responseSchema`/`responseRegex` |
+| `thinking` | engine default | `{ enabled, tokenBudget }` reasoning controls (Gemma 4) |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 

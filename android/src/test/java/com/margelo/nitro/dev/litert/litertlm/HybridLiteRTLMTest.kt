@@ -193,6 +193,7 @@ class HybridLiteRTLMTest {
             tools = null,
             enableSpeculativeDecoding = true,
             enableStructuredOutput = true,
+            thinking = null,
             numThreads = null,
             prefillChunkSize = null,
             activationDataType = null,

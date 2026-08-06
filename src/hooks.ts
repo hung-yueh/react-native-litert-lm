@@ -114,7 +114,9 @@ export function useModel(
   const audioLoraPath = config?.audioLoraPath;
   const loraRank = config?.loraRank;
   const forceLoad = config?.forceLoad;
+  const thinking = config?.thinking;
   const toolsKey = tools ? JSON.stringify(tools) : undefined;
+  const thinkingKey = thinking ? JSON.stringify(thinking) : undefined;
 
   // Build a stable config object from the destructured primitives
   const nativeConfig = useMemo<LLMConfig>(
@@ -142,8 +144,9 @@ export function useModel(
       ...(audioLoraPath !== undefined && { audioLoraPath }),
       ...(loraRank !== undefined && { loraRank }),
       ...(forceLoad !== undefined && { forceLoad }),
+      ...(thinking !== undefined && { thinking }),
     }),
-    // `tools` is tracked via its serialized `toolsKey` so inline arrays stay stable.
+    // `tools`/`thinking` are tracked via their serialized keys so inline objects stay stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       backend,
@@ -167,6 +170,7 @@ export function useModel(
       audioLoraPath,
       loraRank,
       forceLoad,
+      thinkingKey,
     ],
   );
 
