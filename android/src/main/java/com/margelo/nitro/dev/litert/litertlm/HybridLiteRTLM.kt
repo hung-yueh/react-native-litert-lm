@@ -33,6 +33,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.LoraConfig
 import com.google.ai.edge.litertlm.OpenApiTool
+import com.google.ai.edge.litertlm.ResponseFormat
 import com.google.ai.edge.litertlm.ToolProvider
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
@@ -113,6 +114,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var topP: Double = 0.95
     private var maxContextTokens: Int = 4096
     private var maxOutputTokens: Int = 1024
+    private var enableStructuredOutput: Boolean = false
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
@@ -166,6 +168,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.systemPrompt?.let { systemPrompt = it }
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                    enableStructuredOutput = cfg.enableStructuredOutput ?: false
                     loraPath = cfg.loraPath
                     audioLoraPath = cfg.audioLoraPath
                     // numThreads / prefillChunkSize / activationDataType / loraRank are
@@ -649,6 +652,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             },
             // Available since LiteRT-LM 0.15.0 (previously iOS-only)
             maxOutputToken = maxOutputTokens,
+            // Initializes the LLGuidance constraint provider for per-call
+            // responseFormat (structured output)
+            enableResponseFormat = enableStructuredOutput,
         )
         conversation = engine!!.createConversation(convConfig)
     }
@@ -687,12 +693,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         onToken: ((token: String, done: Boolean) -> Unit)?,
         options: ExecuteOptions?,
     ): Promise<String> {
-        // Per-message overrides (maxOutputTokens, visualTokenBudget) are not wired
-        // on Android yet — the session-level maxOutputTokens from LLMConfig applies.
-        // The Kotlin SDK supports per-call maxOutputToken since 0.15.0; wiring it
-        // here is tracked as a follow-up.
-        if (options?.maxOutputTokens != null || options?.visualTokenBudget != null) {
-            Log.w(TAG, "per-message execute options (maxOutputTokens/visualTokenBudget) are not supported on Android — session config applies")
+        // visualTokenBudget has no Kotlin SDK surface — session defaults apply.
+        if (options?.visualTokenBudget != null) {
+            Log.w(TAG, "per-message visualTokenBudget is not supported on Android — session config applies")
         }
         // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
         val preprocessed = parts.map { part ->
@@ -782,6 +785,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                 val userMsg = LiteRTMessage.user(Contents.of(contents))
 
+                // v0.15: per-message constrained decoding. Schema takes precedence
+                // over regex, mirroring iOS.
+                val responseFormat = options?.responseSchema?.let { ResponseFormat.json(it) }
+                    ?: options?.responseRegex?.let { ResponseFormat.regex(it) }
+                if (responseFormat != null && !enableStructuredOutput) {
+                    throw IllegalArgumentException(
+                        "LiteRTLM: responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config."
+                    )
+                }
+
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
@@ -801,7 +814,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
 
                     try {
-                        conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+                        conversation!!.sendMessageAsync(
+                            message = userMsg,
+                            callback = listener,
+                            responseFormat = responseFormat,
+                        )
                     } catch (e: Exception) {
                         Log.e(TAG, "execute streaming failed", e)
                         errorRef.set(e)
@@ -816,7 +833,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 } else {
                     // ── Blocking path ─────────────────────────────────────────────────
                     val startTime = System.nanoTime()
-                    val responseMsg = conversation!!.sendMessage(message = userMsg)
+                    val responseMsg = conversation!!.sendMessage(
+                        message = userMsg,
+                        responseFormat = responseFormat,
+                    )
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
 
                     val response = responseMsg.contents.contents

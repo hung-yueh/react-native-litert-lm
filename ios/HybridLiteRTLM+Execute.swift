@@ -51,6 +51,15 @@ extension HybridLiteRTLM {
     ) throws -> Promise<String> {
         let promise = Promise<String>()
 
+        // Structured output needs the constraint provider, which is initialized
+        // at conversation creation — fail fast with an actionable error.
+        if (options?.responseSchema != nil || options?.responseRegex != nil) && !enableStructuredOutput {
+            promise.reject(withError: NSError(domain: "LiteRTLM", code: 400,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "LiteRTLM: responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config."]))
+            return promise
+        }
+
         // Preprocess all JSI-bound data on the caller thread synchronously
         var preprocessed: [PreprocessedPart] = []
         for part in parts {
@@ -230,12 +239,15 @@ extension HybridLiteRTLM {
 
     // MARK: - Streaming / blocking runners
 
-    /// Build v0.14 per-message optional args from ExecuteOptions.
+    /// Build per-message optional args from ExecuteOptions.
     /// Caller must free the result with `litert_lm_conversation_optional_args_delete`.
     func makeOptionalArgs(_ options: ExecuteOptions?) -> OpaquePointer? {
-        guard let options = options,
-              options.maxOutputTokens != nil || options.visualTokenBudget != nil,
-              let args = litert_lm_conversation_optional_args_create() else {
+        guard let options = options else { return nil }
+        let hasAny = options.maxOutputTokens != nil
+            || options.visualTokenBudget != nil
+            || options.responseSchema != nil
+            || options.responseRegex != nil
+        guard hasAny, let args = litert_lm_conversation_optional_args_create() else {
             return nil
         }
         if let maxOut = options.maxOutputTokens {
@@ -243,6 +255,16 @@ extension HybridLiteRTLM {
         }
         if let budget = options.visualTokenBudget {
             litert_lm_conversation_optional_args_set_visual_token_budget(args, Int32(budget))
+        }
+        // v0.15: constrained decoding. Schema takes precedence over regex.
+        if let schema = options.responseSchema {
+            schema.withCString {
+                litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeJsonSchema, $0)
+            }
+        } else if let regex = options.responseRegex {
+            regex.withCString {
+                litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeRegex, $0)
+            }
         }
         return args
     }

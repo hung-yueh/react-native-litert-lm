@@ -192,6 +192,7 @@ class HybridLiteRTLMTest {
             multimodal = null,
             tools = null,
             enableSpeculativeDecoding = true,
+            enableStructuredOutput = true,
             numThreads = null,
             prefillChunkSize = null,
             activationDataType = null,
@@ -221,6 +222,7 @@ class HybridLiteRTLMTest {
         assertEquals(8192, field("maxContextTokens"))
         assertEquals(512, field("maxOutputTokens"))
         assertEquals(true, field("enableSpeculativeDecoding"))
+        assertEquals(true, field("enableStructuredOutput"))
         assertEquals("/lora/adapter.bin", field("loraPath"))
     }
 

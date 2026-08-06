@@ -148,6 +148,15 @@ export interface LLMConfig {
   enableSpeculativeDecoding?: boolean;
 
   /**
+   * Initialize the constraint provider (LLGuidance) so structured output can
+   * be requested per message via `ExecuteOptions.responseSchema` /
+   * `responseRegex` (LiteRT-LM 0.15+). Off by default — enabling adds a small
+   * one-time initialization cost at conversation creation.
+   * @default false
+   */
+  enableStructuredOutput?: boolean;
+
+  /**
    * Number of CPU threads for text generation (CPU backend).
    * Lower values reduce peak memory bandwidth pressure at some speed cost.
    *
@@ -237,6 +246,29 @@ export interface ExecuteOptions {
    * @remarks **iOS only.**
    */
   visualTokenBudget?: number;
+
+  /**
+   * Constrain this response to match a JSON Schema (constrained decoding via
+   * LLGuidance, LiteRT-LM 0.15+). Pass the schema as a JSON string, e.g.
+   * `JSON.stringify({ type: 'object', properties: { name: { type: 'string' } } })`.
+   * The engine guarantees the output parses against the schema.
+   *
+   * Requires `enableStructuredOutput: true` in `LLMConfig` at load time.
+   * Takes precedence over `responseRegex` when both are set.
+   *
+   * @remarks For best schema adherence, use low-temperature sampling
+   * (`temperature: 0`) in the load config.
+   */
+  responseSchema?: string;
+
+  /**
+   * Constrain this response to match a regular expression (constrained
+   * decoding via LLGuidance, LiteRT-LM 0.15+).
+   *
+   * Requires `enableStructuredOutput: true` in `LLMConfig` at load time.
+   * Ignored when `responseSchema` is also set.
+   */
+  responseRegex?: string;
 }
 
 /**

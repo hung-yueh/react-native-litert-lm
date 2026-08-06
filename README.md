@@ -223,6 +223,41 @@ useModel(GEMMA_4_E2B_IT, {
 });
 ```
 
+### Structured output (JSON Schema / regex)
+
+With `enableStructuredOutput: true`, any message can constrain its response via
+constrained decoding (LLGuidance, LiteRT-LM 0.15+) — the engine **guarantees**
+the output matches, on both platforms:
+
+```typescript
+const llm = createLLM();
+await llm.loadModel(GEMMA_4_E2B_IT, {
+  enableStructuredOutput: true,
+  temperature: 0, // greedy sampling improves schema adherence
+});
+
+const json = await llm.execute(
+  [{ type: 'text', text: 'Extract: "Ada Lovelace, born 1815, London"' }],
+  undefined,
+  {
+    responseSchema: JSON.stringify({
+      type: 'object',
+      properties: { name: { type: 'string' }, birthYear: { type: 'number' }, city: { type: 'string' } },
+      required: ['name', 'birthYear', 'city'],
+    }),
+  },
+);
+const person = JSON.parse(json); // guaranteed to parse
+
+// Or a regex constraint:
+await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
+  responseRegex: 'P[0-3]',
+});
+```
+
+`responseSchema` takes precedence when both are set. Using either without
+`enableStructuredOutput` rejects with a clear error.
+
 ## Supported Models
 
 All exported URLs are **public — no auth required**. Pass any to `useModel()` / `loadModel()`.
@@ -251,6 +286,7 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 | `maxContextTokens` | `4096` | Total KV-cache budget (tokens) |
 | `maxOutputTokens` | `1024` | Max tokens generated per response |
 | `streamToolCalls` | `false` | Emit typed tool-call/thinking events (iOS only) |
+| `enableStructuredOutput` | `false` | Initialize constrained decoding for per-message `responseSchema`/`responseRegex` |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 

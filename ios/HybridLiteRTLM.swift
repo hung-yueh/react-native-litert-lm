@@ -62,6 +62,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var audioLoraPath: String?
     private var loraRank: Int?
     private var streamToolCalls: Bool = false
+    var enableStructuredOutput: Bool = false
     private var toolCallChannelName: String = "tool_call"
 
     /// Size of the loaded model file in bytes (0 when unloaded).
@@ -263,6 +264,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 self.loraRank = config.loraRank.map { Int($0) }
                 self.streamToolCalls = config.streamToolCalls ?? false
                 if let ch = config.toolCallChannelName { self.toolCallChannelName = ch }
+                self.enableStructuredOutput = config.enableStructuredOutput ?? false
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
@@ -274,6 +276,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 self.loraRank = nil
                 self.streamToolCalls = false
                 self.toolCallChannelName = "tool_call"
+                self.enableStructuredOutput = false
             }
             
             // Map main backend string
@@ -530,6 +533,14 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             self.toolCallChannelName.withCString { channelC in
                 litert_lm_conversation_config_set_stream_tool_calls(convConfig, true, channelC)
             }
+        }
+
+        if self.enableStructuredOutput {
+            // v0.15: initialize the LLGuidance constraint provider so per-message
+            // responseSchema/responseRegex constraints can be applied.
+            litert_lm_conversation_config_set_enable_constrained_decoding(convConfig, true)
+            var provider = kLiteRtLmConstraintProviderTypeLlGuidance
+            litert_lm_conversation_config_set_constraint_provider(convConfig, &provider)
         }
         
         if let systemPrompt = self.systemPrompt {
