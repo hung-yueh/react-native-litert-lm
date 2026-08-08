@@ -113,6 +113,8 @@ function Main() {
   const [busy, setBusy] = useState(false);
   const [attachment, setAttachment] = useState<"image" | "audio" | null>(null);
   const [liveUsage, setLiveUsage] = useState<MemoryUsage | null>(null);
+  const [forceLoad, setForceLoad] = useState(false);
+  const forceLoadPending = useRef(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -128,8 +130,9 @@ function Main() {
       enableSpeculativeDecoding,
       streamToolCalls: enableTools,
       tools: enableTools ? [WEATHER_TOOL] : undefined,
+      ...(forceLoad && { forceLoad }),
     }),
-    [backend, contextTokens, enableSpeculativeDecoding, enableTools],
+    [backend, contextTokens, enableSpeculativeDecoding, enableTools, forceLoad],
   );
 
   const {
@@ -176,6 +179,14 @@ function Main() {
   useEffect(() => {
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
   }, [chat, streaming]);
+
+  // "Try anyway" flips forceLoad into the config; retry once it has landed.
+  useEffect(() => {
+    if (forceLoad && forceLoadPending.current) {
+      forceLoadPending.current = false;
+      load();
+    }
+  }, [forceLoad, load]);
 
   // ── Send (typed streaming events) ──────────────────────────────────────────
   const send = useCallback(async () => {
@@ -337,6 +348,14 @@ function Main() {
               errorIsMemory={!!errorIsMemory}
               canInteract={canInteract}
               onLoad={load}
+              onForceLoad={() => {
+                if (forceLoad) {
+                  load();
+                } else {
+                  forceLoadPending.current = true;
+                  setForceLoad(true);
+                }
+              }}
             />
           )}
 
@@ -599,6 +618,7 @@ function SetupCard({
   errorIsMemory,
   canInteract,
   onLoad,
+  onForceLoad,
 }: {
   label: string;
   size: string;
@@ -612,7 +632,10 @@ function SetupCard({
   errorIsMemory: boolean;
   canInteract: boolean;
   onLoad: () => void;
+  onForceLoad: () => void;
 }) {
+  // A critical estimate or a refused load both offer a forced retry.
+  const risky = preflight?.verdict === "critical" || errorIsMemory;
   return (
     <View style={s.setup}>
       <Text style={s.setupMark}>
@@ -650,19 +673,11 @@ function SetupCard({
       {canInteract && (
         <TouchableOpacity
           testID="load-btn"
-          style={[
-            s.loadBtn,
-            preflight?.verdict === "critical" && { backgroundColor: T.error },
-          ]}
-          onPress={onLoad}
+          style={[s.loadBtn, risky && { backgroundColor: T.error }]}
+          onPress={risky ? onForceLoad : onLoad}
         >
-          <Text
-            style={[
-              s.loadBtnText,
-              preflight?.verdict === "critical" && { color: "#fff" },
-            ]}
-          >
-            {preflight?.verdict === "critical" ? "Try anyway" : "Load model"}
+          <Text style={[s.loadBtnText, risky && { color: "#fff" }]}>
+            {risky ? "Try anyway" : "Load model"}
           </Text>
         </TouchableOpacity>
       )}
