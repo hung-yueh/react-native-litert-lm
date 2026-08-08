@@ -1,26 +1,30 @@
 import { Platform } from "react-native";
 
-/** Design tokens — a refined dark theme with a single indigo accent. */
+/**
+ * Design tokens — ChatGPT-style pure-black dark theme (after
+ * margelo/ai-chat-demo). iOS system grays throughout.
+ */
 export const T = {
-  bg: "#0A0A0F",
-  surface: "#12121A",
-  card: "#181822",
-  elevated: "#1F1F2C",
-  accent: "#6366F1",
-  accentSoft: "rgba(99,102,241,0.14)",
-  accentGlow: "#A5B4FC",
-  success: "#34D399",
-  successSoft: "rgba(52,211,153,0.14)",
-  warning: "#FBBF24",
-  warningSoft: "rgba(251,191,36,0.14)",
-  error: "#F87171",
-  errorSoft: "rgba(248,113,113,0.14)",
-  cyan: "#22D3EE",
-  purple: "#C084FC",
-  text: "#F4F4F7",
-  dim: "#8B8B9E",
-  faint: "#55556A",
-  border: "#26263A",
+  bg: "#000000",
+  surface: "#1C1C1E", // systemGray6 dark — bubbles, pills, sheets
+  card: "#1C1C1E",
+  elevated: "#2C2C2E",
+  accent: "#0A84FF", // iOS system blue
+  accentSoft: "rgba(10,132,255,0.16)",
+  accentGlow: "#64B5FF",
+  success: "#30D158",
+  successSoft: "rgba(48,209,88,0.14)",
+  warning: "#FFD60A",
+  warningSoft: "rgba(255,214,10,0.14)",
+  error: "#FF453A",
+  errorSoft: "rgba(255,69,58,0.14)",
+  cyan: "#64D2FF",
+  purple: "#BF5AF2",
+  text: "#FFFFFF",
+  dim: "#8E8E93", // systemGray — secondary text
+  faint: "#48484A", // disabled tint
+  border: "#2C2C2E",
+  sendActive: "#FFFFFF",
 } as const;
 
 export const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";

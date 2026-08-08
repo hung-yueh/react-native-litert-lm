@@ -9,6 +9,9 @@ import {
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
+  Modal,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   ScrollView,
   StyleSheet,
@@ -17,7 +20,11 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { StatusBar } from "expo-status-bar";
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import {
   useModel,
   estimateMemory,
@@ -29,9 +36,14 @@ import {
   type MemoryUsage,
   type StreamEvent,
 } from "react-native-litert-lm";
-import { ChatBubble, EmptyState, type ChatMsg } from "./src/components/ChatView";
+import {
+  EmptyState,
+  MessageBubble,
+  ShimmerText,
+  type ChatMsg,
+} from "./src/components/ChatView";
 import { MemoryPanel } from "./src/components/MemoryPanel";
-import { Card, MetricChip, Pill, ProgressBar, PulseDot, SectionLabel } from "./src/components/ui";
+import { Pill, ProgressBar, SectionLabel } from "./src/components/ui";
 import { fmtBytes } from "./src/format";
 import { T, VERDICT_COLORS } from "./src/theme";
 
@@ -73,12 +85,13 @@ const WEATHER_TOOL = {
   }),
 };
 
-type Tab = "chat" | "memory";
+const CIRCLE = 42;
 
 // ═════════════════════════════════════════════════════════════════════════════
 export default function App() {
   return (
     <SafeAreaProvider>
+      <StatusBar style="light" />
       <Main />
     </SafeAreaProvider>
   );
@@ -86,11 +99,12 @@ export default function App() {
 
 function Main() {
   // ── State ──────────────────────────────────────────────────────────────────
-  const [tab, setTab] = useState<Tab>("chat");
+  const insets = useSafeAreaInsets();
   const [sel, setSel] = useState<ModelKey>("gemma3n");
   const [backend, setBackend] = useState<"cpu" | "gpu">("cpu");
   const [contextTokens, setContextTokens] = useState<number>(4096);
-  const [enableSpeculativeDecoding, setEnableSpeculativeDecoding] = useState(false);
+  const [enableSpeculativeDecoding, setEnableSpeculativeDecoding] =
+    useState(false);
   const [enableTools, setEnableTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [chat, setChat] = useState<ChatMsg[]>([]);
@@ -99,6 +113,7 @@ function Main() {
   const [busy, setBusy] = useState(false);
   const [attachment, setAttachment] = useState<"image" | "audio" | null>(null);
   const [liveUsage, setLiveUsage] = useState<MemoryUsage | null>(null);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
   const config = useMemo(
@@ -176,7 +191,10 @@ function Main() {
     const displayMsg = currentAttachment
       ? `[${currentAttachment === "image" ? "🖼" : "🎧"}] ${msg}`
       : msg;
-    setChat((prev) => [...prev, { role: "user", text: displayMsg, ts: Date.now() }]);
+    setChat((prev) => [
+      ...prev,
+      { role: "user", text: displayMsg, ts: Date.now() },
+    ]);
 
     const acc: ChatMsg = { role: "model", text: "", ts: Date.now() };
     setStreaming({ ...acc });
@@ -185,10 +203,16 @@ function Main() {
       const parts: any[] = [];
       if (currentAttachment === "image") {
         const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
-        parts.push({ type: "image", imageBuffer: await (await fetch(uri)).arrayBuffer() });
+        parts.push({
+          type: "image",
+          imageBuffer: await (await fetch(uri)).arrayBuffer(),
+        });
       } else if (currentAttachment === "audio") {
         const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
-        parts.push({ type: "audio", audioBuffer: await (await fetch(uri)).arrayBuffer() });
+        parts.push({
+          type: "audio",
+          audioBuffer: await (await fetch(uri)).arrayBuffer(),
+        });
       }
       if (msg) parts.push({ type: "text", text: msg });
 
@@ -203,13 +227,21 @@ function Main() {
       });
 
       acc.text = acc.text.trim();
+      try {
+        const stats = model.getStats();
+        if (stats?.tokensPerSecond) {
+          acc.meta = `${stats.tokensPerSecond.toFixed(1)} tok/s · ${(
+            stats.timeToFirstToken * 1000
+          ).toFixed(0)} ms to first token`;
+        }
+      } catch {}
       setChat((prev) => [...prev, { ...acc }]);
       setStreaming(null);
       refreshUsage();
     } catch (e: any) {
       setChat((prev) => [
         ...prev,
-        { role: "model", text: `Error: ${e.message}`, ts: Date.now() },
+        { role: "model", text: `Error: ${e.message}`, error: true, ts: Date.now() },
       ]);
       setStreaming(null);
     } finally {
@@ -225,74 +257,231 @@ function Main() {
     } catch {}
   }, [model, refreshUsage]);
 
+  const onScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+      const fromBottom =
+        contentSize.height - layoutMeasurement.height - contentOffset.y;
+      setShowScrollDown(fromBottom > 120);
+    },
+    [],
+  );
+
   // ── Derived ────────────────────────────────────────────────────────────────
-  const stats = model && isReady ? model.getStats() : null;
   const isDownloading = downloadProgress > 0 && downloadProgress < 1;
-  const isLoading = downloadProgress === 1 && !isReady;
+  // A failed load leaves downloadProgress at 1 — treat error as "not loading"
+  // so the Load button comes back for a retry.
+  const isLoading = downloadProgress === 1 && !isReady && !error;
   const canInteract = !isReady && !isDownloading && !isLoading;
   const gpuWarning = useMemo(() => checkBackendSupport("gpu"), []);
   const snapshots = model?.memoryTracker?.getSnapshots() ?? [];
-  const errorIsMemory = error?.includes("MEMORY_ESTIMATE_EXCEEDED") || error?.includes("Refusing to load");
+  const errorIsMemory =
+    error?.includes("MEMORY_ESTIMATE_EXCEEDED") ||
+    error?.includes("Refusing to load");
+  const canSend = (!!input.trim() || !!attachment) && !busy && isReady;
 
   return (
-    <SafeAreaView style={s.root}>
+    <View style={[s.root, { paddingTop: insets.top }]}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         {/* ── Header ───────────────────────────────────────────────────────── */}
         <View style={s.header}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            <PulseDot active={isReady} color={T.success} />
-            <View>
-              <Text style={s.brand}>
-                litert<Text style={{ color: T.accent }}>·lm</Text>
-              </Text>
-              <Text style={s.tagline}>
-                {isReady
-                  ? `${MODELS[sel].label} · ${backend.toUpperCase()} · on-device`
-                  : "on-device LLM inference"}
-              </Text>
-            </View>
-          </View>
           <TouchableOpacity
             testID="settings-btn"
-            style={s.iconBtn}
-            onPress={() => setShowSettings(!showSettings)}
+            style={s.circleBtn}
+            onPress={() => setShowSettings(true)}
           >
-            <Text style={{ fontSize: 16, color: T.text }}>
-              {showSettings ? "✕" : "⚙"}
-            </Text>
+            <Text style={s.circleIcon}>⚙︎</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={s.namePill}
+            onPress={() => setShowSettings(true)}
+          >
+            <Text style={s.nameText}>{MODELS[sel].label}</Text>
+            <Text style={s.nameChevron}>⌄</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="new-chat-btn"
+            style={s.circleBtn}
+            onPress={() => setChat([])}
+          >
+            <Text style={s.circleIcon}>✎</Text>
           </TouchableOpacity>
         </View>
 
-        {/* ── Tabs ─────────────────────────────────────────────────────────── */}
-        <View style={s.tabs}>
-          {(
-            [
-              ["chat", "Chat"],
-              ["memory", "Memory"],
-            ] as [Tab, string][]
-          ).map(([key, label]) => (
-            <TouchableOpacity
-              key={key}
-              testID={`tab-${key}`}
-              style={[s.tab, tab === key && s.tabActive]}
-              onPress={() => setTab(key)}
+        {/* ── Conversation ─────────────────────────────────────────────────── */}
+        <ScrollView
+          ref={scrollRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={s.chatContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          onScroll={onScroll}
+          scrollEventThrottle={64}
+        >
+          {!isReady && (
+            <SetupCard
+              label={MODELS[sel].label}
+              size={MODELS[sel].size}
+              backend={backend}
+              contextTokens={contextTokens}
+              preflight={preflight}
+              isDownloading={isDownloading}
+              isLoading={isLoading}
+              downloadProgress={downloadProgress}
+              error={error}
+              errorIsMemory={!!errorIsMemory}
+              canInteract={canInteract}
+              onLoad={load}
+            />
+          )}
+
+          {isReady && chat.length === 0 && !streaming && (
+            <EmptyState
+              title="Ready when you are"
+              sub={`${MODELS[sel].label} on ${backend.toUpperCase()} — everything stays on this device.`}
             >
-              <Text style={[s.tabText, tab === key && s.tabTextActive]}>
-                {label}
-              </Text>
-              {key === "memory" && memoryWarning && (
-                <View style={s.tabAlert} />
+              <View style={s.suggestRow}>
+                {[
+                  "Explain LoRA adapters in one line",
+                  "Tell me a joke",
+                  enableTools
+                    ? "What's the weather in Tokyo?"
+                    : "Write a haiku about RAM",
+                ].map((q) => (
+                  <TouchableOpacity
+                    key={q}
+                    style={s.suggestChip}
+                    onPress={() => setInput(q)}
+                  >
+                    <Text style={s.suggestText}>{q}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </EmptyState>
+          )}
+
+          {chat.map((m, i) => (
+            <MessageBubble key={i} msg={m} />
+          ))}
+          {streaming && <MessageBubble msg={streaming} isStreaming />}
+        </ScrollView>
+
+        {/* ── Scroll-to-bottom chevron ─────────────────────────────────────── */}
+        {showScrollDown && (
+          <TouchableOpacity
+            style={s.scrollDown}
+            onPress={() =>
+              scrollRef.current?.scrollToEnd({ animated: true })
+            }
+          >
+            <Text style={s.scrollDownIcon}>⌄</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* ── Composer ─────────────────────────────────────────────────────── */}
+        {isReady && (
+          <View
+            style={[s.composer, { paddingBottom: insets.bottom + 8 }]}
+          >
+            <TouchableOpacity
+              testID="attach-btn"
+              style={s.circleBtn}
+              disabled={busy}
+              onPress={() => {
+                const warning = checkMultimodalSupport();
+                if (warning) return;
+                setAttachment(
+                  attachment === null
+                    ? "image"
+                    : attachment === "image"
+                      ? "audio"
+                      : null,
+                );
+              }}
+            >
+              <Text style={s.plusIcon}>＋</Text>
+            </TouchableOpacity>
+
+            <View style={s.inputPill}>
+              {attachment && (
+                <View style={s.attachmentChip}>
+                  <Text style={s.attachmentText}>
+                    {attachment === "image" ? "🖼 test.jpeg" : "🎧 test.wav"}
+                  </Text>
+                  <TouchableOpacity
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    onPress={() => setAttachment(null)}
+                  >
+                    <Text style={s.attachmentRemove}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              <TextInput
+                testID="chat-input"
+                style={s.input}
+                placeholder={busy ? "Generating…" : "Message"}
+                placeholderTextColor={T.dim}
+                value={input}
+                onChangeText={setInput}
+                editable={!busy}
+                onSubmitEditing={send}
+                returnKeyType="send"
+                multiline
+              />
+            </View>
+
+            <TouchableOpacity
+              testID="send-btn"
+              style={s.circleBtn}
+              onPress={send}
+              disabled={!canSend}
+            >
+              {busy ? (
+                <Text style={[s.sendIcon, { color: T.faint, fontSize: 14 }]}>
+                  ■
+                </Text>
+              ) : (
+                <Text
+                  style={[s.sendIcon, { color: canSend ? T.sendActive : T.faint }]}
+                >
+                  ↑
+                </Text>
               )}
             </TouchableOpacity>
-          ))}
-        </View>
+          </View>
+        )}
+      </KeyboardAvoidingView>
 
-        {/* ── Settings sheet ───────────────────────────────────────────────── */}
-        {showSettings && (
-          <ScrollView style={s.sheet} contentContainerStyle={{ gap: 14 }}>
+      {/* ── Settings sheet ─────────────────────────────────────────────────── */}
+      <Modal
+        visible={showSettings}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowSettings(false)}
+      >
+        <View style={s.sheetRoot}>
+          <View style={s.sheetHeader}>
+            <Text style={s.sheetTitle}>Settings</Text>
+            <TouchableOpacity
+              testID="settings-done"
+              style={s.circleBtn}
+              onPress={() => setShowSettings(false)}
+            >
+              <Text style={s.circleIcon}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView
+            contentContainerStyle={{
+              padding: 16,
+              paddingBottom: insets.bottom + 24,
+              gap: 18,
+            }}
+          >
             <View>
               <SectionLabel>Model</SectionLabel>
               <View style={s.pillRow}>
@@ -367,6 +556,20 @@ function Main() {
               </View>
             </View>
 
+            <View>
+              <SectionLabel>Memory</SectionLabel>
+              <MemoryPanel
+                estimate={memoryEstimate ?? preflight}
+                forecast={memoryForecast}
+                usage={liveUsage}
+                summary={memorySummary}
+                snapshots={snapshots}
+                warning={memoryWarning}
+                isReady={isReady}
+                onUnload={unload}
+              />
+            </View>
+
             {isReady && (
               <TouchableOpacity
                 style={s.dangerBtn}
@@ -376,243 +579,119 @@ function Main() {
               </TouchableOpacity>
             )}
           </ScrollView>
-        )}
+        </View>
+      </Modal>
+    </View>
+  );
+}
 
-        {/* ── Load card (pre-flight estimate front and center) ─────────────── */}
-        {!isReady && !showSettings && (
-          <Card style={{ marginHorizontal: 16, marginBottom: 12 }}>
-            <View style={s.loadHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={s.loadTitle}>
-                  {isDownloading
-                    ? `Downloading ${(downloadProgress * 100).toFixed(0)}%`
-                    : isLoading
-                      ? "Loading engine…"
-                      : MODELS[sel].label}
-                </Text>
-                <Text style={s.loadSub}>
-                  {MODELS[sel].size} · {backend.toUpperCase()} ·{" "}
-                  {contextTokens / 1024}k context
-                </Text>
-              </View>
-              {canInteract && (
-                <TouchableOpacity
-                  testID="load-btn"
-                  style={[
-                    s.loadBtn,
-                    preflight?.verdict === "critical" && {
-                      backgroundColor: T.error,
-                    },
-                  ]}
-                  onPress={load}
-                >
-                  <Text style={s.loadBtnText}>
-                    {preflight?.verdict === "critical" ? "Try anyway" : "Load"}
-                  </Text>
-                </TouchableOpacity>
-              )}
-              {(isDownloading || isLoading) && (
-                <ActivityIndicator color={T.accent} />
-              )}
-            </View>
+// ─── Setup / load card shown before the model is ready ───────────────────────
+function SetupCard({
+  label,
+  size,
+  backend,
+  contextTokens,
+  preflight,
+  isDownloading,
+  isLoading,
+  downloadProgress,
+  error,
+  errorIsMemory,
+  canInteract,
+  onLoad,
+}: {
+  label: string;
+  size: string;
+  backend: string;
+  contextTokens: number;
+  preflight: MemoryEstimate | null;
+  isDownloading: boolean;
+  isLoading: boolean;
+  downloadProgress: number;
+  error: string | null;
+  errorIsMemory: boolean;
+  canInteract: boolean;
+  onLoad: () => void;
+}) {
+  return (
+    <View style={s.setup}>
+      <Text style={s.setupMark}>
+        litert<Text style={{ fontWeight: "400" }}>·lm</Text>
+      </Text>
+      <Text style={s.setupTitle}>{label}</Text>
+      <Text style={s.setupSub}>
+        {size} · {backend.toUpperCase()} · {contextTokens / 1024}k context ·
+        on-device
+      </Text>
 
-            {isDownloading && (
-              <View style={{ marginTop: 12 }}>
-                <ProgressBar fraction={downloadProgress} />
-              </View>
-            )}
-
-            {preflight && !isDownloading && !isLoading && (
-              <View style={s.preflightRow}>
-                <View
-                  style={[
-                    s.verdictDot,
-                    { backgroundColor: VERDICT_COLORS[preflight.verdict].fg },
-                  ]}
-                />
-                <Text style={s.preflightText}>
-                  <Text
-                    style={{
-                      color: VERDICT_COLORS[preflight.verdict].fg,
-                      fontWeight: "700",
-                    }}
-                  >
-                    {VERDICT_COLORS[preflight.verdict].label}.
-                  </Text>{" "}
-                  Needs ~{fmtBytes(preflight.totalEstimatedBytes)} of{" "}
-                  {fmtBytes(preflight.availableBytes)} available.
-                </Text>
-              </View>
-            )}
-
-            {error && (
-              <Text style={s.errorText}>
-                {errorIsMemory ? "🛡 Pre-flight check refused the load: " : ""}
-                {error}
-              </Text>
-            )}
-          </Card>
-        )}
-
-        {/* ── Body ─────────────────────────────────────────────────────────── */}
-        {tab === "memory" ? (
-          <ScrollView
-            style={{ flex: 1 }}
-            contentContainerStyle={{ padding: 16, paddingTop: 4, gap: 14 }}
-          >
-            <MemoryPanel
-              estimate={memoryEstimate ?? preflight}
-              forecast={memoryForecast}
-              usage={liveUsage}
-              summary={memorySummary}
-              snapshots={snapshots}
-              warning={memoryWarning}
-              isReady={isReady}
-              onUnload={unload}
-            />
-          </ScrollView>
-        ) : (
-          <>
-            {isReady && (
-              <View style={s.metricsBar}>
-                <MetricChip
-                  label="Speed"
-                  value={stats?.tokensPerSecond ? stats.tokensPerSecond.toFixed(1) : "—"}
-                  unit="tok/s"
-                  color={T.success}
-                />
-                <MetricChip
-                  label="First token"
-                  value={stats?.timeToFirstToken ? `${(stats.timeToFirstToken * 1000).toFixed(0)}` : "—"}
-                  unit="ms"
-                  color={T.cyan}
-                />
-                <MetricChip
-                  label="Context"
-                  value={
-                    memoryForecast
-                      ? `${Math.round(memoryForecast.contextUsedFraction * 100)}%`
-                      : "—"
-                  }
-                  unit="used"
-                  color={memoryForecast?.nearingLimit ? T.warning : T.purple}
-                />
-              </View>
-            )}
-
-            <ScrollView
-              ref={scrollRef}
-              style={{ flex: 1 }}
-              contentContainerStyle={s.chatContent}
-              keyboardShouldPersistTaps="handled"
+      {preflight && canInteract && (
+        <View style={s.preflightRow}>
+          <View
+            style={[
+              s.verdictDot,
+              { backgroundColor: VERDICT_COLORS[preflight.verdict].fg },
+            ]}
+          />
+          <Text style={s.preflightText}>
+            <Text
+              style={{
+                color: VERDICT_COLORS[preflight.verdict].fg,
+                fontWeight: "600",
+              }}
             >
-              {!isReady && chat.length === 0 && (
-                <EmptyState
-                  icon="✦"
-                  title="On-device intelligence"
-                  sub={
-                    "Load a model to start. The pre-flight memory check\nmakes sure it fits before a single byte downloads."
-                  }
-                />
-              )}
+              {VERDICT_COLORS[preflight.verdict].label}.
+            </Text>{" "}
+            Needs ~{fmtBytes(preflight.totalEstimatedBytes)} of{" "}
+            {fmtBytes(preflight.availableBytes)} available.
+          </Text>
+        </View>
+      )}
 
-              {isReady && chat.length === 0 && !streaming && (
-                <EmptyState
-                  icon="💬"
-                  title="Ready"
-                  sub={`${MODELS[sel].label} on ${backend.toUpperCase()} — everything stays on this device.`}
-                >
-                  <View style={s.suggestRow}>
-                    {[
-                      "Explain LoRA adapters in one line",
-                      "Tell me a joke",
-                      enableTools ? "What's the weather in Tokyo?" : "Write a haiku about RAM",
-                    ].map((q) => (
-                      <TouchableOpacity
-                        key={q}
-                        style={s.suggestChip}
-                        onPress={() => setInput(q)}
-                      >
-                        <Text style={s.suggestText}>{q}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </EmptyState>
-              )}
+      {canInteract && (
+        <TouchableOpacity
+          testID="load-btn"
+          style={[
+            s.loadBtn,
+            preflight?.verdict === "critical" && { backgroundColor: T.error },
+          ]}
+          onPress={onLoad}
+        >
+          <Text
+            style={[
+              s.loadBtnText,
+              preflight?.verdict === "critical" && { color: "#fff" },
+            ]}
+          >
+            {preflight?.verdict === "critical" ? "Try anyway" : "Load model"}
+          </Text>
+        </TouchableOpacity>
+      )}
 
-              {chat.map((m, i) => (
-                <ChatBubble key={i} msg={m} />
-              ))}
-              {streaming && <ChatBubble msg={streaming} isStreaming />}
-            </ScrollView>
+      {isDownloading && (
+        <View style={s.progressWrap}>
+          <ShimmerText
+            text={`Downloading ${(downloadProgress * 100).toFixed(0)}%`}
+          />
+          <View style={{ marginTop: 12, width: "100%" }}>
+            <ProgressBar fraction={downloadProgress} color={T.text} />
+          </View>
+        </View>
+      )}
 
-            {/* ── Input bar ────────────────────────────────────────────────── */}
-            {isReady && (
-              <View>
-                {attachment && (
-                  <View style={s.attachmentPreview}>
-                    <Text style={s.attachmentText}>
-                      {attachment === "image" ? "🖼 test.jpeg" : "🎧 test.wav"}{" "}
-                      attached (zero-copy ArrayBuffer)
-                    </Text>
-                    <TouchableOpacity onPress={() => setAttachment(null)}>
-                      <Text style={{ color: T.dim, fontSize: 14 }}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-                <View style={s.inputBar}>
-                  <TouchableOpacity
-                    testID="attach-btn"
-                    style={s.iconBtn}
-                    disabled={busy}
-                    onPress={() => {
-                      const warning = checkMultimodalSupport();
-                      if (warning) return;
-                      setAttachment(
-                        attachment === null
-                          ? "image"
-                          : attachment === "image"
-                            ? "audio"
-                            : null,
-                      );
-                    }}
-                  >
-                    <Text style={{ fontSize: 16 }}>📎</Text>
-                  </TouchableOpacity>
-                  <TextInput
-                    testID="chat-input"
-                    style={s.input}
-                    placeholder={busy ? "Generating…" : "Message"}
-                    placeholderTextColor={T.faint}
-                    value={input}
-                    onChangeText={setInput}
-                    editable={!busy}
-                    onSubmitEditing={send}
-                    returnKeyType="send"
-                    multiline
-                  />
-                  <TouchableOpacity
-                    testID="send-btn"
-                    style={[
-                      s.sendBtn,
-                      ((!input.trim() && !attachment) || busy) && { opacity: 0.4 },
-                    ]}
-                    onPress={send}
-                    disabled={(!input.trim() && !attachment) || busy}
-                  >
-                    {busy ? (
-                      <ActivityIndicator color="#fff" size="small" />
-                    ) : (
-                      <Text style={s.sendIcon}>↑</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-          </>
-        )}
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+      {isLoading && (
+        <View style={s.progressWrap}>
+          <ActivityIndicator color={T.dim} />
+          <Text style={s.loadingText}>Loading engine…</Text>
+        </View>
+      )}
+
+      {error && (
+        <Text style={s.errorText}>
+          {errorIsMemory ? "🛡 Pre-flight check refused the load: " : ""}
+          {error}
+        </Text>
+      )}
+    </View>
   );
 }
 
@@ -622,157 +701,162 @@ const s = StyleSheet.create({
 
   header: {
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 10,
-  },
-  brand: { fontSize: 24, fontWeight: "900", color: T.text, letterSpacing: -0.5 },
-  tagline: { fontSize: 11, color: T.dim, marginTop: 1, fontWeight: "500" },
-  iconBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: T.card,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: T.border,
-  },
-
-  tabs: {
-    flexDirection: "row",
-    marginHorizontal: 16,
-    marginBottom: 12,
-    backgroundColor: T.card,
-    borderRadius: 12,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: T.border,
-  },
-  tab: {
-    flex: 1,
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 9,
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "center",
-    gap: 6,
+    backgroundColor: T.bg,
   },
-  tabActive: { backgroundColor: T.elevated },
-  tabText: { fontSize: 13, fontWeight: "700", color: T.dim },
-  tabTextActive: { color: T.text },
-  tabAlert: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: T.warning,
-  },
-
-  sheet: {
-    marginHorizontal: 16,
-    marginBottom: 12,
-    padding: 16,
+  circleBtn: {
+    width: CIRCLE,
+    height: CIRCLE,
+    borderRadius: CIRCLE / 2,
     backgroundColor: T.surface,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: T.border,
-    maxHeight: 380,
-  },
-  pillRow: { flexDirection: "row", gap: 8 },
-  dangerBtn: {
-    paddingVertical: 11,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: T.error,
     alignItems: "center",
+    justifyContent: "center",
   },
-  dangerText: { color: T.error, fontWeight: "700", fontSize: 13 },
-
-  loadHeader: { flexDirection: "row", alignItems: "center" },
-  loadTitle: { fontSize: 16, fontWeight: "800", color: T.text },
-  loadSub: { fontSize: 12, color: T.dim, marginTop: 2 },
-  loadBtn: {
-    backgroundColor: T.accent,
-    paddingHorizontal: 22,
-    paddingVertical: 11,
-    borderRadius: 12,
-  },
-  loadBtnText: { color: "#fff", fontWeight: "800", fontSize: 14 },
-  preflightRow: {
+  circleIcon: { fontSize: 17, color: T.text },
+  plusIcon: { fontSize: 20, color: T.text, marginTop: -1 },
+  sendIcon: { fontSize: 20, fontWeight: "700" },
+  namePill: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginTop: 12,
+    gap: 6,
+    backgroundColor: T.surface,
+    borderRadius: CIRCLE / 2,
+    paddingHorizontal: 16,
+    height: CIRCLE,
   },
-  verdictDot: { width: 8, height: 8, borderRadius: 4 },
-  preflightText: { flex: 1, fontSize: 12, color: T.dim, lineHeight: 17 },
-  errorText: { fontSize: 12, color: T.error, marginTop: 10, lineHeight: 17 },
+  nameText: { fontSize: 16, fontWeight: "600", color: T.text },
+  nameChevron: { fontSize: 13, color: T.dim, marginTop: -4 },
 
-  metricsBar: {
-    flexDirection: "row",
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 10,
-  },
-
-  chatContent: { paddingHorizontal: 16, paddingBottom: 12, flexGrow: 1 },
+  chatContent: { paddingVertical: 8, paddingBottom: 16, flexGrow: 1 },
   suggestRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
-    marginTop: 20,
+    marginTop: 24,
     justifyContent: "center",
   },
   suggestChip: {
     paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: T.card,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: T.border,
-  },
-  suggestText: { fontSize: 13, color: T.accentGlow, fontWeight: "600" },
-
-  attachmentPreview: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: T.accentSoft,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  attachmentText: { color: T.accentGlow, fontSize: 12, fontWeight: "600" },
-  inputBar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderTopWidth: 1,
-    borderTopColor: T.border,
-    backgroundColor: T.bg,
-  },
-  input: {
-    flex: 1,
+    paddingVertical: 9,
     backgroundColor: T.surface,
-    borderRadius: 22,
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    color: T.text,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: T.border,
-    maxHeight: 100,
+    borderRadius: 20,
   },
-  sendBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: T.accent,
+  suggestText: { fontSize: 13, color: T.text, fontWeight: "500" },
+
+  scrollDown: {
+    position: "absolute",
+    alignSelf: "center",
+    bottom: 96,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: T.elevated,
     alignItems: "center",
     justifyContent: "center",
   },
-  sendIcon: { color: "#fff", fontSize: 20, fontWeight: "900" },
+  scrollDownIcon: { color: T.text, fontSize: 16, marginTop: -6 },
+
+  composer: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+  },
+  inputPill: {
+    flex: 1,
+    minHeight: CIRCLE,
+    borderRadius: 24,
+    backgroundColor: T.surface,
+    justifyContent: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  input: {
+    fontSize: 16,
+    color: T.text,
+    paddingVertical: Platform.OS === "ios" ? 4 : 2,
+    maxHeight: 120,
+  },
+  attachmentChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 8,
+    backgroundColor: T.elevated,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  attachmentText: { color: T.text, fontSize: 12, fontWeight: "500" },
+  attachmentRemove: { color: T.dim, fontSize: 12 },
+
+  // Setup / load
+  setup: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+  },
+  setupMark: {
+    fontSize: 34,
+    fontWeight: "800",
+    color: T.text,
+    opacity: 0.2,
+    letterSpacing: -0.5,
+    marginBottom: 18,
+  },
+  setupTitle: { fontSize: 20, fontWeight: "700", color: T.text },
+  setupSub: { fontSize: 13, color: T.dim, marginTop: 4 },
+  preflightRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 18,
+    maxWidth: 320,
+  },
+  verdictDot: { width: 8, height: 8, borderRadius: 4 },
+  preflightText: { flexShrink: 1, fontSize: 12, color: T.dim, lineHeight: 17 },
+  loadBtn: {
+    marginTop: 20,
+    backgroundColor: T.text,
+    paddingHorizontal: 28,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
+  loadBtnText: { color: T.bg, fontWeight: "700", fontSize: 15 },
+  progressWrap: { marginTop: 24, alignItems: "center", width: "100%" },
+  loadingText: { color: T.dim, fontSize: 14, marginTop: 10 },
+  errorText: {
+    fontSize: 12,
+    color: T.error,
+    marginTop: 16,
+    lineHeight: 17,
+    textAlign: "center",
+  },
+
+  // Settings sheet
+  sheetRoot: { flex: 1, backgroundColor: T.bg },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 4,
+  },
+  sheetTitle: { fontSize: 22, fontWeight: "700", color: T.text },
+  pillRow: { flexDirection: "row", gap: 8 },
+  dangerBtn: {
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: T.errorSoft,
+    alignItems: "center",
+  },
+  dangerText: { color: T.error, fontWeight: "600", fontSize: 14 },
 });
