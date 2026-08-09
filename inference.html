@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Inference &amp; streaming — litert·lm</title>
+<meta name="description" content="execute() and executeWithEvents(): multimodal parts, typed streaming events, tool calling, thinking, structured output, and generation controls in react-native-litert-lm." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html" class="here">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Core API</p>
+  <h1>Inference &amp; streaming</h1>
+  <p class="lede">
+    One entry point — <code>execute()</code> — handles text, images, and audio,
+    streaming or blocking. <code>executeWithEvents()</code> adds typed
+    <code>token</code> / <code>toolCall</code> / <code>thinking</code> events on top.
+  </p>
+
+  <h2 id="execute">execute()</h2>
+  <p>
+    <code>execute()</code> is the single deep entry point for inference. It
+    replaces all modality-specific send methods: pass an array of
+    <a href="#multimodalpart"><code>MultimodalPart</code></a>s mixing text,
+    image, and audio.
+  </p>
+  <div class="sig">execute(
+  parts: MultimodalPart[],
+  onToken?: (token: string, done: boolean) =&gt; void,
+  options?: ExecuteOptions,
+): Promise&lt;string&gt;</div>
+  <p>
+    When <code>onToken</code> is provided, tokens stream incrementally through
+    the callback as they are generated; the promise still resolves with the
+    complete response at the end. Without <code>onToken</code>, the call blocks
+    and resolves with the full response string.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// Streaming: tokens arrive as they are generated
+const full = await llm.execute(
+  [{ type: "text", text: "Write a haiku about RAM." }],
+  (token, done) =&gt; {
+    if (!done) appendToUI(token);
+  },
+);
+
+// Blocking: omit the callback, await the whole response
+const reply = await llm.execute(
+  [{ type: "text", text: "What is the capital of France?" }],
+);</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      On a <code>createLLM()</code> instance, <code>execute()</code> and
+      <code>executeWithEvents()</code> strip a leading <code>file://</code>
+      prefix from part paths, so URIs from image pickers work as-is.
+    </p>
+  </div>
+
+  <h2 id="multimodalpart">MultimodalPart</h2>
+  <div class="sig">export interface MultimodalPart {
+  /** The part type: 'text', 'image', or 'audio' */
+  type: PartType;
+  /** The plain text content, if type is 'text' */
+  text?: string;
+  /**
+   * Local filesystem path to an image or audio file, if type is 'image' or 'audio'.
+   * Takes precedence over `imageBuffer`/`audioBuffer` if both are set.
+   */
+  path?: string;
+  /** Raw image binary data, if type is 'image' (zero-copy ArrayBuffer mapping) */
+  imageBuffer?: ArrayBuffer;
+  /** Raw audio binary data, if type is 'audio' (zero-copy ArrayBuffer mapping) */
+  audioBuffer?: ArrayBuffer;
+}</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>type</code></td><td><code>"text" | "image" | "audio"</code></td><td>The part type.</td></tr>
+        <tr><td><code>text</code></td><td><code>string</code></td><td>Plain text content, if <code>type</code> is <code>'text'</code>.</td></tr>
+        <tr><td><code>path</code></td><td><code>string</code></td><td>Local filesystem path to an image or audio file. Takes precedence over <code>imageBuffer</code>/<code>audioBuffer</code> if both are set. A leading <code>file://</code> is stripped.</td></tr>
+        <tr><td><code>imageBuffer</code></td><td><code>ArrayBuffer</code></td><td>Raw image binary data (zero-copy ArrayBuffer mapping), if <code>type</code> is <code>'image'</code>.</td></tr>
+        <tr><td><code>audioBuffer</code></td><td><code>ArrayBuffer</code></td><td>Raw audio binary data (zero-copy ArrayBuffer mapping), if <code>type</code> is <code>'audio'</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Buffers are staged to temp files for the engine's file-based API and
+    cleaned up after inference. Image paths are auto-scaled to 1024px on both
+    platforms.
+  </p>
+
+  <h3 id="multimodal-example">Multimodal example</h3>
+  <p>Send an image as a zero-copy <code>ArrayBuffer</code> alongside text:</p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const buf = await (await fetch(Image.resolveAssetSource(require("./photo.jpg")).uri)).arrayBuffer();
+
+const reply = await llm.execute([
+  { type: "image", imageBuffer: buf },
+  { type: "text", text: "Describe this image." },
+]);</code></pre>
+  </div>
+
+  <h2 id="executewithevents">executeWithEvents()</h2>
+  <p>
+    The typed-event variant of <code>execute()</code>. Instead of a raw token
+    stream, the callback receives <code>StreamEvent</code>s classified as plain
+    response text, tool-call content, or reasoning.
+  </p>
+  <div class="sig">executeWithEvents(
+  parts: MultimodalPart[],
+  onEvent: StreamEventCallback,
+  options?: ExecuteOptions,
+): Promise&lt;string&gt;</div>
+  <div class="sig">/** Kind of streamed content. */
+export type StreamEventType = "token" | "toolCall" | "thinking";
+
+/** A typed streaming event. */
+export interface StreamEvent {
+  /** What this chunk is: plain response text, tool-call content, or reasoning */
+  type: StreamEventType;
+  /** The text content of this chunk */
+  text: string;
+  /** True exactly once, on the final event of the stream */
+  done: boolean;
+}
+
+/** Callback receiving typed streaming events from `executeWithEvents`. */
+export type StreamEventCallback = (event: StreamEvent) =&gt; void;</div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await llm.loadModel(modelUrl, { tools }); // + streamToolCalls: true for token-level streaming on iOS
+
+await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (event) =&gt; {
+  switch (event.type) {
+    case "token":    ui.appendText(event.text); break;
+    case "toolCall": toolBuffer += event.text; break;
+    case "thinking": ui.showReasoning(event.text); break;
+  }
+  if (event.done) runTool(JSON.parse(toolBuffer));
+});</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      Completed tool calls surface as <code>toolCall</code> events on both
+      platforms. Setting <code>streamToolCalls: true</code> in the load config
+      additionally streams tool-call and reasoning tokens as they are generated
+      — <span class="pill ios">iOS</span> only; on
+      <span class="pill android">Android</span> a tool call surfaces once it is
+      complete. The final event of every stream is
+      <code>{ type: "token", text: "", done: true }</code>.
+    </p>
+  </div>
+
+  <h2 id="tool-calling">Tool calling</h2>
+  <p>
+    Declare tools in <code>LLMConfig.tools</code> at load time. When the model
+    decides to call one, the JSON call content arrives as
+    <code>toolCall</code> events.
+  </p>
+  <div class="sig">export interface ToolDefinition {
+  /** Name of the function/tool */
+  name: string;
+  /** Human-readable description of what the function/tool does */
+  description: string;
+  /** JSON schema defining parameter names and types (stringified) */
+  parametersJson: string;
+}</div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const tools = [
+  {
+    name: "get_weather",
+    description: "Get the current weather for a city",
+    parametersJson: JSON.stringify({
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    }),
+  },
+];
+
+await llm.loadModel(modelUrl, { tools });
+
+let toolBuffer = "";
+await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (event) =&gt; {
+  if (event.type === "toolCall") toolBuffer += event.text;
+  if (event.done &amp;&amp; toolBuffer) {
+    const call = JSON.parse(toolBuffer); // shape follows the model's tool-call JSON
+    dispatchTool(call);
+  }
+});</code></pre>
+  </div>
+
+  <h2 id="thinking">Thinking</h2>
+  <p>
+    Gemma 4 models (LiteRT-LM 0.15+) can reason before answering. Set a session
+    default via <code>LLMConfig.thinking</code>, and override per message via
+    <code>ExecuteOptions.thinking</code>. Reasoning content arrives as
+    <code>thinking</code> events from <code>executeWithEvents()</code>.
+  </p>
+  <div class="sig">export interface ThinkingOptions {
+  /**
+   * Whether thinking/reasoning generation is enabled.
+   * @default true (engine default)
+   */
+  enabled?: boolean;
+
+  /**
+   * Token budget for reasoning generation. `-1` means unlimited.
+   * Lower budgets reduce latency and memory at some quality cost on
+   * reasoning-heavy prompts.
+   * @default -1
+   */
+  tokenBudget?: number;
+}</div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// Session default at load time
+await llm.loadModel(modelUrl, { thinking: { enabled: true, tokenBudget: 512 } });
+
+// Per-message override
+await llm.execute(parts, onToken, {
+  thinking: { enabled: false }, // skip reasoning for this message
+});</code></pre>
+  </div>
+
+  <h2 id="structured-output">Structured output</h2>
+  <p>
+    Constrain a response to a JSON Schema or a regular expression (constrained
+    decoding via LLGuidance, LiteRT-LM 0.15+). Set
+    <code>enableStructuredOutput: true</code> at load time, then pass
+    <code>responseSchema</code> or <code>responseRegex</code> per message. When
+    a schema is used, the engine guarantees the output parses against it.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const llm = createLLM();
+await llm.loadModel(GEMMA_4_E2B_IT, {
+  enableStructuredOutput: true,
+  temperature: 0, // greedy sampling improves schema adherence
+});
+
+const json = await llm.execute(
+  [{ type: 'text', text: 'Extract: "Ada Lovelace, born 1815, London"' }],
+  undefined,
+  {
+    responseSchema: JSON.stringify({
+      type: 'object',
+      properties: { name: { type: 'string' }, birthYear: { type: 'number' }, city: { type: 'string' } },
+      required: ['name', 'birthYear', 'city'],
+    }),
+  },
+);
+const person = JSON.parse(json); // guaranteed to parse
+
+// Or a regex constraint:
+await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
+  responseRegex: 'P[0-3]',
+});</code></pre>
+  </div>
+  <div class="warn">
+    <span class="note-label">Requires enableStructuredOutput</span>
+    <p>
+      Using <code>responseSchema</code> or <code>responseRegex</code> without
+      <code>enableStructuredOutput: true</code> in the load config rejects with
+      a clear error. <code>responseSchema</code> takes precedence when both are
+      set. For best schema adherence, use <code>temperature: 0</code>.
+    </p>
+  </div>
+
+  <h2 id="generation-controls">Generation controls</h2>
+  <p>
+    Per-message sampling controls fight repetitive or looping output and cap
+    generation length:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await llm.execute(parts, onToken, {
+  maxOutputTokens: 256,            // per-message output cap
+  thinking: { enabled: true, tokenBudget: 512 }, // reasoning budget (Gemma 4)
+  repetitionPenalty: 1.2,          // ≥ 1.0, HuggingFace-style multiplicative
+  presencePenalty: 0.5,            // OpenAI-style subtractive
+  frequencyPenalty: 0.3,
+  noRepeatNgramSize: 3,            // ban exact 3-gram repeats
+  suppressTokens: [128010],        // token IDs forced to -inf (iOS only)
+});</code></pre>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Option</th><th>Default</th><th>Meaning / platform notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>repetitionPenalty</code></td><td>—</td><td>Multiplicative repetition penalty (HuggingFace style). <code>1.0</code> = no penalty; values clamped to ≥ 1.0 by the engine. Applies only to tokens generated in this response.</td></tr>
+        <tr><td><code>presencePenalty</code></td><td><code>0</code></td><td>Subtractive presence penalty (OpenAI style): subtracted from a token's logit once it has appeared in the generated window.</td></tr>
+        <tr><td><code>frequencyPenalty</code></td><td><code>0</code></td><td>Subtractive frequency penalty (OpenAI style): subtracted per prior occurrence of the token in the generated window.</td></tr>
+        <tr><td><code>penaltyWindowSize</code></td><td><code>0</code></td><td>How many recent generated tokens the penalties consider. <code>0</code> = the entire generation history.</td></tr>
+        <tr><td><code>noRepeatNgramSize</code></td><td>—</td><td>Ban exact n-gram repeats of this size during generation (<code>0</code> disables).</td></tr>
+        <tr><td><code>noRepeatNgramWindowSize</code></td><td><code>0</code></td><td>Window of recent tokens checked for repeating n-grams. <code>0</code> = entire generation history.</td></tr>
+        <tr><td><code>suppressTokens</code></td><td>—</td><td>Token IDs that must never be generated — logits forced to -inf. <span class="pill ios">iOS</span> only; ignored with a warning on <span class="pill android">Android</span> (LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding aborts the process, so the library refuses to use it there until upstream fixes it).</td></tr>
+        <tr><td><code>maxOutputTokens</code></td><td>—</td><td>Cap output tokens for this message only, overriding the session-level <code>maxOutputTokens</code>. Both platforms (LiteRT-LM 0.15+).</td></tr>
+        <tr><td><code>visualTokenBudget</code></td><td>—</td><td>Visual token budget for this message (multimodal models). Lower values reduce memory spent encoding images. <span class="pill ios">iOS</span> only.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    See <a href="configuration.html">Configuration</a> for the full
+    <code>ExecuteOptions</code> reference.
+  </p>
+
+  <h2 id="stream-parser">Stream parser (advanced)</h2>
+  <p>
+    <code>executeWithEvents()</code> is built on a pure, incremental parser
+    that splits the raw token stream into typed events by channel markers. Use
+    it directly to parse a stream you obtained some other way, or override the
+    markers via <code>createLLM({ streamChannels })</code>.
+  </p>
+  <div class="sig">/** A channel definition: content between `start` and `end` gets `type`. */
+export interface StreamChannel {
+  type: Exclude&lt;StreamEventType, "token"&gt;;
+  start: string;
+  end: string;
+}
+
+/** Default channel markers (override via `createLLM({ streamChannels })`). */
+export const DEFAULT_CHANNELS: StreamChannel[] = [
+  { type: "toolCall", start: "&lt;tool_call&gt;", end: "&lt;/tool_call&gt;" },
+  { type: "thinking", start: "&lt;thinking&gt;", end: "&lt;/thinking&gt;" },
+];
+
+export interface StreamEventParser {
+  /**
+   * Feed a raw chunk; returns zero or more complete events.
+   * Text that could be the start of a channel marker is held back until
+   * disambiguated by the next chunk (or by `finish()`).
+   */
+  push(chunk: string): StreamEvent[];
+  /**
+   * Flush any held-back text and emit the final `done` event.
+   * An unterminated channel is flushed as content of that channel.
+   */
+  finish(): StreamEvent[];
+}
+
+/** Create an incremental stream-event parser. */
+export function createStreamEventParser(
+  channels: StreamChannel[] = DEFAULT_CHANNELS,
+): StreamEventParser</div>
+  <p>
+    Feed <code>push()</code> chunks as they arrive — markers split across chunk
+    boundaries are handled by buffering the longest possible marker prefix.
+    Call <code>finish()</code> at the end of the stream: it flushes any
+    held-back text, and an unterminated channel is flushed as that channel's
+    content. The final event is always
+    <code>{ type: "token", text: "", done: true }</code>.
+  </p>
+
+  <h2 id="stats-introspection">Stats &amp; introspection</h2>
+
+  <h3 id="getstats">getStats()</h3>
+  <div class="sig">getStats(): GenerationStats</div>
+  <p>Returns the last generation statistics:</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Number of tokens in the prompt.</td></tr>
+        <tr><td><code>completionTokens</code></td><td><code>number</code></td><td>Number of tokens generated.</td></tr>
+        <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>Total tokens (prompt + completion).</td></tr>
+        <tr><td><code>timeToFirstToken</code></td><td><code>number</code></td><td>Time to first token in milliseconds.</td></tr>
+        <tr><td><code>totalTime</code></td><td><code>number</code></td><td>Total generation time in milliseconds.</td></tr>
+        <tr><td><code>tokensPerSecond</code></td><td><code>number</code></td><td>Tokens per second.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="counttokens">countTokens()</h3>
+  <div class="sig">countTokens(text: string): number</div>
+  <p>Count tokens in a text string. Returns <code>-1</code> if unavailable.</p>
+
+  <h3 id="getcontexttokencount">getContextTokenCount()</h3>
+  <div class="sig">getContextTokenCount(): number</div>
+  <p>
+    Number of tokens currently held in the conversation KV cache (prompt +
+    history + generated tokens). Returns <code>-1</code> if unavailable.
+    Combine with <code>maxContextTokens</code> to warn before the context
+    window (and its memory) runs out — see <code>getMemoryForecast()</code> on
+    the <a href="memory.html">Memory &amp; errors</a> page. Exact on
+    <span class="pill ios">iOS</span>; approximated on
+    <span class="pill android">Android</span>, where the SDK doesn't expose
+    tokenizer counts.
+  </p>
+
+  <h3 id="gethistory">getHistory()</h3>
+  <div class="sig">getHistory(): Message[]</div>
+  <p>
+    Get the current conversation history as an array of
+    <code>{ role, content }</code> messages.
+  </p>
+
+  <h3 id="resetconversation">resetConversation()</h3>
+  <div class="sig">resetConversation(historyJson?: string, systemPrompt?: string): void</div>
+  <p>
+    Clear the conversation context and start fresh. Optionally seed the fresh
+    context from a prior transcript (a JSON array of
+    <code>{role: 'user'|'model', content: string}</code> turns, re-prefilled by
+    the engine on the next message) and/or override the session
+    <code>systemPrompt</code> for the new conversation.
+  </p>
+
+  <div class="pager">
+    <a href="create-llm.html"><span>Previous</span>createLLM &amp; instances</a>
+    <a class="next" href="configuration.html"><span>Next</span>Configuration</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

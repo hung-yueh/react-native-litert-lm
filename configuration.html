@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Configuration — litert·lm</title>
+<meta name="description" content="LLMConfig, ExecuteOptions, ThinkingOptions, backend selection, and the full iOS vs Android platform support matrix for react-native-litert-lm." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html" class="here">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Core API</p>
+  <h1>Configuration</h1>
+  <p class="lede">
+    Every knob the engine exposes: the session-level <code>LLMConfig</code>,
+    the per-message <code>ExecuteOptions</code>, backend selection, and the
+    full iOS vs Android support matrix.
+  </p>
+
+  <h2 id="llmconfig">LLMConfig</h2>
+  <p>
+    The session-level configuration, passed to <code>loadModel()</code> or as
+    the second argument to <code>useModel()</code>. All fields are optional.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>systemPrompt</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>System prompt prepended to the conversation to guide model responses.</td>
+        </tr>
+        <tr>
+          <td><code>backend</code></td>
+          <td><code>Backend</code></td>
+          <td><code>'cpu'</code></td>
+          <td>Primary compute backend for text generation. Falls back automatically if unavailable. The vision encoder is always GPU (required by Gemma models); the audio encoder is always CPU.</td>
+        </tr>
+        <tr>
+          <td><code>maxContextTokens</code></td>
+          <td><code>number</code></td>
+          <td><code>4096</code></td>
+          <td>Total engine KV-cache budget in tokens (prompt + history + output combined). Must be ≥ total input tokens + desired output tokens. For compiled bundles, should not exceed the bundle's compiled cache_length.</td>
+        </tr>
+        <tr>
+          <td><code>maxOutputTokens</code></td>
+          <td><code>number</code></td>
+          <td><code>1024</code></td>
+          <td>Maximum tokens generated per response. For compiled bundles, must not exceed the compiled decode-chunk size. Applies on both platforms (LiteRT-LM 0.15+); override per message via <code>ExecuteOptions.maxOutputTokens</code>.</td>
+        </tr>
+        <tr>
+          <td><code>maxTokens</code> <span class="pill dep">deprecated</span></td>
+          <td><code>number</code></td>
+          <td><code>1024</code></td>
+          <td>Use <code>maxContextTokens</code> and <code>maxOutputTokens</code> instead. When set alone (without the new fields), maps to both for backward compatibility.</td>
+        </tr>
+        <tr>
+          <td><code>temperature</code></td>
+          <td><code>number</code></td>
+          <td><code>0.7</code></td>
+          <td>Sampling temperature (0.0 = deterministic, 1.0 = creative).</td>
+        </tr>
+        <tr>
+          <td><code>topK</code></td>
+          <td><code>number</code></td>
+          <td><code>40</code></td>
+          <td>Top-K sampling (number of top tokens to consider).</td>
+        </tr>
+        <tr>
+          <td><code>topP</code></td>
+          <td><code>number</code></td>
+          <td><code>0.95</code></td>
+          <td>Top-P (nucleus) sampling threshold.</td>
+        </tr>
+        <tr>
+          <td><code>multimodal</code></td>
+          <td><code>boolean</code></td>
+          <td>filename sniffing</td>
+          <td>Whether this is a multimodal model. When enabled, the engine handles image/audio tokens properly. If not specified, the system falls back to filename sniffing (&quot;3n&quot;/&quot;gemma3&quot;).</td>
+        </tr>
+        <tr>
+          <td><code>tools</code></td>
+          <td><code>ToolDefinition[]</code></td>
+          <td>—</td>
+          <td>List of tools/functions the model can call.</td>
+        </tr>
+        <tr>
+          <td><code>enableSpeculativeDecoding</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Enable speculative decoding (multi-token prediction) if the model supports it.</td>
+        </tr>
+        <tr>
+          <td><code>enableStructuredOutput</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Initialize the constraint provider (LLGuidance) so structured output can be requested per message via <code>ExecuteOptions.responseSchema</code>/<code>responseRegex</code> (LiteRT-LM 0.15+). Adds a small one-time initialization cost at conversation creation.</td>
+        </tr>
+        <tr>
+          <td><code>thinking</code></td>
+          <td><code>ThinkingOptions</code></td>
+          <td>engine default</td>
+          <td>Session-default thinking/reasoning controls (Gemma 4, LiteRT-LM 0.15+). Override per message via <code>ExecuteOptions.thinking</code>.</td>
+        </tr>
+        <tr>
+          <td><code>numThreads</code> <span class="pill ios">iOS</span></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>CPU threads for text generation (CPU backend). Lower values reduce peak memory-bandwidth pressure at some speed cost. iOS only — the Android Kotlin SDK does not expose thread control.</td>
+        </tr>
+        <tr>
+          <td><code>prefillChunkSize</code> <span class="pill ios">iOS</span></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Prefill chunk size (CPU backend only). Smaller chunks reduce peak activation memory during long-prompt prefill at some latency cost.</td>
+        </tr>
+        <tr>
+          <td><code>activationDataType</code> <span class="pill ios">iOS</span></td>
+          <td><code>ActivationDataType</code></td>
+          <td>—</td>
+          <td>Activation tensor data type; <code>'f16'</code> roughly halves activation memory vs <code>'f32'</code>.</td>
+        </tr>
+        <tr>
+          <td><code>loraPath</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>Path to a LoRA adapter weights file applied on top of the base model.</td>
+        </tr>
+        <tr>
+          <td><code>audioLoraPath</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>Path to an audio LoRA adapter weights file.</td>
+        </tr>
+        <tr>
+          <td><code>loraRank</code> <span class="pill ios">iOS</span></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>LoRA rank of the adapter (must match training). iOS only — Android derives the rank internally.</td>
+        </tr>
+        <tr>
+          <td><code>streamToolCalls</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Stream tool-call tokens through the token callback as they are generated (LiteRT-LM v0.14+). Content arrives wrapped in channel markers; use <code>executeWithEvents()</code> for typed events. Token-level streaming is iOS only; completed tool calls surface as typed events on both platforms.</td>
+        </tr>
+        <tr>
+          <td><code>toolCallChannelName</code></td>
+          <td><code>string</code></td>
+          <td><code>"tool_call"</code></td>
+          <td>Channel name used to delimit streamed tool-call tokens.</td>
+        </tr>
+        <tr>
+          <td><code>forceLoad</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Skip the automatic pre-flight memory check in <code>loadModel()</code> and load even when the estimate says the model likely does not fit. JS-side only — the native engine ignores this field.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="note-label">Context is the memory lever</span>
+    <p>
+      <code>maxContextTokens</code> is the biggest memory lever: it sizes the
+      KV cache the engine allocates for the conversation. It must be at least
+      your total input tokens plus the output tokens you want, and for
+      compiled bundles it should not exceed the bundle's compiled
+      cache_length (just as <code>maxOutputTokens</code> must not exceed the
+      compiled decode-chunk size).
+    </p>
+  </div>
+
+  <h2 id="executeoptions">ExecuteOptions</h2>
+  <p>
+    Per-message options for <code>execute()</code> and
+    <code>executeWithEvents()</code> (LiteRT-LM v0.14+). These apply to a
+    single response, overriding session defaults where noted.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>maxOutputTokens</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Cap output tokens for this message only, overriding session-level <code>maxOutputTokens</code>. Both platforms (LiteRT-LM 0.15+).</td>
+        </tr>
+        <tr>
+          <td><code>visualTokenBudget</code> <span class="pill ios">iOS</span></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Visual token budget for this message (multimodal models). Lower values reduce memory spent encoding images.</td>
+        </tr>
+        <tr>
+          <td><code>responseSchema</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>Constrain this response to match a JSON Schema (constrained decoding via LLGuidance, LiteRT-LM 0.15+). Pass the schema as a JSON string; the engine guarantees the output parses against it. Requires <code>enableStructuredOutput: true</code> at load time. Takes precedence over <code>responseRegex</code>. For best schema adherence use low-temperature sampling (<code>temperature: 0</code>) in the load config.</td>
+        </tr>
+        <tr>
+          <td><code>responseRegex</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>Constrain this response to match a regular expression (LLGuidance, LiteRT-LM 0.15+). Requires <code>enableStructuredOutput: true</code>. Ignored when <code>responseSchema</code> is also set.</td>
+        </tr>
+        <tr>
+          <td><code>repetitionPenalty</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Multiplicative repetition penalty (HuggingFace style). <code>1.0</code> = no penalty; values clamped to ≥ 1.0 by the engine. Applies only to tokens generated in this response.</td>
+        </tr>
+        <tr>
+          <td><code>presencePenalty</code></td>
+          <td><code>number</code></td>
+          <td><code>0</code></td>
+          <td>Subtractive presence penalty (OpenAI style): subtracted from a token's logit once it has appeared in the generated window. Positive values discourage repetition.</td>
+        </tr>
+        <tr>
+          <td><code>frequencyPenalty</code></td>
+          <td><code>number</code></td>
+          <td><code>0</code></td>
+          <td>Subtractive frequency penalty (OpenAI style): subtracted per prior occurrence of the token in the generated window.</td>
+        </tr>
+        <tr>
+          <td><code>penaltyWindowSize</code></td>
+          <td><code>number</code></td>
+          <td><code>0</code></td>
+          <td>How many recent generated tokens the penalties consider. <code>0</code> = the entire generation history.</td>
+        </tr>
+        <tr>
+          <td><code>noRepeatNgramSize</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Ban exact n-gram repeats of this size during generation (<code>0</code> disables). Useful against looping output.</td>
+        </tr>
+        <tr>
+          <td><code>noRepeatNgramWindowSize</code></td>
+          <td><code>number</code></td>
+          <td><code>0</code></td>
+          <td>Window of recent tokens checked for repeating n-grams. <code>0</code> = entire generation history.</td>
+        </tr>
+        <tr>
+          <td><code>suppressTokens</code> <span class="pill ios">iOS</span></td>
+          <td><code>number[]</code></td>
+          <td>—</td>
+          <td>Token IDs that must never be generated — logits forced to -inf. iOS only; ignored with a warning on Android (see below).</td>
+        </tr>
+        <tr>
+          <td><code>thinking</code></td>
+          <td><code>ThinkingOptions</code></td>
+          <td><code>LLMConfig.thinking</code></td>
+          <td>Thinking/reasoning override for this message.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">suppressTokens on Android</span>
+    <p>
+      <code>suppressTokens</code> is ignored (with a warning) on Android:
+      LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding looks
+      up a Kotlin-mangled <code>internal</code> accessor and aborts the
+      process, so the library refuses to use it there until upstream fixes
+      the mismatch.
+    </p>
+  </div>
+
+  <h2 id="thinkingoptions">ThinkingOptions</h2>
+  <p>
+    Thinking/reasoning generation controls (Gemma 4 models, LiteRT-LM 0.15+).
+    Set in <code>LLMConfig.thinking</code> as the session default, or per
+    message via <code>ExecuteOptions.thinking</code>.
+  </p>
+  <div class="sig">
+    <pre><code>interface ThinkingOptions {
+  enabled?: boolean;
+  tokenBudget?: number;
+}</code></pre>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>enabled</code></td>
+          <td><code>boolean</code></td>
+          <td><code>true</code> (engine default)</td>
+          <td>Whether thinking/reasoning generation is enabled.</td>
+        </tr>
+        <tr>
+          <td><code>tokenBudget</code></td>
+          <td><code>number</code></td>
+          <td><code>-1</code></td>
+          <td>Token budget for reasoning generation. <code>-1</code> means unlimited. Lower budgets reduce latency and memory at some quality cost on reasoning-heavy prompts.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="backend">Backend</h2>
+  <div class="sig">
+    <pre><code>type Backend = "cpu" | "gpu" | "npu";</code></pre>
+  </div>
+  <ul>
+    <li><code>'cpu'</code> — CPU inference (slowest, always available).</li>
+    <li><code>'gpu'</code> — GPU acceleration (fast, recommended for most devices).</li>
+    <li><code>'npu'</code> — NPU/Neural Engine (fastest on supported hardware). Requires compatible hardware (e.g., Qualcomm Hexagon, MediaTek APU); if NPU is unavailable, LiteRT-LM automatically falls back to GPU.</li>
+  </ul>
+  <p>
+    The backend applies to text generation only: the vision encoder is always
+    GPU (required by Gemma models), and the audio encoder is always CPU.
+  </p>
+
+  <h3 id="getrecommendedbackend">getRecommendedBackend()</h3>
+  <div class="sig">
+    <pre><code>function getRecommendedBackend(): Backend</code></pre>
+  </div>
+  <p>
+    Returns <code>'cpu'</code> as the safe default — always. GPU (Metal on
+    iOS, GPU delegate on Android) is faster but may not be available on all
+    devices or model configurations.
+  </p>
+
+  <h3 id="checkbackendsupport">checkBackendSupport(backend)</h3>
+  <div class="sig">
+    <pre><code>function checkBackendSupport(backend: Backend): string | undefined</code></pre>
+  </div>
+  <p>
+    Checks whether a backend configuration is supported on the current
+    platform. Returns a warning message if the configuration may have issues,
+    or <code>undefined</code> if OK.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Platform</th><th>Backend</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>iOS / Android</td><td><code>'cpu'</code></td><td><code>undefined</code></td></tr>
+        <tr><td>iOS</td><td><code>'gpu'</code></td><td><code>undefined</code> (iOS always supports GPU via Metal)</td></tr>
+        <tr><td>Android</td><td><code>'gpu'</code></td><td>"GPU backend requires OpenCL support, which is unavailable on most Samsung and Qualcomm devices. Will automatically fall back to CPU if unavailable."</td></tr>
+        <tr><td>iOS</td><td><code>'npu'</code></td><td>"NPU (Neural Engine) is not yet supported on iOS. Mapped to GPU (Metal) internally."</td></tr>
+        <tr><td>Android</td><td><code>'npu'</code></td><td>"NPU backend requires compatible hardware (Qualcomm Hexagon, MediaTek APU, etc.). Will automatically fall back to CPU if unavailable."</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="checkmultimodalsupport">checkMultimodalSupport()</h3>
+  <div class="sig">
+    <pre><code>function checkMultimodalSupport(): string | undefined</code></pre>
+  </div>
+  <p>
+    Checks whether multimodal features (image/audio) are supported on the
+    current platform — currently always returns <code>undefined</code>: both
+    iOS and Android ship the vision/audio executor ops, so there is no
+    platform-level block. Whether a given call succeeds depends on the
+    <strong>loaded model</strong>: only multimodal models (e.g. Gemma 3n)
+    bundle the vision/audio executors. Pass <code>multimodal: true</code> to
+    <code>loadModel</code> for such models, or rely on filename sniffing
+    (&quot;3n&quot;/&quot;gemma3&quot;).
+  </p>
+
+  <h2 id="activationdatatype">ActivationDataType</h2>
+  <div class="sig">
+    <pre><code>type ActivationDataType = "f32" | "f16" | "i16" | "i8";</code></pre>
+  </div>
+  <p>
+    Activation tensor data types (memory/precision trade-off). Set via
+    <code>LLMConfig.activationDataType</code>
+    <span class="pill ios">iOS</span> — <code>'f16'</code> roughly halves
+    activation memory vs <code>'f32'</code>.
+  </p>
+
+  <h2 id="platform-support">Platform support</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Feature</th><th>iOS</th><th>Android</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>ExecuteOptions.maxOutputTokens</code> (per message)</td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>Both platforms since LiteRT-LM 0.15.</td>
+        </tr>
+        <tr>
+          <td><code>ExecuteOptions.visualTokenBudget</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>iOS only.</td>
+        </tr>
+        <tr>
+          <td><code>ExecuteOptions.suppressTokens</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>Ignored with a warning on Android — LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding aborts the process (Kotlin-mangled <code>internal</code> accessor).</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.numThreads</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>Kotlin SDK doesn't expose thread control.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.prefillChunkSize</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>iOS only.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.activationDataType</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>iOS only.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.loraRank</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>Android derives the rank internally.</td>
+        </tr>
+        <tr>
+          <td><code>streamToolCalls</code> token-level streaming</td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>On Android the tool call surfaces once complete; still a typed <code>toolCall</code> event.</td>
+        </tr>
+        <tr>
+          <td><code>getContextTokenCount()</code> accuracy</td>
+          <td>exact</td>
+          <td>approximated</td>
+          <td>Android SDK doesn't expose tokenizer counts.</td>
+        </tr>
+        <tr>
+          <td>GPU backend</td>
+          <td>Metal, always available</td>
+          <td>OpenCL delegate</td>
+          <td>Android requires <code>libOpenCL.so</code> (varies by SoC); auto-fallback to CPU.</td>
+        </tr>
+        <tr>
+          <td>NPU backend</td>
+          <td>not supported (mapped to GPU/Metal)</td>
+          <td>Qualcomm Hexagon / MediaTek APU</td>
+          <td>Auto-fallback on Android.</td>
+        </tr>
+        <tr>
+          <td>Memory-pressure source</td>
+          <td>dispatch memory-pressure source</td>
+          <td><code>onTrimMemory</code></td>
+          <td>iOS: jetsam-aware <code>os_proc_available_memory</code>, RSS via <code>mach_task_basic_info</code>. Android: <code>ActivityManager.MemoryInfo</code>, <code>Debug.getNativeHeapAllocatedSize</code>.</td>
+        </tr>
+        <tr>
+          <td>Big models (&gt;~2&nbsp;GB)</td>
+          <td>entitlement required</td>
+          <td>—</td>
+          <td>iOS needs <a href="getting-started.html#entitlements">Extended Virtual Addressing</a>, or virtual memory is capped at ~2&nbsp;GB and Jetsam kills the app during load.</td>
+        </tr>
+        <tr>
+          <td>Architectures</td>
+          <td>arm64, iOS 15.1+</td>
+          <td>arm64-v8a, API 26+</td>
+          <td>No x86_64 Android emulators.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-label">Works everywhere</span>
+    <p>
+      Structured output (<code>responseSchema</code>/<code>responseRegex</code>),
+      penalties (<code>repetitionPenalty</code>, <code>presencePenalty</code>,
+      <code>frequencyPenalty</code>, <code>penaltyWindowSize</code>),
+      n-gram bans, and <code>thinking</code> overrides work on
+      <strong>both</strong> platforms (LiteRT-LM 0.15+).
+    </p>
+  </div>
+
+  <h3 id="android-gpu">Android GPU (OpenCL)</h3>
+  <p>
+    Android GPU requires the device to ship <code>libOpenCL.so</code>, which
+    varies by vendor and SoC rather than by brand — present on a Galaxy S22 /
+    Snapdragon 8 Gen 1, absent on plenty of other devices. Probe it with
+    <code>checkBackendSupport('gpu')</code> before committing to the GPU
+    backend; the engine auto-falls back to CPU either way. NPU likewise
+    auto-falls back when the hardware (Qualcomm Hexagon, MediaTek APU) is not
+    present.
+  </p>
+
+  <h3 id="ios-large-models">iOS: models over ~2 GB</h3>
+  <p>
+    Add the Extended Virtual Addressing entitlement for models over ~2&nbsp;GB
+    — without it, iOS caps virtual memory at ~2&nbsp;GB and Jetsam kills the
+    app during load. See
+    <a href="getting-started.html#entitlements">Getting started → iOS entitlement for large models</a>.
+  </p>
+
+  <div class="pager">
+    <a href="inference.html"><span>Previous</span>Inference &amp; streaming</a>
+    <a class="next" href="memory.html"><span>Next</span>Memory &amp; errors</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Models &amp; registry — litert·lm</title>
+<meta name="description" content="Supported .litertlm model bundles, the Models identifier map, and the ModelRegistry download and cache API for react-native-litert-lm." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html" class="here">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Platform</p>
+  <h1>Models &amp; registry</h1>
+  <p class="lede">
+    The bundled model URL constants, the <code>Models</code> identifier map,
+    and <code>ModelRegistry</code> — the single source of truth for model
+    download and cache state.
+  </p>
+
+  <h2 id="supported-models">Supported models</h2>
+  <p>
+    Only <code>.litertlm</code> bundles run. This is a native inference
+    engine, not a Python runtime — raw HuggingFace checkpoints will not load.
+    The library ships three ready-to-use URL constants; pass any of them
+    straight to <code>useModel()</code> or <code>loadModel()</code>.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Constant</th><th>Size</th><th>Min RAM</th><th>Modalities</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>GEMMA_4_E2B_IT</code></td>
+          <td>2.58&nbsp;GB</td>
+          <td>4&nbsp;GB+</td>
+          <td>Text, image, audio, tools, thinking</td>
+        </tr>
+        <tr>
+          <td><code>GEMMA_4_E4B_IT</code></td>
+          <td>3.65&nbsp;GB</td>
+          <td>6&nbsp;GB+</td>
+          <td>Text, image, audio, tools, thinking</td>
+        </tr>
+        <tr>
+          <td><code>GEMMA_3N_E2B_IT_INT4</code></td>
+          <td>~3.66&nbsp;GB</td>
+          <td>6&nbsp;GB+</td>
+          <td>Text, image</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>export const GEMMA_4_E2B_IT =
+  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm";
+
+export const GEMMA_4_E4B_IT =
+  "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm";
+
+export const GEMMA_3N_E2B_IT_INT4 =
+  "https://litert.dev/gemma-3n-E2B-it-int4.litertlm";</code></pre>
+  </div>
+  <p>
+    All three URLs are public — no HuggingFace account or authentication
+    required.
+  </p>
+  <div class="note">
+    <span class="note-label">iOS entitlement</span>
+    <p>
+      All three bundled models exceed ~2&nbsp;GB, so on iOS they need the
+      <a href="getting-started.html#entitlements">Extended Virtual Addressing
+      entitlement</a> — without it, iOS caps virtual memory and kills the app
+      during load.
+    </p>
+  </div>
+
+  <h3 id="gemma-4-capabilities">Gemma 4 capabilities</h3>
+  <div class="note">
+    <span class="note-label">Gemma 4</span>
+    <p>
+      Gemma 4 models support <strong>thinking mode</strong> (reasoning content
+      arrives in <code>&lt;thinking&gt;…&lt;/thinking&gt;</code> markers),
+      <strong>tool calling</strong> (<code>&lt;tool_call&gt;…&lt;/tool_call&gt;</code>
+      markers), <strong>audio input</strong>, and are NPU-optimized. The library
+      parses the channel markers into typed events — see
+      <a href="inference.html">Inference &amp; streaming</a>.
+    </p>
+  </div>
+
+  <h2 id="model-identifiers">Model identifiers</h2>
+  <p>
+    <code>Models</code> maps friendly names to the canonical model
+    identifiers. Use it with model download utilities or as reference.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>export const Models = {
+  /** Gemma 4 E2B Instruct (2B parameters, latest generation) */
+  GEMMA_4_E2B: "gemma-4-E2B-it-litert-lm",
+  /** Gemma 4 E4B Instruct (4B parameters, higher quality) */
+  GEMMA_4_E4B: "gemma-4-E4B-it-litert-lm",
+  /** Gemma 3n E2B (2B parameters, efficient) */
+  GEMMA_3N_E2B: "gemma-3n-E2B-it-litert-lm-preview",
+  /** Gemma 3n E4B (4B parameters, higher quality) */
+  GEMMA_3N_E4B: "gemma-3n-E4B-it-litert-lm-preview",
+  /** Gemma 3 1B (smallest Gemma) */
+  GEMMA_3_1B: "Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096",
+  /** Phi-4 Mini Instruct */
+  PHI_4_MINI: "Phi-4-mini-instruct_multi-prefill-seq_q8_ekv4096",
+  /** Qwen 2.5 1.5B Instruct */
+  QWEN_2_5_1_5B: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096",
+} as const;
+
+export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
+  </div>
+  <p>
+    Models without a bundled URL constant — Gemma 3 1B, Phi-4 Mini, and
+    Qwen 2.5 1.5B — download manually from HuggingFace
+    (<code>litert-community</code>), then load by local path or by your own
+    HTTPS URL.
+  </p>
+
+  <h2 id="model-registry">ModelRegistry</h2>
+  <p>
+    <code>ModelRegistry</code> is the single source of truth for model
+    storage: it coordinates URL sniffing, HTTPS enforcement, atomic downloads
+    with progress, and cache queries. <code>createLLM</code>'s
+    <code>loadModel</code> and the <code>useModel</code> hook both route
+    through it — use it directly for pre-download UIs, cache management, and
+    storage-usage screens.
+  </p>
+
+  <h3 id="is-cached">isCached</h3>
+  <div class="sig"><code>isCached(pathOrUrl: string): boolean</code></div>
+  <p>
+    Check if a model file is cached locally. Accepts a filename, local path,
+    or HTTPS URL. Returns <code>true</code> if cached and the file has
+    size &gt; 0.
+  </p>
+
+  <h3 id="get-file-path">getFilePath</h3>
+  <div class="sig"><code>getFilePath(pathOrUrl: string): string</code></div>
+  <p>
+    Get the absolute local path of a cached model. Accepts a filename, local
+    path, or HTTPS URL.
+  </p>
+
+  <h3 id="list-cached-files">listCachedFiles</h3>
+  <div class="sig"><code>listCachedFiles(): ModelFile[]</code></div>
+  <p>
+    List all locally cached model files. Returns an array of
+    <a href="#model-file"><code>ModelFile</code></a> descriptors containing
+    path, size, and modification time.
+  </p>
+
+  <h3 id="delete-file">deleteFile</h3>
+  <div class="sig"><code>deleteFile(pathOrUrl: string): void</code></div>
+  <p>
+    Delete a cached model file. Accepts a filename, local path, or HTTPS URL.
+  </p>
+
+  <h3 id="get-file-size-bytes">getFileSizeBytes</h3>
+  <div class="sig"><code>getFileSizeBytes(absolutePath: string): number</code></div>
+  <p>
+    Size in bytes of a file at an absolute path (not restricted to the
+    cache). Returns <code>-1</code> if the file does not exist.
+  </p>
+
+  <h3 id="resolve-model">resolveModel</h3>
+  <div class="sig"><code>async resolveModel(pathOrUrl: string, options?: ModelDownloadOptions): Promise&lt;string&gt;</code></div>
+  <p>
+    Resolve a model path or URL. Sniffs the protocol: an HTTPS URL is
+    downloaded to the native cache directory (with throttled progress
+    callbacks) if not already cached; a local path is returned directly.
+    Resolves to the absolute local path of the model.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>export interface ModelDownloadOptions {
+  headers?: Record&lt;string, string&gt;;
+  onProgress?: (progress: number) =&gt; void;
+}</code></pre>
+  </div>
+
+  <h3 id="url-handling">URL handling</h3>
+  <ul>
+    <li>A leading <code>file://</code> prefix is stripped.</li>
+    <li>The cache filename is derived from the URL's last path segment, with the query string stripped.</li>
+    <li>When no filename can be derived, resolution throws <code>Invalid model URL: &lt;url&gt;</code>.</li>
+  </ul>
+  <div class="warn">
+    <span class="note-label">HTTPS only</span>
+    <p>
+      <code>http://</code> URLs are rejected with:
+      <code>Insecure HTTP URLs are not allowed for model downloads. Use HTTPS
+      instead: &lt;https-url&gt;</code>
+    </p>
+  </div>
+
+  <h3 id="model-file">ModelFile</h3>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>export interface ModelFile {
+  fileName: string;
+  absolutePath: string;
+  sizeBytes: number;
+  lastModifiedMs: number;
+}</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      <code>ModelFile</code> is the return type of
+      <code>listCachedFiles()</code>. It is currently not re-exported from
+      the package root, so infer it from the return value rather than
+      importing it by name.
+    </p>
+  </div>
+
+  <h2 id="example">Example: manage the cache</h2>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { ModelRegistry, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+// 1. Check the cache before showing a download prompt
+if (!ModelRegistry.isCached(GEMMA_4_E2B_IT)) {
+  // 2. Download with progress (no-op if already cached)
+  await ModelRegistry.resolveModel(GEMMA_4_E2B_IT, {
+    onProgress: (p) =&gt; setProgress(Math.round(p * 100)),
+  });
+}
+
+// 3. Absolute local path — pass to loadModel(), show in a storage UI, …
+const path = ModelRegistry.getFilePath(GEMMA_4_E2B_IT);
+console.log(path, ModelRegistry.getFileSizeBytes(path));
+
+// 4. Free the multi-GB file when the user removes the model
+ModelRegistry.deleteFile(GEMMA_4_E2B_IT);</code></pre>
+  </div>
+
+  <h2 id="deprecated">Deprecated instance methods <span class="pill dep">deprecated</span></h2>
+  <p>
+    The instance-level <code>downloadModel(url, fileName, onProgress?)</code>
+    and <code>deleteModel(fileName)</code> methods are deprecated —
+    <code>ModelRegistry</code> supersedes both. They remain callable, but new
+    code should use <code>ModelRegistry.resolveModel</code> and
+    <code>ModelRegistry.deleteFile</code> instead.
+  </p>
+
+  <div class="pager">
+    <a href="memory.html"><span>Previous</span>Memory &amp; errors</a>
+    <a class="next" href="index.html"><span>Next</span>Overview</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

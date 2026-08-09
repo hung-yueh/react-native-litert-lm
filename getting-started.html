@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Getting started — litert·lm</title>
+<meta name="description" content="Install react-native-litert-lm, load a Gemma model, and run your first on-device inference on iOS and Android." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html" class="active">Docs</a>
+    <a href="use-model.html">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html" class="here">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Start</p>
+  <h1>Getting started</h1>
+  <p class="lede">
+    Install the library, load a Gemma model, and stream your first tokens —
+    entirely on the device.
+  </p>
+
+  <h2 id="requirements">Requirements</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>Version</th></tr></thead>
+      <tbody>
+        <tr><td>React Native</td><td>0.76+</td></tr>
+        <tr><td><code>react-native-nitro-modules</code></td><td>0.36.0+</td></tr>
+        <tr><td>LiteRT-LM engine (bundled)</td><td>0.15.0</td></tr>
+        <tr><td>Android</td><td>API 26+, arm64-v8a</td></tr>
+        <tr><td>iOS</td><td>15.1+, arm64</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="warn">
+    <span class="note-label">ARM only</span>
+    <p>Only ARM devices and simulators are supported. x86_64 Android emulators will not run the engine.</p>
+  </div>
+
+  <h2 id="install">Install</h2>
+  <div class="code">
+    <div class="code-head"><span>shell</span></div>
+    <pre><code>npm install react-native-litert-lm react-native-nitro-modules</code></pre>
+  </div>
+
+  <h3 id="expo">Expo</h3>
+  <p>Add the config plugin, then prebuild:</p>
+  <div class="code">
+    <div class="code-head"><span>app.json</span></div>
+    <pre><code>{
+  "expo": {
+    "plugins": ["react-native-litert-lm"],
+    "android": { "minSdkVersion": 26 }
+  }
+}</code></pre>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>shell</span></div>
+    <pre><code>npx expo prebuild
+npx expo run:ios      # or run:android</code></pre>
+  </div>
+
+  <h3 id="bare">Bare React Native</h3>
+  <div class="code">
+    <div class="code-head"><span>shell</span></div>
+    <pre><code># iOS
+cd ios &amp;&amp; pod install
+
+# Android
+cd android &amp;&amp; ./gradlew clean</code></pre>
+  </div>
+
+  <h2 id="entitlements">iOS entitlement for large models</h2>
+  <p>
+    Models over ~2&nbsp;GB need <strong>Extended Virtual Addressing</strong>,
+    or iOS caps virtual memory at ~2&nbsp;GB and Jetsam kills the app during
+    load. This applies to all three bundled model constants
+    (<code>GEMMA_4_E2B_IT</code>, <code>GEMMA_4_E4B_IT</code>,
+    <code>GEMMA_3N_E2B_IT_INT4</code>).
+  </p>
+  <div class="code">
+    <div class="code-head"><span>App.entitlements</span></div>
+    <pre><code data-plain>&lt;key&gt;com.apple.developer.kernel.extended-virtual-addressing&lt;/key&gt;
+&lt;true/&gt;</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>The entitlement requires a paid Apple Developer account.</p>
+  </div>
+
+  <h2 id="first-inference">First inference</h2>
+  <p>
+    <code>useModel</code> owns the whole lifecycle: it downloads the model with
+    progress, runs a pre-flight memory check, loads the engine, and cleans up
+    on unmount.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>Chat.tsx</span></div>
+    <pre><code>import { useModel, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+function Chat() {
+  const { model, isReady, downloadProgress, error } = useModel(
+    GEMMA_4_E2B_IT,
+    {
+      backend: "cpu",
+      systemPrompt: "You are a helpful assistant.",
+      enableMemoryTracking: true,
+    },
+  );
+
+  if (error) return &lt;Text&gt;{error}&lt;/Text&gt;;
+  if (!isReady)
+    return &lt;Text&gt;Loading… {Math.round(downloadProgress * 100)}%&lt;/Text&gt;;
+
+  const ask = async () =&gt;
+    console.log(await model.sendMessage("Hello!"));
+
+  return &lt;Button title="Generate" onPress={ask} /&gt;;
+}</code></pre>
+  </div>
+
+  <h2 id="streaming">Stream tokens</h2>
+  <p>
+    For a chat UI, stream with <code>execute()</code> — or get typed
+    <code>token</code> / <code>toolCall</code> / <code>thinking</code> events
+    from <code>executeWithEvents()</code>.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await model.execute(
+  [{ type: "text", text: "Write a haiku about RAM." }],
+  (token, done) =&gt; {
+    if (!done) appendToUI(token);
+  },
+);</code></pre>
+  </div>
+
+  <h2 id="imperative">Outside React</h2>
+  <p>
+    <code>createLLM()</code> gives you the same engine imperatively — for
+    background tasks, services, or your own state management.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { createLLM } from "react-native-litert-lm";
+
+const llm = createLLM();
+await llm.loadModel("https://example.com/model.litertlm", { backend: "gpu" });
+const reply = await llm.sendMessage("What is the capital of France?");
+llm.unload(); // free the engine; llm stays reusable</code></pre>
+  </div>
+
+  <h2 id="next">Where next</h2>
+  <ul>
+    <li><a href="use-model.html">useModel</a> — every field the hook returns, and its config.</li>
+    <li><a href="inference.html">Inference &amp; streaming</a> — multimodal parts, typed events, tool calling, structured output.</li>
+    <li><a href="memory.html">Memory &amp; errors</a> — pre-flight estimates, forecasts, budgets, and OS pressure warnings.</li>
+  </ul>
+
+  <div class="pager">
+    <a href="index.html"><span>Previous</span>Overview</a>
+    <a class="next" href="use-model.html"><span>Next</span>useModel hook</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>
