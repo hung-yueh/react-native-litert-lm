@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>useModel — litert·lm</title>
+<meta name="description" content="The useModel React hook: full model lifecycle — download with progress, pre-flight memory check, load, inference, and cleanup on unmount." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html" class="here">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Core API</p>
+  <h1>useModel</h1>
+  <p class="lede">
+    One hook that owns the whole model lifecycle: download with progress,
+    pre-flight memory check, load, inference, and cleanup on unmount —
+    with memory state exposed reactively.
+  </p>
+
+  <h2 id="signature">Signature</h2>
+  <div class="sig">function useModel(
+  pathOrUrl: string,
+  config?: UseModelConfig,
+): UseModelResult</div>
+  <p>
+    <code>pathOrUrl</code> is a local file path or an HTTPS URL. When it is a
+    URL, the hook downloads the model to the native cache (reporting
+    <code>downloadProgress</code>), runs the automatic pre-flight memory
+    estimate, loads the engine, and closes the underlying instance when the
+    component unmounts. Use it when a component's lifetime should own the
+    model; for background tasks or your own state management, use
+    <a href="create-llm.html">createLLM</a> directly.
+  </p>
+
+  <h2 id="usage">Usage</h2>
+  <div class="code">
+    <div class="code-head"><span>Chat.tsx</span></div>
+    <pre><code>import { useModel, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+function Chat() {
+  const {
+    model,
+    isReady,
+    isGenerating,
+    downloadProgress,
+    error,
+    generate,
+    reset,
+    deleteModel,
+  } = useModel(GEMMA_4_E2B_IT, {
+    backend: "cpu",
+    systemPrompt: "You are a helpful assistant.",
+    enableMemoryTracking: true,
+  });
+
+  if (error) return &lt;Text&gt;{error}&lt;/Text&gt;;
+  if (!isReady)
+    return &lt;Text&gt;Loading… {Math.round(downloadProgress * 100)}%&lt;/Text&gt;;
+
+  const ask = async () =&gt; {
+    const reply = await generate("Hello!"); // or model.execute(...) for streaming
+    console.log(reply);
+  };
+
+  return (
+    &lt;&gt;
+      &lt;Button title="Generate" onPress={ask} disabled={isGenerating} /&gt;
+      &lt;Button title="New chat" onPress={reset} /&gt;
+      &lt;Button title="Free storage" onPress={() =&gt; deleteModel()} /&gt;
+    &lt;/&gt;
+  );
+}</code></pre>
+  </div>
+  <p>
+    <code>model</code> is a full <code>LiteRTLMInstance</code>, so everything
+    on <a href="inference.html">the inference API</a> — streaming
+    <code>execute()</code>, typed <code>executeWithEvents()</code>,
+    conversations — is available once <code>isReady</code> is true.
+  </p>
+
+  <h2 id="usemodelconfig">UseModelConfig</h2>
+  <p>
+    Extends <code>LLMConfig</code> — every engine config field
+    (<code>backend</code>, <code>maxContextTokens</code>,
+    <code>systemPrompt</code>, <code>tools</code>, <code>thinking</code>, …)
+    is forwarded to the native load. See
+    <a href="configuration.html">Configuration</a> for the full list.
+    The hook adds three fields of its own:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>autoLoad</code></td>
+          <td><code>boolean</code></td>
+          <td><code>true</code></td>
+          <td>Download and load the model on mount. Set <code>false</code> to defer until you call <code>load()</code>.</td>
+        </tr>
+        <tr>
+          <td><code>enableMemoryTracking</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Track memory usage after each inference call, storing snapshots in a native ArrayBuffer (zero-copy). Enables <code>memoryTracker</code> and <code>memorySummary</code>.</td>
+        </tr>
+        <tr>
+          <td><code>maxMemorySnapshots</code></td>
+          <td><code>number</code></td>
+          <td><code>256</code></td>
+          <td>Maximum snapshots retained (ring buffer). Each snapshot uses 32 bytes of native memory.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>A config-parity contract test enforces that every <code>LLMConfig</code> key is forwarded to the native load or explicitly excluded — new config fields cannot silently go missing from the hook.</p>
+  </div>
+
+  <h2 id="usemodelresult">UseModelResult</h2>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>model</code></td>
+          <td><code>LiteRTLMInstance | null</code></td>
+          <td>The underlying instance — full inference and memory API. <code>null</code> until created.</td>
+        </tr>
+        <tr>
+          <td><code>isReady</code></td>
+          <td><code>boolean</code></td>
+          <td>True once the model is loaded and ready for inference.</td>
+        </tr>
+        <tr>
+          <td><code>isGenerating</code></td>
+          <td><code>boolean</code></td>
+          <td>True while a <code>generate()</code> call is in flight.</td>
+        </tr>
+        <tr>
+          <td><code>downloadProgress</code></td>
+          <td><code>number</code></td>
+          <td>Download progress as a 0–1 fraction (render as <code>Math.round(downloadProgress * 100)</code>%).</td>
+        </tr>
+        <tr>
+          <td><code>error</code></td>
+          <td><code>string | null</code></td>
+          <td>Last load or generation error message, or <code>null</code>.</td>
+        </tr>
+        <tr>
+          <td><code>generate</code></td>
+          <td><code>(prompt: string) =&gt; Promise&lt;string&gt;</code></td>
+          <td>Run a text prompt and resolve with the full response. Throws if the model is not ready.</td>
+        </tr>
+        <tr>
+          <td><code>reset</code></td>
+          <td><code>() =&gt; void</code></td>
+          <td>Clear the conversation context (calls <code>model.resetConversation()</code>).</td>
+        </tr>
+        <tr>
+          <td><code>deleteModel</code></td>
+          <td><code>(fileName?: string) =&gt; Promise&lt;void&gt;</code></td>
+          <td>Delete the model file from the cache. If no <code>fileName</code> is provided, derives it from the URL/path passed to <code>useModel</code>.</td>
+        </tr>
+        <tr>
+          <td><code>load</code></td>
+          <td><code>() =&gt; Promise&lt;void&gt;</code></td>
+          <td>Download (if needed) and load the model manually — for <code>autoLoad: false</code> or retrying after an error.</td>
+        </tr>
+        <tr>
+          <td><code>memoryTracker</code></td>
+          <td><code>MemoryTracker | null</code></td>
+          <td>Snapshot tracker backed by a native ArrayBuffer. Available when <code>enableMemoryTracking</code> is true.</td>
+        </tr>
+        <tr>
+          <td><code>memorySummary</code></td>
+          <td><code>MemoryTrackerSummary | null</code></td>
+          <td>Current tracking summary (peak/average/current RSS, native heap). <code>null</code> if tracking is disabled; updates automatically after each inference call.</td>
+        </tr>
+        <tr>
+          <td><code>memoryEstimate</code></td>
+          <td><code>MemoryEstimate | null</code></td>
+          <td>Pre-flight memory estimate for the loaded model (<code>null</code> until loaded). Refreshed after each load.</td>
+        </tr>
+        <tr>
+          <td><code>memoryForecast</code></td>
+          <td><code>MemoryForecast | null</code></td>
+          <td>Context-window / KV-cache growth forecast for the active conversation. Refreshed after each <code>generate()</code> call — watch <code>nearingLimit</code> to warn users before the context (and its memory) runs out.</td>
+        </tr>
+        <tr>
+          <td><code>memoryWarning</code></td>
+          <td><code>MemoryWarningLevel | null</code></td>
+          <td>Last OS memory-pressure warning (<code>'moderate'</code> or <code>'critical'</code>) received while the hook was mounted, or <code>null</code>. Reset on each successful load.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The memory types (<code>MemoryEstimate</code>, <code>MemoryForecast</code>,
+    <code>MemoryTrackerSummary</code>, <code>MemoryWarningLevel</code>) are
+    documented on <a href="memory.html">Memory &amp; errors</a>.
+  </p>
+
+  <h2 id="behavior">Behavior notes</h2>
+  <ul>
+    <li>
+      <strong>Auto-load on mount, close on unmount.</strong> The hook creates
+      the instance via <code>createLLM({ enableMemoryTracking, maxMemorySnapshots })</code>,
+      loads on mount when <code>autoLoad</code> is true, and closes the
+      instance when the component unmounts — no manual cleanup needed.
+    </li>
+    <li>
+      <strong>Inline config objects are safe.</strong> The config is
+      destructured into primitives for stable dependency arrays
+      (<code>tools</code> and <code>thinking</code> are tracked via
+      <code>JSON.stringify</code> keys), so passing a fresh object literal on
+      every render does not cause reload loops.
+    </li>
+    <li>
+      <strong><code>generate()</code> before ready throws.</strong> Calling it
+      while <code>isReady</code> is false throws
+      <code>Error("Model not ready")</code>. On failure it sets
+      <code>error</code> and rethrows.
+    </li>
+    <li>
+      <strong><code>deleteModel()</code> derives the filename from the URL</strong>
+      when called without an argument, deletes through
+      <code>ModelRegistry.deleteFile</code>, and resets <code>isReady</code>
+      and <code>downloadProgress</code>.
+    </li>
+    <li>
+      <strong>After each successful load</strong>, <code>memoryWarning</code>
+      is reset, <code>memoryEstimate</code> and <code>memoryForecast</code>
+      are refreshed, and the hook subscribes to OS memory-pressure warnings
+      via <code>setMemoryWarningCallback</code> (silently skipped on older
+      native builds).
+    </li>
+    <li>
+      <strong>After each <code>generate()</code></strong>,
+      <code>memorySummary</code> and <code>memoryForecast</code> are
+      refreshed — watch <code>memoryForecast.nearingLimit</code>.
+    </li>
+  </ul>
+
+  <h2 id="memory-state">Memory state, reactively</h2>
+  <p>
+    Because the forecast is refreshed after every <code>generate()</code> and
+    the warning is fed by OS pressure signals, plain conditional rendering is
+    enough to warn users at the right moment:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const { generate, memoryForecast, memoryWarning } = useModel(GEMMA_4_E2B_IT);
+
+// After each generate(), memoryForecast is up to date:
+{memoryForecast?.nearingLimit &amp;&amp; (
+  &lt;Banner&gt;
+    Conversation is {Math.round(memoryForecast.contextUsedFraction * 100)}%
+    full — {memoryForecast.remainingTokens} tokens left. Consider resetting.
+  &lt;/Banner&gt;
+)}
+
+// OS memory pressure (reset on each successful load):
+{memoryWarning === "critical" &amp;&amp; (
+  &lt;Banner&gt;Device memory is critically low.&lt;/Banner&gt;
+)}</code></pre>
+  </div>
+
+  <div class="pager">
+    <a href="getting-started.html"><span>Previous</span>Getting started</a>
+    <a class="next" href="create-llm.html"><span>Next</span>createLLM &amp; instances</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

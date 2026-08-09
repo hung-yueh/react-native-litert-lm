@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>litert·lm — On-device LLM inference for React Native</title>
+<meta name="description" content="react-native-litert-lm runs Gemma 4 and other .litertlm models natively on iOS and Android. No server, no tokens leaving the device. Powered by LiteRT-LM and Nitro Modules." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body class="landing">
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<!-- ── Hero ─────────────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div>
+    <p class="eyebrow">React Native · LiteRT-LM 0.15 · Nitro Modules</p>
+    <h1>The model ships<br /><span class="em">with the app.</span></h1>
+    <p class="sub">
+      <code>react-native-litert-lm</code> runs Gemma&nbsp;4 and other
+      <code>.litertlm</code> models natively on iOS and Android — streaming
+      tokens, tool calls, thinking traces, and images without a single byte
+      leaving the device.
+    </p>
+    <div class="install">
+      <span class="ps1">$</span>
+      <span>npm install react-native-litert-lm react-native-nitro-modules</span>
+    </div>
+    <div class="cta-row">
+      <a class="btn primary" href="getting-started.html">Get started</a>
+      <a class="btn" href="use-model.html">API reference</a>
+    </div>
+  </div>
+
+  <!-- Signature: the real architecture, drawn as a die floorplan -->
+  <div class="die-wrap" aria-hidden="true">
+    <svg viewBox="0 0 520 460" role="img" aria-label="Architecture of react-native-litert-lm drawn as a chip floorplan">
+      <defs>
+        <linearGradient id="dieSheen" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#101013" />
+          <stop offset="1" stop-color="#0a0a0c" />
+        </linearGradient>
+      </defs>
+
+      <!-- package pins -->
+      <g stroke="#2c2c31" stroke-width="2">
+        <line x1="60" y1="10" x2="60" y2="26" /><line x1="130" y1="10" x2="130" y2="26" />
+        <line x1="200" y1="10" x2="200" y2="26" /><line x1="270" y1="10" x2="270" y2="26" />
+        <line x1="340" y1="10" x2="340" y2="26" /><line x1="410" y1="10" x2="410" y2="26" />
+        <line x1="60" y1="434" x2="60" y2="450" /><line x1="130" y1="434" x2="130" y2="450" />
+        <line x1="200" y1="434" x2="200" y2="450" /><line x1="270" y1="434" x2="270" y2="450" />
+        <line x1="340" y1="434" x2="340" y2="450" /><line x1="410" y1="434" x2="410" y2="450" />
+      </g>
+
+      <!-- package -->
+      <rect x="18" y="26" width="484" height="408" rx="14" fill="url(#dieSheen)" stroke="#2c2c31" stroke-width="1.5" />
+      <!-- silkscreen -->
+      <text x="34" y="52" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="2" fill="#55555e">LITERT·LM</text>
+      <text x="486" y="52" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5" fill="#55555e">0 BYTES OFF-DEVICE</text>
+      <circle cx="40" cy="414" r="4" fill="none" stroke="#55555e" stroke-width="1.5" />
+      <text x="486" y="418" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5" fill="#55555e">ARM64 · 128K CTX</text>
+
+      <!-- JS block -->
+      <rect x="44" y="68" width="432" height="52" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="60" y="99" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.5" fill="#f2f1ed">REACT NATIVE · TYPESCRIPT</text>
+
+      <!-- JSI bridge strip -->
+      <rect x="44" y="136" width="432" height="30" rx="6" fill="rgba(217,160,91,0.10)" stroke="rgba(217,160,91,0.45)" />
+      <text x="260" y="155" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="2" fill="#d9a05b">NITRO JSI BINDINGS · ZERO-COPY ARRAYBUFFER</text>
+
+      <!-- platform blocks -->
+      <rect x="44" y="182" width="208" height="46" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="60" y="209" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="1.5" fill="#7fb8ad">SWIFT · DIRECT C FFI</text>
+      <rect x="268" y="182" width="208" height="46" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="284" y="209" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="1.5" fill="#86b97f">KOTLIN · LITERT-LM AAR</text>
+
+      <!-- engine block -->
+      <rect x="44" y="244" width="432" height="102" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="60" y="270" font-family="IBM Plex Mono, monospace" font-size="12" letter-spacing="1.5" fill="#f2f1ed">LITERT-LM ENGINE 0.15</text>
+      <rect x="60" y="284" width="128" height="44" rx="4" fill="#111114" stroke="#2c2c31" />
+      <text x="124" y="310" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5" fill="#8b8b94">KV CACHE</text>
+      <rect x="200" y="284" width="128" height="44" rx="4" fill="#111114" stroke="#2c2c31" />
+      <text x="264" y="310" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5" fill="#8b8b94">WEIGHTS · MMAP</text>
+      <rect x="340" y="284" width="120" height="44" rx="4" fill="#111114" stroke="#2c2c31" />
+      <text x="400" y="310" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="1.5" fill="#8b8b94">SAMPLER</text>
+
+      <!-- compute blocks -->
+      <rect x="44" y="362" width="136" height="46" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="112" y="389" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="2" fill="#8b8b94">CPU</text>
+      <rect x="192" y="362" width="136" height="46" rx="6" fill="#0c0c0e" stroke="#2c2c31" />
+      <text x="260" y="389" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="2" fill="#8b8b94">GPU · METAL/CL</text>
+      <rect x="340" y="362" width="136" height="46" rx="6" fill="rgba(217,160,91,0.08)" stroke="rgba(217,160,91,0.45)" />
+      <text x="408" y="389" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="2" fill="#d9a05b">NPU</text>
+
+      <!-- copper traces -->
+      <g fill="none" stroke="#3a3026" stroke-width="1.5">
+        <path d="M148 120 V136" /><path d="M372 120 V136" />
+        <path d="M148 166 V182" /><path d="M372 166 V182" />
+        <path d="M148 228 V244" /><path d="M372 228 V244" />
+        <path d="M112 346 V362" /><path d="M260 346 V362" /><path d="M408 346 V362" />
+      </g>
+      <!-- token pulses -->
+      <g fill="none" stroke="#f0be7c" stroke-width="2" stroke-linecap="round">
+        <path class="trace-pulse" d="M148 120 V136 M148 166 V182 M148 228 V244" pathLength="260" />
+        <path class="trace-pulse d2" d="M372 120 V136 M372 166 V182 M372 228 V244" pathLength="260" />
+        <path class="trace-pulse d3" d="M408 346 V362" pathLength="260" />
+      </g>
+    </svg>
+    <p class="die-caption">die floorplan · one inference call, top to silicon</p>
+  </div>
+</section>
+
+<!-- ── Features ─────────────────────────────────────────────────────────── -->
+<section class="band">
+  <div class="band-inner">
+    <p class="eyebrow">Capabilities</p>
+    <h2>Built for the constraints of a phone</h2>
+    <p class="band-sub">
+      A multi-gigabyte model inside a mobile process leaves no room for
+      guesswork. Every API here exists because something on a real device
+      demanded it.
+    </p>
+    <div class="feat-grid">
+      <div class="feat">
+        <span class="feat-pin">PIN 01 · MEMORY</span>
+        <h3>Pre-flight memory checks</h3>
+        <p><code>loadModel()</code> estimates weights, KV cache, and overhead against real OS headroom — and refuses loads that would get the app killed, before a byte downloads.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">PIN 02 · STREAMING</span>
+        <h3>Typed streaming events</h3>
+        <p><code>executeWithEvents()</code> splits the raw token stream into <code>token</code>, <code>toolCall</code>, and <code>thinking</code> events — channel markers parsed incrementally, across chunk boundaries.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">PIN 03 · MULTIMODAL</span>
+        <h3>Zero-copy image &amp; audio</h3>
+        <p>Pass images and WAV audio as native-owned <code>ArrayBuffer</code>s over Nitro JSI. No base64, no bridge serialization, no copies.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">PIN 04 · DECODING</span>
+        <h3>Structured output</h3>
+        <p>Constrain any response to a JSON Schema or regex with LLGuidance-backed constrained decoding. The output is guaranteed to parse.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">PIN 05 · CONTEXT</span>
+        <h3>Multi-conversation engine</h3>
+        <p>Run a support agent and a summarizer on one loaded model. <code>createConversation()</code> switches contexts by replaying transcripts — the engine loads once.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">PIN 06 · REACT</span>
+        <h3>One hook, full lifecycle</h3>
+        <p><code>useModel()</code> owns download, load, inference, memory telemetry, and cleanup — with progress, forecasts, and OS pressure warnings as plain React state.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Quick start ──────────────────────────────────────────────────────── -->
+<section class="band">
+  <div class="band-inner two-col">
+    <div>
+      <p class="eyebrow">Quick start</p>
+      <h2>First token in one hook</h2>
+      <p class="band-sub" style="margin-bottom:20px">
+        Point <code>useModel</code> at a public model URL. It downloads with
+        progress, runs the pre-flight memory check, loads the engine, and hands
+        you a ready instance.
+      </p>
+      <p style="color:var(--text-2);font-size:14.5px">
+        Streaming, imperative control with <code>createLLM</code>, multimodal
+        parts, and tool calling are a page away.
+      </p>
+      <div class="cta-row">
+        <a class="btn primary" href="getting-started.html">Read the guide</a>
+      </div>
+    </div>
+    <div class="code">
+      <div class="code-head"><span>Chat.tsx</span></div>
+      <pre><code>import { useModel, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+function Chat() {
+  const { model, isReady, downloadProgress, error } = useModel(
+    GEMMA_4_E2B_IT,
+    { backend: "cpu", systemPrompt: "You are a helpful assistant." },
+  );
+
+  if (error) return &lt;Text&gt;{error}&lt;/Text&gt;;
+  if (!isReady)
+    return &lt;Text&gt;Loading… {Math.round(downloadProgress * 100)}%&lt;/Text&gt;;
+
+  const ask = async () =&gt;
+    console.log(await model.sendMessage("Hello!"));
+
+  return &lt;Button title="Generate" onPress={ask} /&gt;;
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ── Models ───────────────────────────────────────────────────────────── -->
+<section class="band">
+  <div class="band-inner">
+    <p class="eyebrow">Models</p>
+    <h2>Gemma-first, not Gemma-only</h2>
+    <p class="band-sub">
+      Any <code>.litertlm</code> bundle runs. These constants ship with the
+      library and download without authentication.
+    </p>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Constant</th><th>Model</th><th>Size</th><th>Min RAM</th><th>Modalities</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>GEMMA_4_E2B_IT</code></td><td>Gemma 4 E2B Instruct</td><td>2.58 GB</td><td>4 GB</td><td>Text · Image · Audio · Tools · Thinking</td></tr>
+          <tr><td><code>GEMMA_4_E4B_IT</code></td><td>Gemma 4 E4B Instruct</td><td>3.65 GB</td><td>6 GB</td><td>Text · Image · Audio · Tools · Thinking</td></tr>
+          <tr><td><code>GEMMA_3N_E2B_IT_INT4</code></td><td>Gemma 3n E2B (int4)</td><td>~3.66 GB</td><td>6 GB</td><td>Text · Image</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="color:var(--text-2);font-size:14px">
+      Gemma 3 1B, Phi-4 Mini, and Qwen 2.5 1.5B run too — see
+      <a href="models.html">Models &amp; registry</a> for identifiers and caching.
+    </p>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>litert·lm — on-device LLM inference for React Native. MIT.</span>
+    <span>
+      <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/google-ai-edge/LiteRT-LM">LiteRT-LM</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/mrousavy/nitro">Nitro Modules</a>
+    </span>
+  </div>
+</footer>
+
+<script src="docs.js"></script>
+</body>
+</html>

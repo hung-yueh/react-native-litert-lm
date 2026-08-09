@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>createLLM &amp; instances — litert·lm</title>
+<meta name="description" content="createLLM factory, CreateLLMOptions, the LiteRTLMInstance surface, the full native method reference, and multi-conversation handles." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html" class="here">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Core API</p>
+  <h1>createLLM &amp; instances</h1>
+  <p class="lede">
+    <code>createLLM()</code> is the imperative entry point: it returns an engine
+    instance with pre-flight memory checks, forecasting, budget monitoring,
+    typed event streaming, and multi-conversation support.
+  </p>
+
+  <h2 id="createllm">createLLM(options?)</h2>
+  <div class="sig">export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance</div>
+  <p>
+    Creates a new LiteRT-LM inference engine instance with memory controls:
+    automatic pre-flight estimation in <code>loadModel</code> (rejects with
+    <code>MemoryError</code> when the model likely doesn't fit), context/KV
+    forecasting, budget monitoring, and typed event streaming. Use it outside
+    React — background tasks, services, or your own state management. Inside
+    components, prefer <a href="use-model.html">useModel</a>, which wraps this
+    factory and manages the lifecycle for you.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { createLLM } from "react-native-litert-lm";
+
+const llm = createLLM();
+await llm.loadModel("https://example.com/model.litertlm", { backend: "gpu" });
+const reply = await llm.sendMessage("What is the capital of France?");
+llm.unload(); // free the engine; llm stays reusable</code></pre>
+  </div>
+
+  <h3 id="createllmoptions">CreateLLMOptions</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Option</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>enableMemoryTracking</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Enable automatic memory tracking; a snapshot is recorded after each inference, load, unload, and reset.</td>
+        </tr>
+        <tr>
+          <td><code>maxMemorySnapshots</code></td>
+          <td><code>number</code></td>
+          <td><code>256</code></td>
+          <td>Maximum number of memory snapshots to retain (ring buffer).</td>
+        </tr>
+        <tr>
+          <td><code>memoryBudget</code></td>
+          <td><code>MemoryBudget &amp; { onBudgetExceeded? }</code></td>
+          <td>—</td>
+          <td>Budget thresholds evaluated on every recorded snapshot. <code>onBudgetExceeded(level)</code> fires on level transitions (ok→warn, warn→critical, …). See <a href="memory.html">Memory &amp; errors</a>.</td>
+        </tr>
+        <tr>
+          <td><code>streamChannels</code></td>
+          <td><code>StreamChannel[]</code></td>
+          <td><code>DEFAULT_CHANNELS</code></td>
+          <td>Channel markers for typed event streaming (tool calls, thinking). Defaults to <code>&lt;tool_call&gt;…&lt;/tool_call&gt;</code> and <code>&lt;thinking&gt;…&lt;/thinking&gt;</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="litertlminstance">LiteRTLMInstance</h2>
+  <p>
+    The instance is the native <code>LiteRTLM</code> hybrid object plus a set
+    of JS-side augmentations:
+  </p>
+
+  <h3 id="loadmodel">loadModel</h3>
+  <div class="sig">loadModel: (
+  pathOrUrl: string,
+  config?: LLMConfig,
+  onDownloadProgress?: (progress: number) =&gt; void,
+) =&gt; Promise&lt;void&gt;</div>
+  <p>
+    The augmented three-argument replacement for the native
+    <code>loadModel(modelPath, config?)</code>. It resolves the URL via
+    <code>ModelRegistry.resolveModel</code> — HTTPS URLs are downloaded to the
+    native cache with progress reported through
+    <code>onDownloadProgress</code> (0–1) — then runs a pre-flight memory
+    estimate before touching the engine.
+  </p>
+  <div class="warn">
+    <span class="note-label">Warning</span>
+    <p>
+      On a <code>'critical'</code> verdict, <code>loadModel</code> throws
+      <code>MemoryError</code> instead of loading:
+      <code>Refusing to load model (&lt;N&gt; MB): &lt;recommendation&gt; Pass { forceLoad: true } to override.</code>
+      Set <code>forceLoad: true</code> in the config to skip the check. See
+      <a href="memory.html">Memory &amp; errors</a> for the estimate math.
+    </p>
+  </div>
+
+  <h3 id="estimatememory">estimateMemory</h3>
+  <div class="sig">estimateMemory: (modelPath?: string, config?: LLMConfig) =&gt; MemoryEstimate | null</div>
+  <p>
+    Pre-flight memory estimate for the most recently loaded (or a given) model
+    path. Returns <code>null</code> if the model file cannot be found.
+  </p>
+
+  <h3 id="getmemoryforecast">getMemoryForecast</h3>
+  <div class="sig">getMemoryForecast: () =&gt; MemoryForecast | null</div>
+  <p>
+    Forecast context-window / KV-cache growth for the active conversation.
+    Returns <code>null</code> if no model is loaded. Watch
+    <code>nearingLimit</code> to warn before the context runs out.
+  </p>
+
+  <h3 id="executewithevents">executeWithEvents</h3>
+  <div class="sig">executeWithEvents: (
+  parts: MultimodalPart[],
+  onEvent: StreamEventCallback,
+  options?: ExecuteOptions,
+) =&gt; Promise&lt;string&gt;</div>
+  <p>
+    Execute inference receiving typed streaming events
+    (<code>token</code> / <code>toolCall</code> / <code>thinking</code>)
+    instead of a raw token stream. Requires <code>streamToolCalls: true</code>
+    in the load config for tool-call events to appear. Full coverage in
+    <a href="inference.html">Inference &amp; streaming</a>.
+  </p>
+
+  <h3 id="createconversation">createConversation</h3>
+  <div class="sig">createConversation: (options?: ConversationOptions) =&gt; ConversationHandle</div>
+  <p>
+    Create a logical conversation sharing the loaded engine — see
+    <a href="#multiple-conversations">Multiple conversations</a> below.
+  </p>
+
+  <h2 id="instance-methods">Instance methods reference</h2>
+  <p>
+    Everything below is inherited from the native <code>LiteRTLM</code> spec
+    and available on every instance.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Method</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>sendMessage(message: string): Promise&lt;string&gt;</code></td>
+          <td>Send a text message and get the complete response (blocking).</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageAsync(message: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
+          <td>Send a message with streaming response.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithImage(message: string, imagePath: string): Promise&lt;string&gt;</code></td>
+          <td>Send a text message with an image (multimodal).</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithImageAsync(message: string, imagePath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
+          <td>Streaming variant; tokens are delivered via callback as they are generated.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithAudio(message: string, audioPath: string): Promise&lt;string&gt;</code></td>
+          <td>Send a text message with audio (multimodal); <code>audioPath</code> is an absolute path to a WAV file.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithAudioAsync(message: string, audioPath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
+          <td>Streaming variant of <code>sendMessageWithAudio</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMultimodalMessage(parts: MultimodalPart[]): Promise&lt;string&gt;</code></td>
+          <td>Send a unified multimodal message containing text and/or zero-copy binary buffers.</td>
+        </tr>
+        <tr>
+          <td><code>execute(parts: MultimodalPart[], onToken?: (token: string, done: boolean) =&gt; void, options?: ExecuteOptions): Promise&lt;string&gt;</code></td>
+          <td>Unified multimodal inference — the single deep entry point that replaces all modality-specific send methods. Streams when <code>onToken</code> is given, otherwise resolves with the complete response.</td>
+        </tr>
+        <tr>
+          <td><code>getHistory(): Message[]</code></td>
+          <td>Get the current conversation history.</td>
+        </tr>
+        <tr>
+          <td><code>resetConversation(historyJson?: string, systemPrompt?: string): void</code></td>
+          <td>Clear the context and start fresh; optionally seed it from a prior transcript (JSON array of <code>{role, content}</code> turns, re-prefilled on the next message) and/or override the session system prompt.</td>
+        </tr>
+        <tr>
+          <td><code>isReady(): boolean</code></td>
+          <td>Check if a model is loaded and ready for inference.</td>
+        </tr>
+        <tr>
+          <td><code>getStats(): GenerationStats</code></td>
+          <td>Get the last generation statistics.</td>
+        </tr>
+        <tr>
+          <td><code>countTokens(text: string): number</code></td>
+          <td>Count tokens in a text string. Returns -1 if unavailable.</td>
+        </tr>
+        <tr>
+          <td><code>getMemoryUsage(): MemoryUsage</code></td>
+          <td>Real memory usage from the native runtime, via OS-level APIs.</td>
+        </tr>
+        <tr>
+          <td><code>getContextTokenCount(): number</code></td>
+          <td>Tokens currently in the conversation KV cache (prompt + history + generated). Returns -1 if unavailable. Exact on iOS; approximated on Android.</td>
+        </tr>
+        <tr>
+          <td><code>unload(): Promise&lt;void&gt;</code></td>
+          <td>Release the loaded model and conversation, freeing all engine memory, while keeping the instance reusable.</td>
+        </tr>
+        <tr>
+          <td><code>close(): void</code></td>
+          <td>Release all native resources. Call when done with the instance.</td>
+        </tr>
+        <tr>
+          <td><code>setMemoryWarningCallback(onWarning: (level: MemoryWarningLevel, usage: MemoryUsage) =&gt; void): void</code></td>
+          <td>Register a callback fired on OS memory pressure. Only one callback is active at a time; registering replaces the previous one.</td>
+        </tr>
+        <tr>
+          <td><code>clearMemoryWarningCallback(): void</code></td>
+          <td>Remove the registered memory-pressure callback.</td>
+        </tr>
+        <tr>
+          <td><code>downloadModel(url: string, fileName: string, onProgress?: (progress: number) =&gt; void): Promise&lt;string&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Use <a href="models.html">ModelRegistry</a> instead.</td>
+        </tr>
+        <tr>
+          <td><code>deleteModel(fileName: string): Promise&lt;void&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Use <a href="models.html">ModelRegistry</a> instead.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="unload-vs-close">unload vs close</h3>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      <code>unload()</code> frees the engine and all its memory but keeps the
+      instance reusable — call <code>loadModel()</code> again to reload. It
+      also clears the cached model path, size, config, and conversation state.
+      <code>close()</code> permanently invalidates the instance; create a new
+      one with <code>createLLM()</code> afterwards.
+    </p>
+  </div>
+
+  <h2 id="multiple-conversations">Multiple conversations, one engine</h2>
+  <p>
+    <code>createConversation()</code> gives you multiple logical conversations
+    over a single loaded engine — no second model load required.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const support = llm.createConversation({ systemPrompt: 'You are a support agent.' });
+const summarizer = llm.createConversation({ systemPrompt: 'You summarize tersely.' });
+
+await support.execute([{ type: 'text', text: 'My app crashes on launch.' }]);
+await summarizer.execute([{ type: 'text', text: 'Summarize: …' }]); // context switch
+await support.execute([{ type: 'text', text: 'It happens on iOS 18.' }]); // remembers the crash report
+
+support.getHistory();     // this conversation's transcript
+await summarizer.release(); // drop a side-chain when done</code></pre>
+  </div>
+
+  <h3 id="conversationoptions">ConversationOptions</h3>
+  <div class="sig">export interface ConversationOptions {
+  /** Override the session-level `systemPrompt` for this conversation. */
+  systemPrompt?: string;
+}</div>
+
+  <h3 id="conversationhandle">ConversationHandle</h3>
+  <div class="sig">export interface ConversationHandle {
+  /** Stable identifier for this conversation. */
+  readonly id: string;
+  /** Run inference in this conversation (switches native context if needed). */
+  execute(
+    parts: MultimodalPart[],
+    onToken?: TokenCallback,
+    options?: ExecuteOptions,
+  ): Promise&lt;string&gt;;
+  /** Typed-event variant of {@link execute}. */
+  executeWithEvents(
+    parts: MultimodalPart[],
+    onEvent: StreamEventCallback,
+    options?: ExecuteOptions,
+  ): Promise&lt;string&gt;;
+  /** This conversation's transcript (live when active, snapshot otherwise). */
+  getHistory(): Message[];
+  /** Drop this conversation's transcript; further calls on the handle reject. */
+  release(): Promise&lt;void&gt;;
+}</div>
+
+  <h3 id="conversation-behavior">Behavior</h3>
+  <ul>
+    <li>One engine holds <strong>one native context at a time</strong>. Switching between conversations replays the target's transcript into a fresh context via <code>resetConversation</code>.</li>
+    <li>The replay means a <strong>re-prefill cost on the next message</strong> — expect seconds of extra latency on long transcripts.</li>
+    <li>Multimodal turns replay as text placeholders (<code>[Image]</code>, <code>[Audio]</code>); images and audio are not re-encoded on switch.</li>
+    <li>Once <code>createConversation()</code> has been called, all inference — including top-level <code>execute()</code> — <strong>serializes through one queue</strong>.</li>
+    <li>Calls on a released handle throw: <code>LiteRTLM: conversation '&lt;id&gt;' has been released.</code> Conversation ids follow the pattern <code>conversation_&lt;n&gt;</code>.</li>
+    <li>Calling <code>resetConversation()</code> manually on the instance clears the live context and returns ownership to the default conversation.</li>
+  </ul>
+
+  <h2 id="legacy-send-methods">Legacy send methods</h2>
+  <p>
+    The <code>sendMessage*</code> and <code>sendMultimodalMessage</code>
+    methods are fully supported but route through <code>execute()</code>
+    internally. Prefer <code>execute()</code> /
+    <code>executeWithEvents()</code> in new code — one entry point for text,
+    image, and audio, with per-message <code>ExecuteOptions</code>.
+  </p>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      The <code>*Async</code> variants resolve <code>Promise&lt;void&gt;</code> —
+      collect the response from the token callback, not the returned promise.
+    </p>
+  </div>
+
+  <div class="pager">
+    <a href="use-model.html"><span>Previous</span>useModel hook</a>
+    <a class="next" href="inference.html"><span>Next</span>Inference &amp; streaming</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

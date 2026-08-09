@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Memory &amp; errors — litert·lm</title>
+<meta name="description" content="Pre-flight memory estimation, context forecasting, budgets, OS pressure warnings, memory tracking, and the typed error surface of react-native-litert-lm." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html" class="here">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Platform</p>
+  <h1>Memory &amp; errors</h1>
+  <p class="lede">
+    A multi-GB model on a phone lives or dies by memory. The guiding principle:
+    an on-device LLM that fails to load with a clear error is recoverable — an
+    OS kill (iOS jetsam, Android LMK) is not. This page covers the estimator,
+    forecasts, budgets, OS pressure warnings, tracking, teardown, and the typed
+    errors that tie them together.
+  </p>
+
+  <h2 id="pre-flight-estimation">Pre-flight estimation</h2>
+  <p>
+    <code>estimateMemory</code> answers "will this model fit?" before you spend
+    bandwidth downloading it or risk a crash loading it. It is pure and
+    deterministic — deliberately conservative math, no side effects.
+  </p>
+  <div class="sig">function estimateMemory(inputs: MemoryEstimateInputs): MemoryEstimate</div>
+  <p>
+    <code>loadModel()</code> runs this automatically (see
+    <a href="#automatic-pre-flight">below</a>). Call it directly to drive a
+    model-picker UI before downloading anything.
+  </p>
+
+  <h3 id="memoryestimateinputs">MemoryEstimateInputs</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>modelFileSizeBytes</code></td><td><code>number</code></td><td>Size of the <code>.litertlm</code> file on disk, in bytes.</td></tr>
+        <tr><td><code>availableMemoryBytes</code></td><td><code>number</code></td><td>Available memory reported by the OS (jetsam-aware on iOS), in bytes.</td></tr>
+        <tr><td><code>config?</code></td><td><code>LLMConfig</code></td><td>The load config (backend, <code>maxContextTokens</code>, …).</td></tr>
+        <tr><td><code>kvCacheBytesPerTokenOverride?</code></td><td><code>number</code></td><td>Override the per-token KV-cache cost in bytes (e.g. from calibration). Defaults to a heuristic derived from the model file size.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="memoryestimate">MemoryEstimate</h3>
+  <p>All values are in bytes.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>modelBytes</code></td><td><code>number</code></td><td>Model weights resident in memory (file size × backend load factor).</td></tr>
+        <tr><td><code>kvCacheBytes</code></td><td><code>number</code></td><td>KV cache at full context (<code>maxContextTokens</code> × per-token cost).</td></tr>
+        <tr><td><code>overheadBytes</code></td><td><code>number</code></td><td>Runtime + activation overhead.</td></tr>
+        <tr><td><code>totalEstimatedBytes</code></td><td><code>number</code></td><td>Sum of the above — expected peak while the model is loaded.</td></tr>
+        <tr><td><code>availableBytes</code></td><td><code>number</code></td><td>Available memory headroom reported by the OS at estimate time.</td></tr>
+        <tr><td><code>headroomBytes</code></td><td><code>number</code></td><td><code>availableBytes − totalEstimatedBytes</code> (negative = expected to not fit).</td></tr>
+        <tr><td><code>usageFraction</code></td><td><code>number</code></td><td>Fraction of available memory the load would consume (0–∞).</td></tr>
+        <tr><td><code>verdict</code></td><td><code>MemoryVerdict</code></td><td><code>'safe'</code> — total ≤ <code>SAFE_FRACTION</code> × available. <code>'tight'</code> — fits, but with little slack; expect pressure warnings. <code>'critical'</code> — total exceeds available memory; load will likely crash.</td></tr>
+        <tr><td><code>recommendation</code></td><td><code>string</code></td><td>Human-readable explanation and suggested remediation.</td></tr>
+        <tr><td><code>kvCacheBytesPerToken</code></td><td><code>number</code></td><td>KV-cache cost per token used for this estimate (bytes).</td></tr>
+        <tr><td><code>maxContextTokens</code></td><td><code>number</code></td><td>Context budget (tokens) used for this estimate.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="the-formula">The formula</h3>
+  <p>The math is simple enough to reason about:</p>
+  <ul>
+    <li><code>modelBytes = fileSize × loadFactor</code> — GPU/NPU backends use <code>GPU_LOAD_FACTOR</code>, otherwise <code>CPU_LOAD_FACTOR</code>.</li>
+    <li><code>kvCacheBytes = maxContextTokens × kvBytesPerToken</code> — halved when <code>config.activationDataType === 'f16'</code>.</li>
+    <li><code>overheadBytes = max(OVERHEAD_MIN_BYTES, modelBytes × OVERHEAD_WEIGHTS_FRACTION)</code> — i.e. at least 200&nbsp;MB, or 10% of weights.</li>
+    <li>Verdict: <code>usageFraction ≤ 0.8</code> → <code>'safe'</code>; <code>≤ 1</code> → <code>'tight'</code>; else <code>'critical'</code>.</li>
+  </ul>
+  <p>
+    The constants are exported so tests and calibration scripts can assert
+    against — and document — the exact formula:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>export const ESTIMATOR_CONSTANTS = {
+  /** Weights load factor: CPU maps the file plus runtime copies */
+  CPU_LOAD_FACTOR: 1.1,
+  /** Weights load factor: GPU keeps a device-memory copy alongside staging */
+  GPU_LOAD_FACTOR: 1.3,
+  /** KV-cache heuristic: bytes per token per GiB of model file */
+  KV_BYTES_PER_TOKEN_PER_GIB: 12 * 1024,
+  /** KV-cache per-token floor (tiny models still pay layers × heads) */
+  KV_BYTES_PER_TOKEN_MIN: 8 * 1024,
+  /** KV-cache per-token ceiling (GQA keeps caches small on big models) */
+  KV_BYTES_PER_TOKEN_MAX: 96 * 1024,
+  /** Fixed runtime overhead floor (engine, tokenizer, buffers) */
+  OVERHEAD_MIN_BYTES: 200 * 1024 * 1024,
+  /** Activation overhead as a fraction of weights */
+  OVERHEAD_WEIGHTS_FRACTION: 0.1,
+  /** Verdict boundary: ≤ this fraction of available memory is 'safe' */
+  SAFE_FRACTION: 0.8,
+  /** Default context budget when the config does not specify one */
+  DEFAULT_MAX_CONTEXT_TOKENS: 4096,
+} as const;</code></pre>
+  </div>
+  <p>
+    The per-token KV-cache heuristic is exposed on its own — it clamps
+    <code>(fileSize / GiB) × 12 KiB</code> to the [8&nbsp;KiB, 96&nbsp;KiB]
+    range, and you can override it per call from calibration data:
+  </p>
+  <div class="sig">function estimateKvCacheBytesPerToken(
+  modelFileSizeBytes: number,
+): number</div>
+
+  <h3 id="model-picker-example">Example: pick a model before downloading</h3>
+  <p>
+    Estimate against known file sizes and the device's live headroom, and only
+    offer models the device can actually run:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import {
+  createLLM,
+  estimateMemory,
+  GEMMA_4_E2B_IT,
+  GEMMA_4_E4B_IT,
+} from "react-native-litert-lm";
+
+const llm = createLLM();
+const { availableMemoryBytes } = llm.getMemoryUsage();
+
+const candidates = [
+  { name: "Gemma 4 E2B", url: GEMMA_4_E2B_IT, sizeBytes: 2.58e9 },
+  { name: "Gemma 4 E4B", url: GEMMA_4_E4B_IT, sizeBytes: 3.65e9 },
+];
+
+const options = candidates.map((m) =&gt; ({
+  ...m,
+  estimate: estimateMemory({
+    modelFileSizeBytes: m.sizeBytes,
+    availableMemoryBytes,
+    config: { backend: "cpu", maxContextTokens: 4096 },
+  }),
+}));
+
+// Hide anything that would likely crash on load
+const runnable = options.filter((o) =&gt; o.estimate.verdict !== "critical");</code></pre>
+  </div>
+
+  <h2 id="automatic-pre-flight">Automatic pre-flight in loadModel</h2>
+  <p>
+    The <code>loadModel()</code> on a <a href="create-llm.html">createLLM</a>
+    instance runs the estimate automatically after resolving (and, if needed,
+    downloading) the model. On a <code>'critical'</code> verdict it throws a
+    <code>MemoryError</code> instead of loading — unless you pass
+    <code>forceLoad: true</code> in the config. The error message follows this
+    pattern:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>error message</span></div>
+    <pre><code data-plain>Refusing to load model (&lt;N&gt; MB): &lt;recommendation&gt; Pass { forceLoad: true } to override.</code></pre>
+  </div>
+  <p>
+    Catch it with the <code>isMemoryError</code> type guard — the full
+    <code>MemoryEstimate</code> is attached, so you can show the math and
+    remediate: lower <code>maxContextTokens</code> (the biggest memory lever)
+    or fall back to a smaller model.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { createLLM, isMemoryError, GEMMA_4_E4B_IT, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+const llm = createLLM();
+
+try {
+  await llm.loadModel(GEMMA_4_E4B_IT, { maxContextTokens: 8192 });
+} catch (e) {
+  if (isMemoryError(e)) {
+    console.warn(e.estimate.recommendation);
+    console.warn(`short by ${-e.estimate.headroomBytes} bytes`);
+
+    // Remediation 1: shrink the KV cache
+    await llm.loadModel(GEMMA_4_E4B_IT, { maxContextTokens: 2048 });
+
+    // Remediation 2: fall back to a smaller model
+    // await llm.loadModel(GEMMA_4_E2B_IT);
+  } else {
+    throw e;
+  }
+}</code></pre>
+  </div>
+  <div class="warn">
+    <span class="note-label">forceLoad</span>
+    <p>
+      <code>forceLoad: true</code> skips the check entirely and loads even when
+      the estimate says the model likely does not fit. It is JS-side only — the
+      native engine ignores the field. Expect an OS kill if the estimate was
+      right.
+    </p>
+  </div>
+
+  <h2 id="forecasting">Forecasting context growth</h2>
+  <p>
+    Once a model is loaded, the KV cache grows with every turn. Forecasting
+    answers "how much longer can this conversation run?" by combining the
+    engine's token count with the KV-cost model.
+  </p>
+  <div class="sig">function forecastMemory(inputs: MemoryForecastInputs): MemoryForecast</div>
+  <p>
+    On a <code>createLLM</code> instance, <code>getMemoryForecast()</code> does
+    the wiring for you — it reads <code>getContextTokenCount()</code> and the
+    active config, and returns <code>null</code> if no model is loaded. The
+    <code>useModel</code> hook refreshes its <code>memoryForecast</code> after
+    each <code>generate()</code> call.
+  </p>
+  <div class="sig">getMemoryForecast: () =&gt; MemoryForecast | null</div>
+
+  <h3 id="memoryforecastinputs">MemoryForecastInputs</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>contextTokensUsed</code></td><td><code>number</code></td><td>Current KV-cache token count from <code>getContextTokenCount()</code> (−1 if unknown).</td></tr>
+        <tr><td><code>maxContextTokens</code></td><td><code>number</code></td><td>Context budget in tokens.</td></tr>
+        <tr><td><code>kvCacheBytesPerToken</code></td><td><code>number</code></td><td>Per-token KV-cache cost in bytes.</td></tr>
+        <tr><td><code>warnAtFraction?</code></td><td><code>number</code></td><td>Fraction of the context at which <code>nearingLimit</code> flips (default 0.8).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="memoryforecast">MemoryForecast</h3>
+  <p>All byte values are estimated; token counts come from the engine.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>contextTokensUsed</code></td><td><code>number</code></td><td>Tokens currently in the conversation KV cache.</td></tr>
+        <tr><td><code>maxContextTokens</code></td><td><code>number</code></td><td>Context budget in tokens.</td></tr>
+        <tr><td><code>contextUsedFraction</code></td><td><code>number</code></td><td><code>contextTokensUsed / maxContextTokens</code> (0–1).</td></tr>
+        <tr><td><code>remainingTokens</code></td><td><code>number</code></td><td>Tokens left before the context window is exhausted.</td></tr>
+        <tr><td><code>kvCacheBytesUsed</code></td><td><code>number</code></td><td>Estimated KV-cache bytes currently allocated.</td></tr>
+        <tr><td><code>kvCacheBytesRemaining</code></td><td><code>number</code></td><td>Estimated additional bytes if the context fills completely.</td></tr>
+        <tr><td><code>nearingLimit</code></td><td><code>boolean</code></td><td>True when <code>contextUsedFraction ≥ warnAtFraction</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-label">Token counts</span>
+    <p>
+      Token counts are exact on <span class="pill ios">iOS</span> (read from the
+      engine) and approximated on <span class="pill android">Android</span>,
+      where the SDK does not expose tokenizer counts.
+    </p>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const forecast = llm.getMemoryForecast();
+if (forecast?.nearingLimit) {
+  // Summarize the conversation, or warn the user before the window runs out
+}</code></pre>
+  </div>
+
+  <h2 id="budgets">Budgets</h2>
+  <p>
+    A budget turns raw usage into a level. It is expressed as fractions of
+    total (available + used) memory consumed by the process:
+  </p>
+  <div class="sig">export interface MemoryBudget {
+  /** Fire a 'moderate' budget warning at this usage fraction @default 0.75 */
+  warnAtFraction?: number;
+  /** Fire a 'critical' budget warning at this usage fraction @default 0.9 */
+  criticalAtFraction?: number;
+}
+
+export type BudgetLevel = "ok" | "warn" | "critical";
+
+function evaluateBudget(
+  residentBytes: number,
+  availableMemoryBytes: number,
+  budget?: MemoryBudget,
+): BudgetLevel</div>
+  <p>
+    <code>evaluateBudget</code> is pure — the fraction it compares against the
+    thresholds is
+    <code>residentBytes / (residentBytes + availableMemoryBytes)</code>, and
+    the caller decides how to react. The <code>createLLM</code> wrapper does
+    this for you: pass <code>memoryBudget</code> with an
+    <code>onBudgetExceeded</code> callback, and it evaluates every recorded
+    snapshot, firing the callback on level transitions (ok→warn,
+    warn→critical, …) rather than on every snapshot.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const llm = createLLM({
+  memoryBudget: {
+    warnAtFraction: 0.75,
+    criticalAtFraction: 0.9,
+    onBudgetExceeded: (level) =&gt; {
+      if (level === "critical") llm.unload();
+    },
+  },
+});</code></pre>
+  </div>
+
+  <h2 id="live-usage">Live usage &amp; OS pressure</h2>
+  <p>
+    <code>getMemoryUsage()</code> reports real memory consumption from
+    OS-level APIs — measured, not estimated.
+  </p>
+  <div class="sig">getMemoryUsage(): MemoryUsage</div>
+
+  <h3 id="memoryusage">MemoryUsage</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>nativeHeapBytes</code></td><td><code>number</code></td><td>Native heap allocated bytes (<code>Debug.getNativeHeapAllocatedSize</code> on Android, <code>malloc_size</code> on iOS).</td></tr>
+        <tr><td><code>residentBytes</code></td><td><code>number</code></td><td>Total process resident set size (RSS) in bytes.</td></tr>
+        <tr><td><code>availableMemoryBytes</code></td><td><code>number</code></td><td>Available system memory in bytes.</td></tr>
+        <tr><td><code>isLowMemory</code></td><td><code>boolean</code></td><td>Whether the system considers memory low.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="memory-warnings">OS memory-pressure warnings</h3>
+  <div class="sig">setMemoryWarningCallback(
+  onWarning: (level: MemoryWarningLevel, usage: MemoryUsage) =&gt; void,
+): void
+
+clearMemoryWarningCallback(): void</div>
+  <p>
+    The callback fires when the OS signals memory pressure —
+    <code>onTrimMemory</code> on Android, the dispatch memory-pressure source
+    on iOS. <code>MemoryWarningLevel</code> has two values:
+    <code>'moderate'</code> (the system is under pressure; consider freeing
+    caches) and <code>'critical'</code> (the app is close to being killed;
+    free memory now). Only one callback is active at a time — registering a
+    new one replaces the previous.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>llm.setMemoryWarningCallback((level, usage) =&gt; {
+  if (level === "critical") llm.unload(); // free multi-GB weights before the OS does it for you
+});</code></pre>
+  </div>
+
+  <h2 id="tracking">Memory tracking</h2>
+  <p>
+    The tracker records <code>getMemoryUsage()</code> snapshots into a
+    native-backed <code>ArrayBuffer</code> allocated via
+    <code>NitroModules.createNativeArrayBuffer()</code>, keeping tracking data
+    off the JS heap. It is a ring buffer: each snapshot uses 32 bytes
+    (4 × Float64), and when the buffer is full the oldest snapshot is
+    overwritten.
+  </p>
+  <div class="sig">function createMemoryTracker(maxSnapshots: number = 256): MemoryTracker</div>
+  <p>
+    <code>createLLM({ enableMemoryTracking: true })</code> and
+    <code>useModel</code> with <code>enableMemoryTracking: true</code> create
+    one for you (as <code>memoryTracker</code>) and record a snapshot after
+    each inference, load, unload, and reset.
+  </p>
+
+  <h3 id="memorytracker">MemoryTracker</h3>
+  <div class="sig">export interface MemoryTracker {
+  /** Record a new memory snapshot. @returns always true (kept for backward compatibility) */
+  record(snapshot: MemorySnapshot): boolean;
+  /** Total snapshots ever recorded (may exceed capacity once wrapped). */
+  getTotalRecorded(): number;
+  /** Get all recorded snapshots as structured objects. */
+  getSnapshots(): MemorySnapshot[];
+  /** Get the number of recorded snapshots. */
+  getSnapshotCount(): number;
+  /** Get the maximum number of snapshots this tracker can hold. */
+  getCapacity(): number;
+  /** Get the peak resident set size across all snapshots. */
+  getPeakMemory(): number;
+  /** Get the latest memory snapshot, or undefined if none recorded. */
+  getLatestSnapshot(): MemorySnapshot | undefined;
+  /** Get the underlying native ArrayBuffer (lives in native memory). */
+  getNativeBuffer(): ArrayBuffer;
+  /** Get the Float64Array view over the native buffer. */
+  getView(): Float64Array;
+  /** Reset the tracker, clearing all recorded snapshots. The native buffer is preserved (not reallocated). */
+  reset(): void;
+  /** Get a summary of memory usage statistics. */
+  getSummary(): MemoryTrackerSummary;
+}</div>
+
+  <h3 id="memorysnapshot">MemorySnapshot</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>timestamp</code></td><td><code>number</code></td><td>Unix timestamp in milliseconds.</td></tr>
+        <tr><td><code>nativeHeapBytes</code></td><td><code>number</code></td><td>Native heap allocated bytes (<code>Debug.getNativeHeapAllocatedSize</code> on Android, <code>task_info</code> on iOS).</td></tr>
+        <tr><td><code>residentBytes</code></td><td><code>number</code></td><td>Process resident set size (RSS) in bytes.</td></tr>
+        <tr><td><code>availableMemoryBytes</code></td><td><code>number</code></td><td>Available system memory in bytes.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="memorytrackersummary">MemoryTrackerSummary</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>snapshotCount</code></td><td><code>number</code></td><td>Number of snapshots recorded.</td></tr>
+        <tr><td><code>peakResidentBytes</code></td><td><code>number</code></td><td>Peak resident set size in bytes.</td></tr>
+        <tr><td><code>averageResidentBytes</code></td><td><code>number</code></td><td>Average resident set size in bytes.</td></tr>
+        <tr><td><code>currentResidentBytes</code></td><td><code>number</code></td><td>Latest resident set size in bytes.</td></tr>
+        <tr><td><code>peakNativeHeapBytes</code></td><td><code>number</code></td><td>Peak native heap allocated in bytes.</td></tr>
+        <tr><td><code>currentNativeHeapBytes</code></td><td><code>number</code></td><td>Latest native heap allocated in bytes.</td></tr>
+        <tr><td><code>residentDeltaBytes</code></td><td><code>number</code></td><td>RSS delta from first to last snapshot in bytes.</td></tr>
+        <tr><td><code>trackerBufferSizeBytes</code></td><td><code>number</code></td><td>Size of the native tracking buffer itself in bytes.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    For your own zero-copy needs, the same allocation primitive is exported
+    directly — a convenience wrapper around
+    <code>NitroModules.createNativeArrayBuffer()</code>:
+  </p>
+  <div class="sig">function createNativeBuffer(size: number): ArrayBuffer</div>
+
+  <h2 id="teardown">Deterministic teardown</h2>
+  <p>
+    Do not rely on garbage collection to free multi-GB model weights — the JS
+    GC has no idea a small wrapper object pins gigabytes of native memory.
+    Free the engine explicitly:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Method</th><th>Semantics</th></tr></thead>
+      <tbody>
+        <tr><td><code>unload()</code></td><td>Releases the loaded model and conversation, freeing all engine memory, while keeping the instance reusable — call <code>loadModel()</code> again to reload.</td></tr>
+        <tr><td><code>close()</code></td><td>Releases all native resources and permanently invalidates the instance. Call it when you are done with the LLM instance for good (<code>useModel</code> does this on unmount).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>llm.unload();  // free the engine now; llm stays reusable
+// …later…
+await llm.loadModel(otherModelUrl);
+
+llm.close();   // done for good; the instance is no longer usable</code></pre>
+  </div>
+
+  <h2 id="errors">Errors</h2>
+  <p>
+    Failures carry machine-readable codes — branch on <code>error.code</code>
+    instead of parsing messages.
+  </p>
+
+  <h3 id="error-codes">LiteRTLMErrorCode</h3>
+  <div class="sig">export type LiteRTLMErrorCode =
+  | "MEMORY_ESTIMATE_EXCEEDED"
+  | "MODEL_NOT_FOUND"
+  | "MODEL_NOT_LOADED"
+  | "ENGINE_INIT_FAILED"
+  | "DOWNLOAD_FAILED";</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Code</th><th>When it occurs</th></tr></thead>
+      <tbody>
+        <tr><td><code>MEMORY_ESTIMATE_EXCEEDED</code></td><td>The pre-flight estimate in <code>loadModel()</code> returned a <code>'critical'</code> verdict and <code>forceLoad</code> was not set. Thrown as <code>MemoryError</code>.</td></tr>
+        <tr><td><code>MODEL_NOT_FOUND</code></td><td>Reserved: the model file does not exist at the resolved path.</td></tr>
+        <tr><td><code>MODEL_NOT_LOADED</code></td><td>Reserved: an operation that needs a loaded model ran before <code>loadModel()</code> succeeded.</td></tr>
+        <tr><td><code>ENGINE_INIT_FAILED</code></td><td>Reserved: the native engine failed to initialize for the given model and config.</td></tr>
+        <tr><td><code>DOWNLOAD_FAILED</code></td><td>Reserved: the model download could not be completed.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="error-classes">LiteRTLMError &amp; MemoryError</h3>
+  <div class="sig">/** Base error class for all typed react-native-litert-lm errors. */
+class LiteRTLMError extends Error {
+  readonly code: LiteRTLMErrorCode;
+  constructor(code: LiteRTLMErrorCode, message: string);
+  // name === "LiteRTLMError"
+}
+
+/** Thrown by loadModel() when the model likely does not fit. */
+class MemoryError extends LiteRTLMError {
+  readonly estimate: MemoryEstimate;
+  constructor(message: string, estimate: MemoryEstimate);
+  // code === "MEMORY_ESTIMATE_EXCEEDED", name === "MemoryError"
+}</div>
+  <p>
+    <code>MemoryError</code> carries the full <code>MemoryEstimate</code> that
+    triggered the refusal, so apps can show a useful message — or lower
+    <code>maxContextTokens</code> and retry.
+  </p>
+
+  <h3 id="ismemoryerror">isMemoryError</h3>
+  <div class="sig">function isMemoryError(e: unknown): e is MemoryError</div>
+  <p>
+    The type guard checks
+    <code>e instanceof Error &amp;&amp; e.code === "MEMORY_ESTIMATE_EXCEEDED"</code>
+    — not <code>instanceof MemoryError</code> — so it works across realms
+    (e.g. when the error crossed a bundle or worker boundary).
+  </p>
+
+  <div class="pager">
+    <a href="configuration.html"><span>Previous</span>Configuration</a>
+    <a class="next" href="models.html"><span>Next</span>Models &amp; registry</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>
