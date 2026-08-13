@@ -4,6 +4,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.facebook.soloader.nativeloader.NativeLoader
 import com.facebook.soloader.nativeloader.SystemDelegate
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.Message as SdkMessage
 import com.margelo.nitro.JNIOnLoad
 import dev.litert.litertlm.LiteRTLMInitProvider
 import org.json.JSONArray
@@ -374,5 +381,89 @@ class HybridLiteRTLMInstrumentedTest {
             "raw message JSON leaked into the token stream: $response",
             response.contains("\"tool_calls\""),
         )
+    }
+
+    // ── Two LIVE conversations on one engine (upstream #2807) ────────────────
+
+    /**
+     * Drives the LiteRT-LM Kotlin SDK directly — two `Conversation`s alive at once
+     * on a single `Engine`, used in an interleaved (not concurrent) pattern. This
+     * is the behavior google-ai-edge/LiteRT-LM#2807 reported broken and reports
+     * fixed in 0.15.0 on desktop; the wrapper's `createConversation()` avoids
+     * relying on it by replaying transcripts. If this passes on a phone, the
+     * replay (and its re-prefill cost per switch) can be dropped.
+     *
+     * Named to sort last: it builds a second engine, so the shared suite engine is
+     * closed first rather than holding two multi-GB engines at once.
+     */
+    @Test
+    fun testZ_interleavedLiveConversationsShareOneEngine() {
+        val model = modelFile()
+        assumeTrue("No .litertlm — skipping", model != null)
+        JNIOnLoad.initializeNativeNitro()
+
+        // Free the suite's shared engine first.
+        bridge?.close()
+        bridge = null
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val engine = Engine(
+            EngineConfig(
+                modelPath = model!!.absolutePath,
+                backend = com.google.ai.edge.litertlm.Backend.CPU(),
+                maxNumTokens = 2048,
+                cacheDir = context.cacheDir.absolutePath,
+            )
+        )
+        try {
+            engine.initialize()
+            val greedy = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0)
+            fun conversation() = engine.createConversation(
+                ConversationConfig(
+                    samplerConfig = greedy,
+                    automaticToolCalling = false,
+                    maxOutputToken = 32,
+                )
+            )
+
+            val convA = conversation()
+            // If the SDK enforced one conversation per engine, this is where it fails.
+            val convB = conversation()
+
+            fun send(conversation: Conversation, text: String): String =
+                conversation.sendMessage(SdkMessage.user(text))
+                    .contents.contents
+                    .filterIsInstance<Content.Text>()
+                    .joinToString("") { it.text }
+
+            try {
+                val ackA = send(convA, "My lucky number is 47. Acknowledge briefly.")
+                println("[android-int][2807] A ack: $ackA")
+
+                val ackB = send(convB, "My favorite animal is the axolotl. Acknowledge briefly.")
+                println("[android-int][2807] B ack: $ackB")
+                val answerB = send(convB, "What is my favorite animal? One word.")
+                println("[android-int][2807] B recall: $answerB")
+
+                // B must actually have advanced, or A's recall proves nothing.
+                assertTrue(
+                    "conversation B did not carry its own turn — test would be vacuous: $answerB",
+                    answerB.lowercase().contains("axolotl"),
+                )
+
+                val answerA = send(convA, "What is my lucky number? Reply with just the number.")
+                println("[android-int][2807] A recall: $answerA")
+                assertTrue(
+                    "INTERLEAVED RECALL FAILED — conversation A lost its state after B " +
+                        "generated. Got: $answerA",
+                    answerA.contains("47"),
+                )
+            } finally {
+                runCatching { convA.close() }
+                runCatching { convB.close() }
+            }
+        } finally {
+            runCatching { engine.close() }
+        }
     }
 }

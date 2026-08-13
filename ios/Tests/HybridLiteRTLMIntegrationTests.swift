@@ -1,5 +1,6 @@
 import XCTest
 import NitroModules
+import CLiteRTLM
 @testable import LiteRTLM
 
 /// Integration smoke tests that run REAL inference in the simulator.
@@ -294,5 +295,124 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         } else {
             XCTFail("no complete <tool_call>…</tool_call> pair in response: \(response)")
         }
+    }
+
+    // MARK: - Two LIVE conversations on one engine (upstream #2807)
+
+    /// Drives the C API directly — two `LiteRtLmConversation`s alive at once on a
+    /// single engine, used in an interleaved (not concurrent) pattern. This is the
+    /// behavior google-ai-edge/LiteRT-LM#2807 reported broken and reports fixed in
+    /// 0.15.0 on desktop; the wrapper's own `createConversation()` avoids relying
+    /// on it by replaying transcripts instead. If this passes on mobile, the
+    /// replay (and its re-prefill cost) can be dropped.
+    ///
+    /// Named to sort last: it builds a second engine, so it runs after the shared
+    /// suite engine is no longer needed.
+    func testZ_interleavedLiveConversationsShareOneEngine() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        // Release the suite's shared engine first — two multi-GB engines at once
+        // would be an unfair memory test.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+
+        guard let settings = litert_lm_engine_settings_create(path, "cpu", nil, nil) else {
+            XCTFail("engine settings creation failed")
+            return
+        }
+        litert_lm_engine_settings_set_max_num_tokens(settings, 2048)
+        guard let engine = litert_lm_engine_create(settings) else {
+            litert_lm_engine_settings_delete(settings)
+            XCTFail("engine creation failed")
+            return
+        }
+        litert_lm_engine_settings_delete(settings)
+        defer { litert_lm_engine_delete(engine) }
+
+        /// Build a conversation with greedy sampling and a small output budget.
+        func makeConversation() -> OpaquePointer? {
+            guard let convConfig = litert_lm_conversation_config_create() else { return nil }
+            defer { litert_lm_conversation_config_delete(convConfig) }
+            guard let sessionConfig = litert_lm_session_config_create() else { return nil }
+            defer { litert_lm_session_config_delete(sessionConfig) }
+
+            litert_lm_session_config_set_max_output_tokens(sessionConfig, 32)
+            if let sampler = litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP) {
+                litert_lm_sampler_params_set_top_k(sampler, 1)
+                litert_lm_sampler_params_set_top_p(sampler, 1.0)
+                litert_lm_sampler_params_set_temperature(sampler, 0.0)
+                litert_lm_sampler_params_set_seed(sampler, 0)
+                litert_lm_session_config_set_sampler_params(sessionConfig, sampler)
+                litert_lm_sampler_params_delete(sampler)
+            }
+            litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
+            return litert_lm_conversation_create(engine, convConfig)
+        }
+
+        guard let convA = makeConversation() else {
+            XCTFail("first conversation could not be created")
+            return
+        }
+        defer { litert_lm_conversation_delete(convA) }
+
+        guard let convB = makeConversation() else {
+            XCTFail("SECOND live conversation on one engine could not be created — " +
+                    "the C API still enforces one conversation per engine")
+            return
+        }
+        defer { litert_lm_conversation_delete(convB) }
+
+        /// Send one user turn and return the model's text.
+        func send(_ conversation: OpaquePointer, _ text: String) -> String {
+            let payload: [String: Any] = ["role": "user", "content": text]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let msgJson = String(data: data, encoding: .utf8) else { return "" }
+            guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, nil) else {
+                return ""
+            }
+            defer { litert_lm_json_response_delete(response) }
+            guard let raw = litert_lm_json_response_get_string(response) else { return "" }
+            return extractTextFromResponseForTest(String(cString: raw))
+        }
+
+        // Interleave: seed A, advance B, then ask A about its own fact.
+        let ackA = send(convA, "My lucky number is 47. Acknowledge briefly.")
+        print("[integration][2807] A ack: \(ackA)")
+        let tokensAfterA = litert_lm_conversation_get_token_count(convA)
+
+        let ackB = send(convB, "My favorite animal is the axolotl. Acknowledge briefly.")
+        print("[integration][2807] B ack: \(ackB)")
+        let answerB = send(convB, "What is my favorite animal? One word.")
+        print("[integration][2807] B recall: \(answerB)")
+
+        // B must actually have advanced, or A's recall proves nothing.
+        XCTAssertTrue(answerB.lowercased().contains("axolotl"),
+                      "conversation B did not carry its own turn — test would be vacuous: \(answerB)")
+
+        let answerA = send(convA, "What is my lucky number? Reply with just the number.")
+        let tokensAfterRecall = litert_lm_conversation_get_token_count(convA)
+        print("[integration][2807] A recall: \(answerA)")
+        print("[integration][2807] A token count: after seed \(tokensAfterA), after recall \(tokensAfterRecall)")
+
+        XCTAssertTrue(answerA.contains("47"),
+                      "INTERLEAVED RECALL FAILED — conversation A lost its state after B generated. " +
+                      "Got: \(answerA)")
+    }
+}
+
+private extension HybridLiteRTLMIntegrationTests {
+    /// Minimal text extraction for the raw C-API tests (the wrapper's own helper
+    /// lives on HybridLiteRTLM, which these tests bypass).
+    func extractTextFromResponseForTest(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return json
+        }
+        if let text = obj["content"] as? String { return text }
+        if let parts = obj["content"] as? [[String: Any]] {
+            return parts.compactMap { $0["text"] as? String }.joined()
+        }
+        return json
     }
 }
