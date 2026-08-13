@@ -275,9 +275,11 @@ await llm.execute(parts, onToken, {
 ```
 
 > `suppressTokens` is **iOS only**. On Android it is ignored with a warning:
-> LiteRT-LM 0.15.0's `SuppressTokensConfig` JNI binding looks up a
-> Kotlin-mangled `internal` accessor and aborts the process, so the library
-> refuses to use it there until upstream fixes it.
+> LiteRT-LM's `SuppressTokensConfig` JNI binding looks up a Kotlin-mangled
+> `internal` accessor and aborts the process (affects 0.15.0 and 0.16.0), so
+> the library refuses to use it there until
+> [google-ai-edge/LiteRT-LM#3229](https://github.com/google-ai-edge/LiteRT-LM/issues/3229)
+> is fixed.
 
 Session-wide thinking defaults go in the load config: `loadModel(url, { thinking: { tokenBudget: 1024 } })`.
 Thinking content still streams as typed `thinking` events through `executeWithEvents()`.

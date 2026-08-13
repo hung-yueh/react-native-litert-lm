@@ -885,13 +885,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         windowSize = options?.noRepeatNgramWindowSize?.toInt(),
                     )
                 } else null
-                // suppressTokens is unusable on Android with LiteRT-LM 0.15.0: the
-                // SDK's JNI layer looks up SuppressTokensConfig.getSuppressTokensArray(),
+                // suppressTokens is unusable on Android with LiteRT-LM 0.15.0/0.16.0:
+                // the SDK's JNI layer looks up SuppressTokensConfig.getSuppressTokensArray(),
                 // but Kotlin name-mangles that `internal` method in the shipped AAR
                 // (getSuppressTokensArray$third_party_odml_…). The failed lookup raises
                 // a JNI fatal error that aborts the whole process — it cannot be caught,
                 // so the config must never be constructed. iOS drives the C API directly
                 // and is unaffected. Verified on-device (SM-S901U, Android 16).
+                // Upstream: https://github.com/google-ai-edge/LiteRT-LM/issues/3229
                 if (options?.suppressTokens != null) {
                     Log.w(TAG, "suppressTokens is ignored on Android: LiteRT-LM " +
                         "0.15.0's SuppressTokensConfig JNI binding is broken upstream " +
