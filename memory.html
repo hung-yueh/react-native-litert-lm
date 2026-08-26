@@ -373,6 +373,16 @@ clearMemoryWarningCallback(): void</div>
     free memory now). Only one callback is active at a time — registering a
     new one replaces the previous.
   </p>
+  <p>
+    On Android the library also releases the engine itself in a genuine
+    memory emergency (<code>TRIM_MEMORY_RUNNING_CRITICAL</code> while
+    foregrounded, or <code>TRIM_MEMORY_COMPLETE</code> when the cached app is
+    next in line to be killed). The warning callback fires with
+    <code>'critical'</code> and the instance stays reusable — recover with
+    <code>loadModel()</code>. Ordinary lifecycle events such as locking the
+    screen or pressing home (<code>TRIM_MEMORY_UI_HIDDEN</code>) never
+    release the engine.
+  </p>
   <div class="code">
     <div class="code-head"><span>typescript</span></div>
     <pre><code>llm.setMemoryWarningCallback((level, usage) =&gt; {
