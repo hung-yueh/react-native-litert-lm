@@ -71,6 +71,22 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         private var openCLAvailable: Boolean? = null
         
         /**
+         * Map a [ComponentCallbacks2] trim level to a JS-facing warning, or
+         * null for events that carry no memory-pressure signal. Trim levels
+         * are event codes, not a severity scale — TRIM_MEMORY_UI_HIDDEN (20)
+         * fires on every screen lock / home press (issue #24).
+         */
+        internal fun classifyTrimLevel(level: Int): MemoryWarningLevel? = when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> MemoryWarningLevel.CRITICAL
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE -> MemoryWarningLevel.MODERATE
+            else -> null
+        }
+
+        /**
          * Initialize the native library.
          * Must be called from Application.onCreate() to register the HybridObject.
          */
@@ -577,13 +593,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 val callbacks = object : ComponentCallbacks2 {
                     override fun onTrimMemory(level: Int) {
                         val cb = memoryWarningCallback ?: return
-                        val warningLevel = when {
-                            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> MemoryWarningLevel.CRITICAL
-                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> MemoryWarningLevel.CRITICAL
-                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> MemoryWarningLevel.MODERATE
-                            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> MemoryWarningLevel.MODERATE
-                            else -> return
-                        }
+                        val warningLevel = classifyTrimLevel(level) ?: return
                         try {
                             cb(warningLevel, getMemoryUsage())
                         } catch (e: Exception) {
@@ -627,6 +637,21 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         Log.d(TAG, "Closing resources")
         isClosed = true
         clearMemoryWarningCallback()
+        cleanupInternal()
+    }
+
+    /**
+     * Called by [LiteRTLMRegistry] on a genuine OS memory emergency. Frees the
+     * heavy native engine but — unlike [close] — leaves the instance open and
+     * the memory-warning subscription registered, so the app can recover with
+     * loadModel(). The app still observes the event: the registry's component
+     * callback was registered at process start (before any JS could call
+     * setMemoryWarningCallback), so the per-instance callback fires after this
+     * release and reports the same trim event as CRITICAL.
+     */
+    internal fun releaseUnderMemoryPressure() {
+        if (engine == null) return
+        Log.w(TAG, "Releasing engine under memory pressure (instance stays reloadable)")
         cleanupInternal()
     }
 

@@ -1,5 +1,6 @@
 package com.margelo.nitro.dev.litert.litertlm
 
+import android.content.ComponentCallbacks2
 import java.util.Collections
 import java.util.WeakHashMap
 import android.util.Log
@@ -10,7 +11,7 @@ import android.util.Log
  */
 object LiteRTLMRegistry {
     private const val TAG = "LiteRTLMRegistry"
-    
+
     // Use WeakSet-like structure to prevent leaks
     private val instances = Collections.newSetFromMap(WeakHashMap<HybridLiteRTLM, Boolean>())
 
@@ -20,13 +21,24 @@ object LiteRTLMRegistry {
         }
     }
 
+    /**
+     * Whether a trim level justifies dropping loaded engines. Trim levels are
+     * event codes, not a severity scale: TRIM_MEMORY_UI_HIDDEN (20) fires on
+     * every screen lock / home press and says nothing about memory pressure,
+     * so a `>=` threshold must not be used here. Only two events mean the
+     * process is about to die without intervention: RUNNING_CRITICAL
+     * (foreground, memory critical) and COMPLETE (cached, next to be killed).
+     */
+    fun isMemoryEmergency(level: Int): Boolean =
+        level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE
+
     fun onTrimMemory(level: Int) {
-        Log.w(TAG, "Received memory warning (level=$level). Releasing resources...")
+        Log.w(TAG, "Memory emergency (level=$level). Releasing engines...")
         synchronized(instances) {
-            instances.forEach { it.close() }
-            // Note: We don't clear the set here, as close() should be idempotent
-            // and the instance might still be ref-counted by JS. 
-            // We just ensure the HEAVY native resources are gone.
+            // Release the heavy native resources but keep each instance
+            // reloadable — close() would set isClosed and strand the JS side.
+            instances.forEach { it.releaseUnderMemoryPressure() }
         }
     }
 }

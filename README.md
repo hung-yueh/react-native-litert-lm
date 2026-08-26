@@ -140,6 +140,8 @@ const llm = createLLM({
 
 `unload()` releases the engine (freeing gigabytes) while keeping the instance reusable — don't wait for GC to reclaim a multi-GB model.
 
+On Android the library also protects itself as a last resort: in a genuine memory emergency (`TRIM_MEMORY_RUNNING_CRITICAL` while foregrounded, or `TRIM_MEMORY_COMPLETE` when the cached app is next in line to be killed) it releases the engine automatically — the warning callback fires with `'critical'` and the instance stays reusable, so recover with `loadModel()`. Ordinary lifecycle events (screen lock, home button — `TRIM_MEMORY_UI_HIDDEN`) never release the engine.
+
 ### Tuning knobs
 
 Every knob's memory impact, documented. `maxContextTokens` is the biggest lever.
