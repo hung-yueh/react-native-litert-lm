@@ -1,5 +1,10 @@
 import { Platform } from "react-native";
 import type { Backend } from "./specs/LiteRTLM.nitro";
+import {
+  resolveFromManifest as resolveFromManifestCore,
+  type ManifestResolution,
+  type ResolveFromManifestOptions,
+} from "./manifestResolver";
 
 export type {
   LiteRTLM,
@@ -56,6 +61,57 @@ export type {
   StreamChannel,
   StreamEventParser,
 } from "./streamEvents";
+
+// Manifest-driven variant/backend/channel selection from a model repo's
+// litertlm_manifest.json (issue #23). Core is react-native-free; this wrapper
+// defaults `platform` to the device OS.
+export {
+  resolutionFor,
+  resolveVariant,
+  mergeStreamChannels,
+  parseManifest,
+  fetchManifest,
+  thinkingMarkers,
+  declaredChannels,
+} from "./manifestResolver";
+export type {
+  Manifest,
+  ManifestVariant,
+  ManifestCapabilities,
+  ManifestRecommendation,
+  ManifestPlatform,
+  ManifestResolution,
+  ResolveFromManifestOptions,
+  ResolveVariantOptions,
+  VariantResolution,
+  DeclaredChannel,
+  ThinkingChannel,
+} from "./manifestResolver";
+
+/**
+ * Fetch `<repo>`'s litertlm_manifest.json from the Hugging Face Hub and pick
+ * the right .litertlm variant, backend, config, and stream channels for this
+ * device. `platform` defaults to this device's OS; returns null when an
+ * explicitly requested backend is listed by no variant (fall back to your
+ * current loading path).
+ *
+ * @example
+ * ```typescript
+ * const resolution = await resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct");
+ * if (resolution) {
+ *   const llm = createLLM({ streamChannels: resolution.streamChannels });
+ *   await llm.loadModel(resolution.url, { ...resolution.config });
+ * }
+ * ```
+ */
+export function resolveFromManifest(
+  repo: string,
+  options: ResolveFromManifestOptions = {},
+): Promise<ManifestResolution | null> {
+  const platform =
+    Platform.OS === "android" || Platform.OS === "ios" ? Platform.OS : undefined;
+  return resolveFromManifestCore(repo, { platform, ...options });
+}
 
 export type {
   LiteRTLMInstance,
