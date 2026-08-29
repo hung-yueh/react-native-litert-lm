@@ -61,9 +61,12 @@
         k++;
       }
       var chunk = esc(src.slice(i, k));
-      chunk = chunk.replace(/\b(0x[\da-fA-F]+|\d[\d_]*(\.\d+)?)\b/g, '<span class="tok-num">$1</span>');
+      // KEYWORDS must run first: it matches `class`, which every later pass
+      // injects as part of `<span class="tok-…">`. Running it after any
+      // injection rewrites that markup and breaks the block.
       chunk = chunk.replace(KEYWORDS, '<span class="tok-kw">$1</span>');
       chunk = chunk.replace(TYPES, '<span class="tok-ty">$1</span>');
+      chunk = chunk.replace(/\b(0x[\da-fA-F]+|\d[\d_]*(\.\d+)?)\b/g, '<span class="tok-num">$1</span>');
       chunk = chunk.replace(/([A-Za-z_$][\w$]*)(\()/g, '<span class="tok-fn">$1</span>$2');
       out += chunk;
       i = k;
