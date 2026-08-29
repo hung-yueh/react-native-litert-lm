@@ -80,7 +80,7 @@
           <td>Text, image, audio, tools, thinking</td>
         </tr>
         <tr>
-          <td><code>GEMMA_3N_E2B_IT_INT4</code></td>
+          <td><code>GEMMA_3N_E2B_IT_INT4</code> <span class="pill dep">deprecated</span></td>
           <td>~3.66&nbsp;GB</td>
           <td>6&nbsp;GB+</td>
           <td>Text, image</td>
@@ -97,12 +97,25 @@ export const GEMMA_4_E4B_IT =
   "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm";
 
 export const GEMMA_3N_E2B_IT_INT4 =
-  "https://litert.dev/gemma-3n-E2B-it-int4.litertlm";</code></pre>
+  "https://models.litert.dev/gemma-3n-E2B-it-int4.litertlm";</code></pre>
   </div>
   <p>
     All three URLs are public — no HuggingFace account or authentication
     required.
   </p>
+  <div class="note">
+    <span class="note-label">Prefer Gemma 4</span>
+    <p>
+      <code>GEMMA_3N_E2B_IT_INT4</code> is deprecated. <code>GEMMA_4_E2B_IT</code>
+      is smaller (2.58&nbsp;GB), adds audio, tool calling and thinking, and is
+      served straight from the Hub. Gemma 3n is mirrored on
+      <code>models.litert.dev</code> only because the upstream repo
+      <code>google/gemma-3n-E2B-it-litert-lm</code> is gated — it returns 401
+      without an access token and manual license approval. The constant still
+      works, and the former <code>litert.dev/&hellip;</code> URL redirects to the
+      mirror, so shipped apps are unaffected.
+    </p>
+  </div>
   <div class="note">
     <span class="note-label">iOS entitlement</span>
     <p>
