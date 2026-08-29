@@ -11,6 +11,7 @@
     "publish": true
   },
   "hooks": {
-    "before:init": "npm run build"
+    "before:init": "npm run build",
+    "after:bump": "node scripts/sync-docs-version.js && git add website"
   }
 }
