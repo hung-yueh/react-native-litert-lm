@@ -2,6 +2,8 @@
 
 High-performance **on-device LLM inference** for React Native, powered by [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) and [Nitro Modules](https://github.com/mrousavy/nitro). Optimized for **Gemma 4** and other on-device models — with first-class **memory safety** so a 1–4 GB model can't silently OOM-kill your app.
 
+📖 **[Documentation →](https://litert.dev)** — guides and the full API reference.
+
 ## Highlights
 
 - 🛡️ **Crash-free memory handling** — pre-flight estimation, live tracking, context forecasting, OS pressure warnings, budgets, and deterministic `unload()`. [See below.](#memory-handling)
