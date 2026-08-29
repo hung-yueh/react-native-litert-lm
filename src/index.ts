@@ -281,12 +281,22 @@ export function checkMultimodalSupport(): string | undefined {
 
 /**
  * Download URL for the Gemma 3n E2B IT INT4 model (~3.66 GB as served).
- * Public — hosted on litert.dev, no authentication required.
+ * Public mirror — no authentication required.
+ *
+ * @deprecated Prefer {@link GEMMA_4_E2B_IT}. It is smaller (2.58 GB), adds
+ * audio input, tool calling and thinking, and is served directly from the
+ * Hugging Face Hub. Gemma 3n is mirrored here only because the upstream repo
+ * `google/gemma-3n-E2B-it-litert-lm` is gated and returns 401 without an
+ * access token and manual license approval.
+ *
+ * Still fully supported. The former `https://litert.dev/...` URL now 301s to
+ * this one, so apps already shipped against it keep working unchanged.
+ *
  * Note: on iOS this exceeds the ~2 GB threshold, so the Extended Virtual
  * Addressing entitlement is required (same as Gemma 4).
  */
 export const GEMMA_3N_E2B_IT_INT4 =
-  "https://litert.dev/gemma-3n-E2B-it-int4.litertlm";
+  "https://models.litert.dev/gemma-3n-E2B-it-int4.litertlm";
 
 /**
  * Download URL for the Gemma 4 E2B IT model (2.58 GB).

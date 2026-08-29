@@ -324,7 +324,9 @@ All exported URLs are **public — no auth required**. Pass any to `useModel()` 
 | --- | --- | --- | --- | --- |
 | `GEMMA_4_E2B_IT` | Gemma 4 E2B (multimodal) | 2.58 GB | 4 GB+ | HuggingFace |
 | `GEMMA_4_E4B_IT` | Gemma 4 E4B (higher quality) | 3.65 GB | 6 GB+ | HuggingFace |
-| `GEMMA_3N_E2B_IT_INT4` | Gemma 3n E2B (int4, multimodal) | ~3.66 GB | 6 GB+ | litert.dev |
+| `GEMMA_3N_E2B_IT_INT4` _(deprecated)_ | Gemma 3n E2B (int4, multimodal) | ~3.66 GB | 6 GB+ | models.litert.dev |
+
+> **`GEMMA_3N_E2B_IT_INT4` is deprecated** — prefer `GEMMA_4_E2B_IT`: it is smaller (2.58 GB), adds audio, tool calling and thinking, and comes straight from the Hub. Gemma 3n is mirrored on `models.litert.dev` only because the upstream repo `google/gemma-3n-E2B-it-litert-lm` is gated (401 without a token and manual license approval). It still works, and the old `litert.dev/...` URL 301s to the mirror.
 
 Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manually from [HuggingFace](https://huggingface.co/litert-community).
 
