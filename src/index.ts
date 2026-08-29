@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import type { Backend } from "./specs/LiteRTLM.nitro";
 import {
+  manifestPlatformFor,
   resolveFromManifest as resolveFromManifestCore,
   type ManifestResolution,
   type ResolveFromManifestOptions,
@@ -71,11 +72,13 @@ export {
   mergeStreamChannels,
   parseManifest,
   fetchManifest,
+  manifestFetchStatus,
   thinkingMarkers,
   declaredChannels,
 } from "./manifestResolver";
 export type {
   Manifest,
+  ManifestFetchError,
   ManifestVariant,
   ManifestCapabilities,
   ManifestRecommendation,
@@ -91,9 +94,12 @@ export type {
 /**
  * Fetch `<repo>`'s litertlm_manifest.json from the Hugging Face Hub and pick
  * the right .litertlm variant, backend, config, and stream channels for this
- * device. `platform` defaults to this device's OS; returns null when an
- * explicitly requested backend is listed by no variant (fall back to your
- * current loading path).
+ * device. `platform` defaults to this device's OS; pass it to override.
+ * Never throws: returns null when the repo ships no manifest, the manifest's
+ * schema is unsupported, the fetch fails or is aborted (`options.signal`),
+ * or no variant lists an explicitly requested backend — fall back to your
+ * current loading path. Only the unexpected cases log a console.warn line;
+ * a missing manifest and an abort are silent.
  *
  * @example
  * ```typescript
@@ -108,9 +114,10 @@ export function resolveFromManifest(
   repo: string,
   options: ResolveFromManifestOptions = {},
 ): Promise<ManifestResolution | null> {
-  const platform =
-    Platform.OS === "android" || Platform.OS === "ios" ? Platform.OS : undefined;
-  return resolveFromManifestCore(repo, { platform, ...options });
+  return resolveFromManifestCore(repo, {
+    ...options,
+    platform: options.platform ?? manifestPlatformFor(Platform.OS),
+  });
 }
 
 export type {

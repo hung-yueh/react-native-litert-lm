@@ -11,7 +11,9 @@
  * Spec: https://github.com/john-rocky/hf-to-litertlm/blob/main/manifest/SCHEMA.md
  * The core reader (parse/resolve) is vendored from the reference TypeScript
  * reader (john-rocky/hf-to-litertlm `readers/ts`, v0.2.0) with `resolve`
- * renamed to `resolveVariant`; it is IO-free and dependency-free. The
+ * renamed to `resolveVariant`, plus an optional `signal` and a
+ * status-carrying error on `fetchManifest`; it is dependency-free and,
+ * apart from `fetchManifest`, IO-free. The
  * react-native layer (`resolveFromManifest`, `mergeStreamChannels`) is at the
  * bottom. This module deliberately does not import react-native — `index.ts`
  * injects `Platform.OS` as the default platform.
@@ -151,12 +153,41 @@ export function parseManifest(input: string | object): Manifest {
   return m;
 }
 
-/** Fetch <repo>'s manifest from the Hugging Face Hub. resolveVariant() URLs follow the revision fetched here. */
-export async function fetchManifest(repo: string, revision = "main"): Promise<Manifest> {
+/**
+ * Thrown by {@link fetchManifest} for a non-2xx response. `status` tells a
+ * missing manifest (404) from a gated repo (401/403) or a Hub outage (5xx).
+ */
+export interface ManifestFetchError extends Error {
+  status: number;
+}
+
+/** The HTTP status carried by a {@link ManifestFetchError}, or undefined for any other error. */
+export function manifestFetchStatus(e: unknown): number | undefined {
+  const status = e instanceof Error ? (e as Partial<ManifestFetchError>).status : undefined;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * Fetch <repo>'s manifest from the Hugging Face Hub. resolveVariant() URLs
+ * follow the revision fetched here. Throws on a non-2xx response (a
+ * {@link ManifestFetchError} carrying the status), an unsupported schema, or
+ * a failed/aborted fetch — {@link resolveFromManifest} turns all of those
+ * into null; call this directly when you want the error. `signal` aborts
+ * the fetch.
+ */
+export async function fetchManifest(
+  repo: string,
+  revision = "main",
+  signal?: AbortSignal,
+): Promise<Manifest> {
   const url = `https://huggingface.co/${repo}/resolve/${encodeURIComponent(revision)}/litertlm_manifest.json`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal });
   if (!res.ok) {
-    throw new Error(`no litertlm_manifest.json at ${url} (HTTP ${res.status})`);
+    const message =
+      res.status === 404
+        ? `no litertlm_manifest.json at ${url} (HTTP 404)`
+        : `HTTP ${res.status} fetching ${url}`;
+    throw Object.assign(new Error(message), { status: res.status }) as ManifestFetchError;
   }
   const m = parseManifest(await res.text());
   m.revision = revision;
@@ -325,10 +356,34 @@ export function mergeStreamChannels(
   return [...merged.values()];
 }
 
+/** react-native `Platform.OS` values that are also manifest `recommended[].platform` keys. */
+const MANIFEST_PLATFORMS = new Set<string>([
+  "android",
+  "ios",
+  "macos",
+  "windows",
+] satisfies ManifestPlatform[]);
+
+/**
+ * The manifest platform for a react-native `Platform.OS` value, or undefined
+ * for one no manifest names (`web`, `native`). index.ts injects this as the
+ * default `platform`, so react-native-macos and -windows keep their
+ * recommendations instead of silently falling back to the smallest file.
+ */
+export function manifestPlatformFor(os: string): ManifestPlatform | undefined {
+  return MANIFEST_PLATFORMS.has(os) ? (os as ManifestPlatform) : undefined;
+}
+
 /** Options for {@link resolveFromManifest}. */
 export interface ResolveFromManifestOptions extends ResolveVariantOptions {
   /** Hub revision to fetch and pin (default "main"); download URLs follow it. */
   revision?: string;
+  /**
+   * Aborts the manifest fetch — pass an AbortController's signal so a
+   * startup-time resolve can't hang on a bad connection. An aborted fetch
+   * resolves to null, silently.
+   */
+  signal?: AbortSignal;
 }
 
 /** Everything an app needs to load the chosen variant. */
@@ -354,7 +409,18 @@ export interface ManifestResolution {
   sha256?: string;
   sizeBytes?: number;
   contextLength?: number;
-  /** platform_notes + known_issues of the chosen variant — worth surfacing. */
+  /**
+   * The manifest's raw `session_defaults` — an open object (SCHEMA.md
+   * declares `max_output_tokens_min`, `temperature`, `top_k`, `top_p`,
+   * `notes`). `config` maps the keys it knows; any key a later 0.1.x adds is
+   * reachable here without a re-fetch.
+   */
+  sessionDefaults?: Record<string, unknown>;
+  /**
+   * Worth surfacing to the developer: the chosen variant's platform_notes
+   * and known_issues, then the model's `session_defaults.notes` (curated
+   * guidance) when the manifest carries one.
+   */
   notes: string[];
   /** Why this variant/backend was chosen (for logs). */
   reason: string;
@@ -397,9 +463,19 @@ export function resolutionFor(
   if (typeof sd.top_p === "number") {
     config.topP = sd.top_p;
   }
-  // TODO(#23): decide whether context_length should seed maxContextTokens
-  // (model max vs engine budget are different knobs) and whether
-  // streamToolCalls should default on when the manifest declares channels.
+  // Two knobs deliberately NOT derived from the manifest (agreed in the #25
+  // review; not final):
+  // - `context_length` does not seed `maxContextTokens`. They look like the
+  //   same number but are different knobs: the manifest value is what the
+  //   model can address, the package default is a memory ceiling, and quietly
+  //   raising it to 128K on a phone is the OOM the pre-flight check exists to
+  //   catch. `contextLength` is on the resolution for apps that want more,
+  //   knowingly.
+  // - `streamToolCalls` stays off even when the manifest declares a tool
+  //   channel. A declared channel says the model *can* emit tool calls, not
+  //   that this app wants to handle them, and switching engine behaviour on
+  //   as a side effect of "resolve a URL" would surprise a caller. Revisit
+  //   once the bundle-header read lands and the signal is local, not fetched.
 
   return {
     url: r.url,
@@ -410,7 +486,8 @@ export function resolutionFor(
     sha256: r.variant.sha256,
     sizeBytes: r.variant.size_bytes,
     contextLength: r.contextLength,
-    notes: r.notes,
+    sessionDefaults: r.sessionDefaults,
+    notes: typeof sd.notes === "string" && sd.notes !== "" ? [...r.notes, sd.notes] : r.notes,
     reason: r.reason,
   };
 }
@@ -428,13 +505,33 @@ export function resolutionFor(
  * ```
  *
  * `platform` defaults to this device's OS when called through the package
- * export (index.ts injects `Platform.OS`). Returns null when an explicitly
- * requested backend is listed by no variant.
+ * export (index.ts injects `Platform.OS`).
+ *
+ * Never throws. Returns null whenever the manifest can't help — the repo
+ * ships none (HTTP 404, the common case on the Hub today), its schema is
+ * newer than this reader supports, the fetch fails or is aborted, or no
+ * variant lists an explicitly requested backend — so callers fall back to
+ * their current (non-manifest) loading path without a try/catch.
+ *
+ * The expected outcomes are silent: no manifest, an abort the caller asked
+ * for, an unlisted backend. Anything else (unsupported schema, a body that
+ * is not a manifest, a network failure, a non-404 HTTP status) is reported
+ * with one console.warn line naming the reason — on React Native, LogBox
+ * shows console.warn in dev, which is too loud for the common path.
  */
 export async function resolveFromManifest(
   repo: string,
   opts: ResolveFromManifestOptions = {},
 ): Promise<ManifestResolution | null> {
-  const manifest = await fetchManifest(repo, opts.revision ?? "main");
-  return resolutionFor(manifest, opts);
+  try {
+    const manifest = await fetchManifest(repo, opts.revision ?? "main", opts.signal);
+    return resolutionFor(manifest, opts);
+  } catch (e) {
+    if (opts.signal?.aborted || manifestFetchStatus(e) === 404) {
+      return null;
+    }
+    const reason = e instanceof Error ? e.message : String(e);
+    console.warn(`resolveFromManifest(${repo}): ${reason} — returning null`);
+    return null;
+  }
 }
