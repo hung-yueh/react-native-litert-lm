@@ -68,6 +68,21 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+          cache: 'gradle'
+
+      # Robolectric downloads its android-all jar from Maven at TEST RUNTIME,
+      # not via Gradle dependency resolution, so nothing else caches it. A
+      # network blip in that fetch fails the whole job with a SocketException
+      # inside MavenArtifactFetcher — it did on 1a54728, on a commit that
+      # touched no Android code. Caching it means only a cold cache needs the
+      # network.
+      - name: Cache Robolectric android-all jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ runner.os }}-${{ hashFiles('android/build.gradle') }}
+          restore-keys: |
+            robolectric-${{ runner.os }}-
 
       - name: Install dependencies
         run: npm install
