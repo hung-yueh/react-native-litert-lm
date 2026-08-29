@@ -68,13 +68,16 @@ a:focus-visible, button:focus-visible {
 .wordmark {
   font-family: var(--display);
   font-weight: 700;
-  font-size: 19px;
+  /* The full package name is 22 characters; 19px overflowed the bar on phones. */
+  font-size: 16px;
   letter-spacing: -0.02em;
   color: var(--text);
+  white-space: nowrap;
 }
 .wordmark:hover { text-decoration: none; color: var(--text); }
+/* Dim the npm scope so "litert-lm" still reads as the name at a glance. */
+.wordmark .ns { font-weight: 400; color: var(--text-2); }
 .wordmark .dot { color: var(--copper); }
-.wordmark .lm { font-weight: 400; color: var(--text-2); }
 .top .ver {
   font-family: var(--mono);
   font-size: 11px;
