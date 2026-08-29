@@ -1,0 +1,801 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Manifest resolution — litert·lm</title>
+<meta name="description" content="Read a model repo's litertlm_manifest.json to pick the right .litertlm variant, backend, config, and stream channels for the current device." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html">litert<span class="dot">·</span><span class="lm">lm</span></a>
+  <span class="ver">v0.6.1</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="manifest.html" class="here">Manifest resolution</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Platform</p>
+  <h1>Manifest resolution</h1>
+  <p class="lede">
+    A model repo on the Hugging Face Hub can ship a
+    <code>litertlm_manifest.json</code> describing every variant it contains.
+    <code>resolveFromManifest()</code> reads it and returns the right
+    <code>.litertlm</code> file, backend, config, and stream channels for the
+    device it runs on.
+  </p>
+
+  <h2 id="what-it-solves">What it solves</h2>
+  <p>
+    Without a manifest, an app hardcodes a file name, a backend, and a set of
+    channel markers per model — three things that differ between variants of
+    the same repo and between devices. Repos converted for LiteRT-LM ship a
+    <code>litertlm_manifest.json</code> at their root describing every variant:
+    the backends each file is verified to generate on, per-platform
+    recommendations with evidence, <code>sha256</code>/size, thinking markers,
+    and session defaults. This module reads it so apps stop hardcoding file
+    names and channel markers per model.
+  </p>
+  <p>
+    The reader follows the
+    <a href="https://github.com/john-rocky/hf-to-litertlm/blob/main/manifest/SCHEMA.md">manifest
+    schema</a> and is vendored from the reference TypeScript reader
+    (<code>john-rocky/hf-to-litertlm</code> <code>readers/ts</code>, v0.2.0)
+    with <code>resolve</code> renamed to <code>resolveVariant</code>, plus an
+    optional <code>signal</code> and a status-carrying error on
+    <code>fetchManifest</code>. Apart from <code>fetchManifest</code>, it is
+    dependency-free and IO-free.
+  </p>
+
+  <h3 id="never-throws">It never throws</h3>
+  <p>
+    <code>resolveFromManifest()</code> never throws. It returns
+    <code>null</code> whenever the manifest can't help:
+  </p>
+  <ul>
+    <li>the repo ships no manifest (HTTP 404, the common case on the Hub today);</li>
+    <li>the manifest's schema is newer than this reader supports;</li>
+    <li>the fetch fails or is aborted (<code>options.signal</code>);</li>
+    <li>no variant lists an explicitly requested backend.</li>
+  </ul>
+  <p>
+    In every one of those cases, fall back to your normal loading path — no
+    <code>try</code>/<code>catch</code> at the call site.
+  </p>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      The expected outcomes are silent: no manifest, an abort the caller asked
+      for, an unlisted backend. Anything else — an unsupported schema, a body
+      that is not a manifest, a network failure, a non-404 HTTP status — is
+      reported with one <code>console.warn</code> line naming the reason. On
+      React Native, LogBox shows <code>console.warn</code> in dev, which is
+      too loud for the common path.
+    </p>
+  </div>
+
+  <h3 id="manifest-shape">What a manifest looks like</h3>
+  <p>
+    Trimmed from a real repo's manifest — one cpu-only int4 file and one
+    cpu+gpu re-export, each with its own platform recommendations:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>litertlm_manifest.json</span></div>
+    <pre><code data-plain>{
+  "manifest_schema": "0.1.0",
+  "repo": "litert-community/LFM2.5-1.2B-Instruct",
+  "generated": "2026-08-24",
+  "model": {
+    "display_name": "LFM2.5-1.2B-Instruct",
+    "context_length": 4096,
+    "capabilities": {
+      "thinking": { "declared": true, "channel": { "start": "&lt;think&gt;", "end": "&lt;/think&gt;" } }
+    },
+    "session_defaults": {
+      "max_output_tokens_min": 2048,
+      "temperature": 0.3,
+      "top_k": 40,
+      "notes": "Reasoning model: keep maxOutputTokens ≥ 2048 so it can finish thinking."
+    }
+  },
+  "variants": [
+    {
+      "file": "LFM2.5-1.2B-Instruct_int4.litertlm",
+      "size_bytes": 736015744,
+      "quantization": "int4",
+      "backends": ["cpu"],
+      "default_backend": "cpu",
+      "recommended": [
+        { "platform": "android", "device_class": "midrange", "backend": "cpu", "reason": "int4 decodes faster" },
+        { "platform": "ios", "backend": "cpu", "reason": "verified path" }
+      ]
+    },
+    {
+      "file": "LFM2.5-1.2B-Instruct_int4_gpu.litertlm",
+      "size_bytes": 736220768,
+      "quantization": "int4 gpu re-export",
+      "backends": ["cpu", "gpu"],
+      "default_backend": "gpu",
+      "recommended": [
+        { "platform": "android", "device_class": "midrange-2023+", "backend": "gpu", "reason": "3-6x prefill" }
+      ],
+      "known_issues": ["iPhone Metal fails on this family — use CPU on iOS"]
+    }
+  ]
+}</code></pre>
+  </div>
+
+  <h2 id="resolve-from-manifest">resolveFromManifest</h2>
+  <div class="sig">export function resolveFromManifest(
+  repo: string,
+  options: ResolveFromManifestOptions = {},
+): Promise&lt;ManifestResolution | null&gt;</div>
+  <p>
+    Fetch <code>&lt;repo&gt;</code>'s manifest from the Hugging Face Hub and
+    resolve the right variant for this device.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const resolution = await resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct");
+if (resolution) {
+  const llm = createLLM({ streamChannels: resolution.streamChannels });
+  await llm.loadModel(resolution.url, { ...resolution.config });
+}</code></pre>
+  </div>
+  <p>
+    <code>platform</code> defaults to this device's OS: the package export is a
+    thin wrapper that injects React Native's <code>Platform.OS</code> as the
+    default <code>platform</code>, so the core module never imports
+    react-native. Pass <code>platform</code> yourself to override it.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript — the package export</span></div>
+    <pre><code>export function resolveFromManifest(
+  repo: string,
+  options: ResolveFromManifestOptions = {},
+): Promise&lt;ManifestResolution | null&gt; {
+  return resolveFromManifestCore(repo, {
+    ...options,
+    platform: options.platform ?? manifestPlatformFor(Platform.OS),
+  });
+}</code></pre>
+  </div>
+
+  <h2 id="example">Example: load the resolved variant</h2>
+  <p>
+    A resolution carries everything <code>createLLM</code> and
+    <code>loadModel</code> need. Spread <code>config</code> under your own
+    overrides so your values win, pass <code>streamChannels</code> straight
+    through, and log <code>notes</code> and <code>reason</code> — that is where
+    the manifest tells you why it picked this file and what to watch out for.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import {
+  createLLM,
+  resolveFromManifest,
+  GEMMA_4_E2B_IT,
+} from "react-native-litert-lm";
+
+// Don't let a startup resolve hang on a bad connection.
+const controller = new AbortController();
+const timer = setTimeout(() =&gt; controller.abort(), 5000);
+
+const resolution = await resolveFromManifest(
+  "litert-community/LFM2.5-1.2B-Instruct",
+  { signal: controller.signal },
+);
+clearTimeout(timer);
+
+if (resolution) {
+  // "LFM2.5-1.2B-Instruct_int4_gpu.litertlm" · "gpu"
+  // "recommended for android/midrange-2023+: 3-6x prefill"
+  console.log(resolution.file, resolution.backend, resolution.reason);
+  // "iPhone Metal fails on this family — use CPU on iOS", …
+  resolution.notes.forEach((note) =&gt; console.warn(note));
+
+  // streamChannels already merges the manifest's markers over the defaults,
+  // so tool-call parsing survives a manifest that declares only thinking.
+  const llm = createLLM({ streamChannels: resolution.streamChannels });
+  await llm.loadModel(resolution.url, {
+    ...resolution.config, // backend + session_defaults from the manifest
+    maxContextTokens: 4096, // your own overrides win
+  });
+} else {
+  // No manifest, or nothing it could resolve — your existing path.
+  const llm = createLLM();
+  await llm.loadModel(GEMMA_4_E2B_IT, { backend: "cpu" });
+}</code></pre>
+  </div>
+  <p>
+    <code>resolution.url</code> is a plain HTTPS URL, so it goes through
+    <a href="models.html#model-registry"><code>ModelRegistry</code></a> like
+    any other model — <code>isCached()</code>,
+    <code>resolveModel()</code> with a progress callback, and
+    <code>deleteFile()</code> all accept it.
+  </p>
+
+  <h2 id="functions">Functions</h2>
+
+  <h3 id="resolution-for">resolutionFor</h3>
+  <div class="sig">export function resolutionFor(
+  manifest: Manifest,
+  opts: ResolveFromManifestOptions = {},
+): ManifestResolution | null</div>
+  <p>
+    Synchronous core of <code>resolveFromManifest</code> for an already-fetched
+    manifest. Returns <code>null</code> when an explicitly requested backend is
+    listed by no variant — fall back to your current (non-manifest) path in
+    that case.
+  </p>
+
+  <h3 id="resolve-variant">resolveVariant</h3>
+  <div class="sig">export function resolveVariant(
+  manifest: Manifest,
+  opts: ResolveVariantOptions = {},
+): VariantResolution | null</div>
+  <p>
+    Pick the variant and backend for a device, without deriving an
+    <code>LLMConfig</code> or merging channels. Deterministic, and identical to
+    the reference readers — see
+    <a href="#variant-selection">how a variant is chosen</a>.
+  </p>
+
+  <h3 id="merge-stream-channels">mergeStreamChannels</h3>
+  <div class="sig">export function mergeStreamChannels(
+  manifest: Manifest,
+  defaults: StreamChannel[] = DEFAULT_CHANNELS,
+): StreamChannel[]</div>
+  <p>
+    Merge the manifest's declared channels <em>over</em> the package defaults,
+    by type. <code>createLLM({ streamChannels })</code> replaces the whole
+    array, so handing it only the manifest's thinking markers would silently
+    drop tool-call parsing; this merge keeps every default channel the manifest
+    doesn't redeclare.
+  </p>
+
+  <h3 id="parse-manifest">parseManifest</h3>
+  <div class="sig">export function parseManifest(input: string | object): Manifest</div>
+  <p>
+    Parse and validate a manifest body — a JSON string or an already-parsed
+    object. Throws when the input is not a manifest, when the schema is outside
+    <code>0.1.x</code>, or when a variant lists no backends. See
+    <a href="#schema-versions">schema versions</a> for the exact messages.
+  </p>
+
+  <h3 id="fetch-manifest">fetchManifest</h3>
+  <div class="sig">export async function fetchManifest(
+  repo: string,
+  revision = "main",
+  signal?: AbortSignal,
+): Promise&lt;Manifest&gt;</div>
+  <p>
+    Fetch <code>&lt;repo&gt;</code>'s manifest from the Hugging Face Hub.
+    <code>resolveVariant()</code> URLs follow the revision fetched here. Throws
+    on a non-2xx response (a <a href="#manifest-fetch-error"><code>ManifestFetchError</code></a>
+    carrying the status), an unsupported schema, or a failed/aborted fetch —
+    <code>resolveFromManifest</code> turns all of those into <code>null</code>;
+    call this directly when you want the error. <code>signal</code> aborts the
+    fetch.
+  </p>
+  <p>The URL it requests:</p>
+  <div class="code">
+    <div class="code-head"><span>url</span></div>
+    <pre><code data-plain>https://huggingface.co/&lt;repo&gt;/resolve/&lt;revision&gt;/litertlm_manifest.json</code></pre>
+  </div>
+
+  <h3 id="manifest-fetch-status">manifestFetchStatus</h3>
+  <div class="sig">export function manifestFetchStatus(e: unknown): number | undefined</div>
+  <p>
+    The HTTP status carried by a <code>ManifestFetchError</code>, or
+    <code>undefined</code> for any other error. Use it to tell a missing
+    manifest (404) from a gated repo (401/403) or a Hub outage (5xx) after a
+    direct <code>fetchManifest</code> call.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>try {
+  const manifest = await fetchManifest("litert-community/LFM2.5-1.2B-Instruct");
+  const resolution = resolutionFor(manifest, { platform: "ios" });
+} catch (e) {
+  if (manifestFetchStatus(e) === 404) {
+    // The repo ships no manifest — expected on most Hub repos today.
+  } else if (manifestFetchStatus(e) === 403) {
+    // Gated repo: the user needs to accept the model's terms.
+  }
+}</code></pre>
+  </div>
+
+  <h3 id="thinking-markers">thinkingMarkers</h3>
+  <div class="sig">export function thinkingMarkers(manifest: Manifest): ThinkingChannel | undefined</div>
+  <p>
+    The model's declared thinking markers (exact strings, whitespace included).
+    <code>undefined</code> when the manifest declares no thinking channel.
+  </p>
+  <div class="note">
+    <span class="note-label">Whitespace is significant</span>
+    <p>
+      Markers are used verbatim. A manifest declaring
+      <code>"&lt;think&gt;\n"</code> / <code>"\n&lt;/think&gt;"</code> resolves
+      to exactly those strings, and the stream parser matches them including
+      the newlines — that whitespace is part of the marker, not formatting.
+    </p>
+  </div>
+
+  <h3 id="declared-channels">declaredChannels</h3>
+  <div class="sig">export function declaredChannels(manifest: Manifest): DeclaredChannel[]</div>
+  <p>
+    The bundle's full declared channel set (manifest 0.1.1+); empty for 0.1.0
+    manifests.
+  </p>
+
+  <h2 id="types">Types</h2>
+
+  <h3 id="manifest-resolution">ManifestResolution</h3>
+  <p>Everything an app needs to load the chosen variant.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>url</code></td><td><code>string</code></td><td>Direct download URL of the chosen <code>.litertlm</code> — feed to <code>loadModel</code> / <code>ModelRegistry</code>.</td></tr>
+        <tr><td><code>file</code></td><td><code>string</code></td><td>File name of the chosen variant inside the repo.</td></tr>
+        <tr><td><code>backend</code></td><td><code>Backend</code></td><td>The backend chosen for that variant — always one the variant's <code>backends</code> list verifies.</td></tr>
+        <tr><td><code>config</code></td><td><code>LLMConfig</code></td><td><code>LLMConfig</code> fragment derived from the manifest: chosen backend plus mapped <code>session_defaults</code> (sampler hints; <code>max_output_tokens_min</code> applied as a floor). Spread it under your own overrides: <code>{ ...resolution.config, ...userConfig }</code>.</td></tr>
+        <tr><td><code>streamChannels</code></td><td><code>StreamChannel[]</code></td><td>Complete channel array for <code>createLLM({ streamChannels })</code> — the manifest's channels merged over <code>DEFAULT_CHANNELS</code>, so passing it can never silently drop tool-call parsing.</td></tr>
+        <tr><td><code>sha256?</code></td><td><code>string</code></td><td>Verify the download against this (from HF LFS metadata).</td></tr>
+        <tr><td><code>sizeBytes?</code></td><td><code>number</code></td><td>Expected file size, from the same LFS metadata.</td></tr>
+        <tr><td><code>contextLength?</code></td><td><code>number</code></td><td>The manifest's <code>model.context_length</code>. Deliberately <em>not</em> applied to <code>config.maxContextTokens</code> — see <a href="#not-derived">what is not derived</a>.</td></tr>
+        <tr><td><code>sessionDefaults?</code></td><td><code>Record&lt;string, unknown&gt;</code></td><td>The manifest's raw <code>session_defaults</code> — an open object (the schema declares <code>max_output_tokens_min</code>, <code>temperature</code>, <code>top_k</code>, <code>top_p</code>, <code>notes</code>). <code>config</code> maps the keys it knows; any key a later 0.1.x adds is reachable here without a re-fetch.</td></tr>
+        <tr><td><code>notes</code></td><td><code>string[]</code></td><td>Worth surfacing to the developer: the chosen variant's <code>platform_notes</code> and <code>known_issues</code>, then the model's <code>session_defaults.notes</code> (curated guidance) when the manifest carries one.</td></tr>
+        <tr><td><code>reason</code></td><td><code>string</code></td><td>Why this variant/backend was chosen (for logs).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="resolve-from-manifest-options">ResolveFromManifestOptions</h3>
+  <p>
+    Options for <code>resolveFromManifest</code>. Extends
+    <a href="#resolve-variant-options"><code>ResolveVariantOptions</code></a>,
+    so <code>platform</code>, <code>backend</code>, and <code>deviceClass</code>
+    apply here too.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>revision?</code></td><td><code>string</code></td><td>Hub revision to fetch and pin (default <code>"main"</code>); download URLs follow it.</td></tr>
+        <tr><td><code>signal?</code></td><td><code>AbortSignal</code></td><td>Aborts the manifest fetch — pass an <code>AbortController</code>'s signal so a startup-time resolve can't hang on a bad connection. An aborted fetch resolves to <code>null</code>, silently.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="resolve-variant-options">ResolveVariantOptions</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>platform?</code></td><td><code>ManifestPlatform</code></td><td>Platform matched against each variant's <code>recommended</code> rows. Through <code>resolveFromManifest</code> it defaults to this device's OS.</td></tr>
+        <tr><td><code>backend?</code></td><td><code>Backend</code></td><td>Explicit backend request. A filter, not a preference: only variants listing it are considered, and <code>resolveVariant()</code> returns <code>null</code> when none does — it never substitutes a backend the caller didn't ask for.</td></tr>
+        <tr><td><code>deviceClass?</code></td><td><code>string</code></td><td>Device class matched against <code>recommended[].device_class</code>. A class match ranks above a platform-only match; when nothing matches, the class actually used is named in <code>reason</code>.</td></tr>
+        <tr><td><code>revision?</code></td><td><code>string</code></td><td>Repo revision for the download URL; overrides the manifest's fetched revision (default <code>"main"</code>).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="variant-resolution">VariantResolution</h3>
+  <p>
+    What <code>resolveVariant()</code> returns — the raw pick, before an
+    <code>LLMConfig</code> is derived from it.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>file</code></td><td><code>string</code></td><td>File name inside the repo.</td></tr>
+        <tr><td><code>url</code></td><td><code>string</code></td><td>Direct download URL (<code>huggingface.co/&lt;repo&gt;/resolve/&lt;revision&gt;/&lt;file&gt;</code>).</td></tr>
+        <tr><td><code>backend</code></td><td><code>Backend</code></td><td>The chosen backend.</td></tr>
+        <tr><td><code>variant</code></td><td><code>ManifestVariant</code></td><td>The full manifest entry that won.</td></tr>
+        <tr><td><code>sessionDefaults?</code></td><td><code>Record&lt;string, unknown&gt;</code></td><td>The manifest's <code>model.session_defaults</code>, carried through unchanged.</td></tr>
+        <tr><td><code>capabilities?</code></td><td><code>ManifestCapabilities</code></td><td>The manifest's <code>model.capabilities</code>.</td></tr>
+        <tr><td><code>thinkingChannel?</code></td><td><code>ThinkingChannel</code></td><td>The declared thinking markers when <code>capabilities.thinking.declared</code> is true; otherwise <code>undefined</code>.</td></tr>
+        <tr><td><code>contextLength?</code></td><td><code>number</code></td><td>The manifest's <code>model.context_length</code>.</td></tr>
+        <tr><td><code>notes</code></td><td><code>string[]</code></td><td><code>platform_notes</code> + <code>known_issues</code> of the chosen variant — surface these to the developer.</td></tr>
+        <tr><td><code>reason</code></td><td><code>string</code></td><td>Why this variant/backend was chosen (for logs).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="manifest">Manifest</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>manifest_schema</code></td><td><code>string</code></td><td>Schema version of the file. The reader accepts <code>0.1.x</code> only.</td></tr>
+        <tr><td><code>repo</code></td><td><code>string</code></td><td>Hub repo id (<code>&lt;owner&gt;/&lt;name&gt;</code>); download URLs are built from it.</td></tr>
+        <tr><td><code>generated</code></td><td><code>string</code></td><td>When the converter wrote the manifest. Carried through; the reader does not use it.</td></tr>
+        <tr><td><code>revision?</code></td><td><code>string</code></td><td>Not part of the file: the revision the manifest was fetched at, stamped by <code>fetchManifest()</code> so <code>resolveVariant()</code> URLs follow a pinned fetch.</td></tr>
+        <tr><td><code>model</code></td><td><code>object</code></td><td>Model-level metadata — shape below.</td></tr>
+        <tr><td><code>variants</code></td><td><code>ManifestVariant[]</code></td><td>Every <code>.litertlm</code> file the repo publishes. <code>parseManifest()</code> requires at least one.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="sig">model: {
+  display_name: string;
+  base_model?: string;
+  architecture?: string;
+  parameters_b?: number;
+  license?: string;
+  context_length?: number;
+  capabilities?: ManifestCapabilities;
+  session_defaults?: Record&lt;string, unknown&gt;;
+};</div>
+
+  <h3 id="manifest-variant">ManifestVariant</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>file</code></td><td><code>string</code></td><td>File name inside the repo. A <code>/</code> in it is preserved: each path segment is encoded separately, so a repo that nests variants in subfolders keeps its structure.</td></tr>
+        <tr><td><code>sha256?</code></td><td><code>string</code></td><td>Checksum for verifying the download.</td></tr>
+        <tr><td><code>size_bytes?</code></td><td><code>number</code></td><td>File size. Also the tiebreaker: the smallest variant wins ties, and a variant without it sorts last.</td></tr>
+        <tr><td><code>quantization</code></td><td><code>string</code></td><td>Quantization label from the converter, e.g. <code>"int4"</code>.</td></tr>
+        <tr><td><code>backends</code></td><td><code>Backend[]</code></td><td>Backends this file is verified to GENERATE on — not merely load. The resolver never returns a backend absent from this list. <code>parseManifest()</code> requires at least one.</td></tr>
+        <tr><td><code>default_backend?</code></td><td><code>Backend</code></td><td>Used when no backend was requested and no recommendation matched — and only if it is itself listed in <code>backends</code>.</td></tr>
+        <tr><td><code>min_runtime_version?</code></td><td><code>string</code></td><td>Minimum LiteRT-LM runtime for this file. Carried through; the reader does not enforce it.</td></tr>
+        <tr><td><code>recommended?</code></td><td><code>ManifestRecommendation[]</code></td><td>Per-platform (and optionally per-device-class) picks with evidence. Drives the scoring.</td></tr>
+        <tr><td><code>requirements?</code></td><td><code>{ peak_ram_mb?: number; platform_notes?: string[] }</code></td><td><code>platform_notes</code> lands at the front of the resolution's <code>notes</code>. <code>peak_ram_mb</code> is carried through; the reader does not check it against the device.</td></tr>
+        <tr><td><code>known_issues?</code></td><td><code>string[]</code></td><td>Appended to <code>notes</code> after <code>platform_notes</code>.</td></tr>
+        <tr><td><code>sections?</code></td><td><code>{ type: string; size_bytes?: number; model_type?: string; backend_constraint?: string }[]</code></td><td>Per-section breakdown of the bundle as written by the converter. Carried through; the reader does not use it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="manifest-capabilities">ManifestCapabilities</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>vision?</code></td><td><code>boolean</code></td><td>Whether the bundle declares image input.</td></tr>
+        <tr><td><code>audio?</code></td><td><code>boolean</code></td><td>Whether the bundle declares audio input.</td></tr>
+        <tr><td><code>thinking?</code></td><td><code>{ declared: boolean; channel?: ThinkingChannel }</code></td><td>Thinking markers. Only read when <code>declared</code> is true.</td></tr>
+        <tr><td><code>channels?</code></td><td><code>DeclaredChannel[]</code></td><td>Full bundle-declared channel set (0.1.1+); <code>thinking</code> mirrors the first entry.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      <code>vision</code> and <code>audio</code> ride along on
+      <code>VariantResolution.capabilities</code> for your own UI gating. They
+      do not change the resolved <code>config</code> — nothing in this module
+      reads them.
+    </p>
+  </div>
+
+  <h3 id="manifest-recommendation">ManifestRecommendation</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>platform</code></td><td><code>ManifestPlatform</code></td><td>The platform this recommendation applies to.</td></tr>
+        <tr><td><code>device_class?</code></td><td><code>string</code></td><td>Optional narrower target, e.g. <code>"midrange-2023+"</code>. Matching it scores higher than a platform-only match.</td></tr>
+        <tr><td><code>backend</code></td><td><code>Backend</code></td><td>The backend to use. Ignored unless the variant's <code>backends</code> list contains it.</td></tr>
+        <tr><td><code>reason?</code></td><td><code>string</code></td><td>Evidence, e.g. <code>"3-6x prefill"</code>. Appended to the resolution's <code>reason</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="manifest-platform">ManifestPlatform</h3>
+  <div class="sig">export type ManifestPlatform = "android" | "ios" | "macos" | "windows" | "linux";</div>
+  <p>
+    Platform key used by manifest <code>recommended</code> rows (a superset of
+    React Native's OS values).
+  </p>
+
+  <h3 id="declared-channel">DeclaredChannel</h3>
+  <p>One entry of the bundle's declared channel set (manifest 0.1.1+).</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td><code>string</code></td><td>Channel name as declared by the bundle, e.g. <code>"thought"</code> or <code>"tool_call"</code>. It decides which event type the channel maps to — see <a href="#stream-channel-merge">stream channels</a>.</td></tr>
+        <tr><td><code>start</code></td><td><code>string</code></td><td>Opening marker, verbatim (whitespace included).</td></tr>
+        <tr><td><code>end</code></td><td><code>string</code></td><td>Closing marker, verbatim (whitespace included).</td></tr>
+        <tr><td><code>is_reasoning?</code></td><td><code>boolean</code></td><td>Marks the channel as reasoning content — maps it to <code>thinking</code> regardless of its name.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="thinking-channel">ThinkingChannel</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>start</code></td><td><code>string</code></td><td>Opening marker, verbatim (whitespace included).</td></tr>
+        <tr><td><code>end</code></td><td><code>string</code></td><td>Closing marker, verbatim (whitespace included).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="manifest-fetch-error">ManifestFetchError</h3>
+  <p>
+    Thrown by <code>fetchManifest</code> for a non-2xx response. Extends
+    <code>Error</code>; read the status with
+    <a href="#manifest-fetch-status"><code>manifestFetchStatus()</code></a>
+    rather than casting.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>status</code></td><td><code>number</code></td><td>The HTTP status. Tells a missing manifest (404) from a gated repo (401/403) or a Hub outage (5xx).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Message shapes:</p>
+  <div class="code">
+    <div class="code-head"><span>error messages</span></div>
+    <pre><code data-plain>no litertlm_manifest.json at &lt;url&gt; (HTTP 404)
+HTTP &lt;status&gt; fetching &lt;url&gt;</code></pre>
+  </div>
+
+  <h2 id="behavior">Behavior notes</h2>
+
+  <h3 id="schema-versions">Schema versions</h3>
+  <p>
+    <code>parseManifest()</code> accepts <code>manifest_schema</code> values
+    matching <code>0.1.x</code> and rejects everything else. 0.1.0 manifests
+    declare thinking markers only; 0.1.1 adds
+    <code>capabilities.channels</code>, the full declared channel set. The three
+    validation failures:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>error messages</span></div>
+    <pre><code data-plain>not a litertlm_manifest.json (missing manifest_schema or variants)
+unsupported manifest_schema &lt;version&gt; (reader supports 0.1.x)
+variant &lt;file&gt; lists no backends (schema requires minItems: 1)</code></pre>
+  </div>
+  <p>
+    Through <code>resolveFromManifest</code>, each of these becomes
+    <code>null</code> plus one <code>console.warn</code> line. A manifest whose
+    schema is newer than <code>0.1.x</code> is treated the same way — the
+    reader refuses to guess at a shape it does not know.
+  </p>
+
+  <h3 id="variant-selection">How a variant is chosen</h3>
+  <p>
+    The manifest v0.1 algorithm, deterministic and identical to the reference
+    readers:
+  </p>
+  <ol>
+    <li>
+      An explicit <code>backend</code> request is a filter, not a score: only
+      variants listing it compete, the result keeps that backend, and
+      <code>resolveVariant()</code> returns <code>null</code> when no variant
+      lists it — it never substitutes another backend.
+    </li>
+    <li>
+      A variant with a <code>recommended</code> entry matching the requested
+      platform wins; matching <code>device_class</code> too ranks higher. When
+      a backend was requested, only recommendations naming that backend count.
+    </li>
+    <li>
+      Otherwise the smallest variant (by <code>size_bytes</code>), on the
+      requested backend (else its <code>default_backend</code>, else the first
+      listed backend).
+    </li>
+  </ol>
+  <p>
+    Ties break toward the smaller file, and a variant without
+    <code>size_bytes</code> sorts last. The <code>reason</code> string on the
+    resolution records which branch fired:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Situation</th><th><code>reason</code></th></tr></thead>
+      <tbody>
+        <tr><td>Platform + device class matched</td><td><code>recommended for android/midrange-2023+: 3-6x prefill</code></td></tr>
+        <tr><td>Platform matched, requested class did not</td><td><code>recommended for android (no budget-2019 entry; using the midrange recommendation): int4 decodes faster</code></td></tr>
+        <tr><td>Backend requested, no recommendation matched</td><td><code>supports requested backend gpu</code></td></tr>
+        <tr><td>Nothing matched</td><td><code>fallback: smallest variant</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      An unmatched <code>deviceClass</code> never silently upgrades the pick:
+      the resolver falls back to a platform-level recommendation and says so in
+      <code>reason</code>, naming the class it actually used.
+    </p>
+  </div>
+
+  <h3 id="backend-selection">Backend preference and fallback</h3>
+  <p>
+    Passing <code>backend</code> filters the candidate set. If no variant in
+    the repo lists that backend — asking for <code>"npu"</code> in a CPU-only
+    repo, say — the resolution is <code>null</code>, silently, and you fall
+    back to your own loading path. Nothing is substituted.
+  </p>
+  <p>
+    Without a <code>backend</code> request, the backend comes from the winning
+    recommendation; failing that, from <code>default_backend</code> when the
+    variant's <code>backends</code> list contains it; failing that, from the
+    first listed backend. The resolver never returns a backend absent from the
+    variant's verified <code>backends</code> list.
+  </p>
+  <div class="warn">
+    <span class="note-label">Warning</span>
+    <p>
+      A recommendation is evidence about a family of devices, not a guarantee
+      about the one in your hand. Manifests carry the counter-cases in
+      <code>known_issues</code> — for example <code>iPhone Metal fails on this
+      family — use CPU on iOS</code> — and those strings arrive in
+      <code>resolution.notes</code>. Read them before shipping a GPU default.
+    </p>
+  </div>
+
+  <h3 id="platform-defaulting">Platform defaulting</h3>
+  <p>
+    The package export injects <code>Platform.OS</code> as the default
+    <code>platform</code>. <code>android</code>, <code>ios</code>,
+    <code>macos</code>, and <code>windows</code> are forwarded as-is, so
+    react-native-macos and react-native-windows keep their recommendations. An
+    OS no manifest names — <code>web</code>, <code>native</code> — forwards
+    nothing, which means no recommendation can match and the smallest variant
+    wins. <code>"linux"</code> is a valid <code>ManifestPlatform</code> but is
+    never injected; pass it explicitly if you need it.
+  </p>
+
+  <h3 id="config-mapping">What lands in config</h3>
+  <p>
+    <code>resolutionFor()</code> maps the <code>session_defaults</code> keys it
+    knows into an <code>LLMConfig</code> fragment:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>session_defaults key</th><th>LLMConfig field</th><th>Mapping</th></tr></thead>
+      <tbody>
+        <tr><td>—</td><td><code>backend</code></td><td>The resolved backend, always set.</td></tr>
+        <tr><td><code>max_output_tokens_min</code></td><td><code>maxOutputTokens</code></td><td>A floor, never a cap: <code>max(1024, max_output_tokens_min)</code>, where 1024 is the package default.</td></tr>
+        <tr><td><code>temperature</code></td><td><code>temperature</code></td><td>Copied when it is a number.</td></tr>
+        <tr><td><code>top_k</code></td><td><code>topK</code></td><td>Copied when it is a number.</td></tr>
+        <tr><td><code>top_p</code></td><td><code>topP</code></td><td>Copied when it is a number.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The floor exists for reasoning models that need room to think before
+    answering — 2048 output tokens, say. Caller overrides win via
+    <code>{ ...resolution.config, ...userConfig }</code>, so if you take a
+    value from the user, apply <code>max(userValue, floor)</code> yourself.
+  </p>
+
+  <h3 id="stream-channel-merge">How stream channels merge</h3>
+  <p>
+    <code>createLLM({ streamChannels })</code> replaces the whole channel
+    array. Handing it only the manifest's thinking markers would silently drop
+    tool-call parsing, so <code>mergeStreamChannels()</code> layers the
+    manifest's channels <em>over</em> the defaults, keyed by event type:
+  </p>
+  <ul>
+    <li>
+      Start from <code>DEFAULT_CHANNELS</code> —
+      <code>&lt;tool_call&gt;…&lt;/tool_call&gt;</code> for
+      <code>toolCall</code> and
+      <code>&lt;thinking&gt;…&lt;/thinking&gt;</code> for
+      <code>thinking</code>.
+    </li>
+    <li>
+      For each declared channel (0.1.1+), map it to an event type:
+      <code>is_reasoning</code>, or a name of <code>thought</code> or
+      <code>thinking</code>, maps to <code>thinking</code>; a name containing
+      <code>tool</code> maps to <code>toolCall</code>. Anything else is skipped
+      — this package has no event type for it yet.
+    </li>
+    <li>
+      A mapped channel replaces the default entry of that type; every type the
+      manifest doesn't redeclare keeps its default markers.
+    </li>
+    <li>
+      For a 0.1.0 manifest, which declares no channel set, the thinking markers
+      alone are applied — the default <code>toolCall</code> entry survives
+      untouched.
+    </li>
+  </ul>
+
+  <h3 id="aborting">Aborting the fetch</h3>
+  <p>
+    Pass <code>options.signal</code> so a resolve at startup can't hang on a
+    bad connection. The signal is forwarded to <code>fetch</code>, and an
+    aborted fetch resolves to <code>null</code> with no warning — the caller
+    asked for it, whether that was a timeout or an unmount.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>useEffect(() =&gt; {
+  const controller = new AbortController();
+  resolveFromManifest(repo, { signal: controller.signal }).then((r) =&gt; {
+    if (r) setResolution(r);
+  });
+  return () =&gt; controller.abort();
+}, [repo]);</code></pre>
+  </div>
+
+  <h3 id="revisions">Revisions</h3>
+  <p>
+    <code>revision</code> pins both the manifest fetch and the download URLs it
+    produces, so a resolved URL always points at the same tree the manifest was
+    read from. <code>fetchManifest()</code> stamps the fetched revision onto
+    the manifest object; <code>resolveVariant()</code> uses that, unless
+    <code>opts.revision</code> overrides it. With neither, URLs fall back to
+    <code>main</code>.
+  </p>
+
+  <h3 id="not-derived">What is not derived from the manifest</h3>
+  <p>
+    Two knobs are deliberately left alone:
+  </p>
+  <ul>
+    <li>
+      <strong><code>context_length</code> does not seed
+      <code>maxContextTokens</code>.</strong> They look like the same number
+      but are different knobs: the manifest value is what the model can
+      address, the package default is a memory ceiling, and quietly raising it
+      to 128K on a phone is the OOM the
+      <a href="memory.html">pre-flight check</a> exists to catch.
+      <code>contextLength</code> is on the resolution for apps that want more,
+      knowingly.
+    </li>
+    <li>
+      <strong><code>streamToolCalls</code> stays off</strong> even when the
+      manifest declares a tool channel. A declared channel says the model
+      <em>can</em> emit tool calls, not that this app wants to handle them, and
+      switching engine behavior on as a side effect of "resolve a URL" would
+      surprise a caller.
+    </li>
+  </ul>
+
+  <div class="pager">
+    <a href="models.html"><span>Previous</span>Models &amp; registry</a>
+    <a class="next" href="index.html"><span>Next</span>Overview</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>
