@@ -37,7 +37,9 @@ module.exports = tseslint.config(
   {
     ignores: [
       "lib/**",
-      "build/**",
+      // Every build/ dir in the tree is generated CMake/Gradle output; a
+      // top-level-only pattern let android/build/reports/**/*.js fail lint.
+      "**/build/**",
       "coverage/**",
       "node_modules/**",
       "nitrogen/**",
@@ -51,6 +53,7 @@ module.exports = tseslint.config(
       "react-native.config.js",
       "example/metro.config.js",
       "example/app.config.js",
+      "example/withGlogModulemapFix.js",
       "example/check-metro.js",
     ],
   },
