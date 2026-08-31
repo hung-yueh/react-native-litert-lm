@@ -292,7 +292,8 @@ if (resolution) {
   <p>
     Parse and validate a manifest body — a JSON string or an already-parsed
     object. Throws when the input is not a manifest, when the schema is outside
-    <code>0.1.x</code>, or when a variant lists no backends. See
+    <code>0.1.x</code>, when the manifest has no <code>repo</code>, or when a
+    variant lists no backends or no <code>file</code>. See
     <a href="#schema-versions">schema versions</a> for the exact messages.
   </p>
 
@@ -304,7 +305,9 @@ if (resolution) {
 ): Promise&lt;Manifest&gt;</div>
   <p>
     Fetch <code>&lt;repo&gt;</code>'s manifest from the Hugging Face Hub.
-    <code>resolveVariant()</code> URLs follow the revision fetched here. Throws
+    <code>resolveVariant()</code> URLs follow the repo and revision fetched
+    here — a fork whose copied manifest still names the origin repo downloads
+    from the fork, not the origin. Throws
     on a non-2xx response (a <a href="#manifest-fetch-error"><code>ManifestFetchError</code></a>
     carrying the status), an unsupported schema, or a failed/aborted fetch —
     <code>resolveFromManifest</code> turns all of those into <code>null</code>;
@@ -579,14 +582,16 @@ HTTP &lt;status&gt; fetching &lt;url&gt;</code></pre>
     <code>parseManifest()</code> accepts <code>manifest_schema</code> values
     matching <code>0.1.x</code> and rejects everything else. 0.1.0 manifests
     declare thinking markers only; 0.1.1 adds
-    <code>capabilities.channels</code>, the full declared channel set. The three
+    <code>capabilities.channels</code>, the full declared channel set. The
     validation failures:
   </p>
   <div class="code">
     <div class="code-head"><span>error messages</span></div>
     <pre><code data-plain>not a litertlm_manifest.json (missing manifest_schema or variants)
 unsupported manifest_schema &lt;version&gt; (reader supports 0.1.x)
-variant &lt;file&gt; lists no backends (schema requires minItems: 1)</code></pre>
+manifest has no repo (schema requires it) — download URLs need one
+variant &lt;file&gt; lists no backends (schema requires minItems: 1)
+variant with backends [&lt;backends&gt;] has no file (schema requires it)</code></pre>
   </div>
   <p>
     Through <code>resolveFromManifest</code>, each of these becomes
@@ -731,9 +736,10 @@ variant &lt;file&gt; lists no backends (schema requires minItems: 1)</code></pre
       manifest doesn't redeclare keeps its default markers.
     </li>
     <li>
-      For a 0.1.0 manifest, which declares no channel set, the thinking markers
-      alone are applied — the default <code>toolCall</code> entry survives
-      untouched.
+      Whenever the declared list doesn't cover <code>thinking</code> — a 0.1.0
+      manifest declaring no channel set at all, or a 0.1.1 manifest declaring
+      only a tool channel — the <code>capabilities.thinking</code> markers fill
+      in, and the default <code>toolCall</code> entry survives untouched.
     </li>
   </ul>
 
