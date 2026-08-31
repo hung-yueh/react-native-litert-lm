@@ -86,9 +86,10 @@
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "jest": "^30.4.2",
+    "nitrogen": "^0.37.1",
     "react": "^19.2.6",
     "react-native": "^0.85.3",
-    "react-native-nitro-modules": "^0.36.1",
+    "react-native-nitro-modules": "^0.37.1",
     "react-test-renderer": "^19.2.6",
     "release-it": "^19.2.4",
     "ts-jest": "^29.4.10",
@@ -100,7 +101,7 @@
     "expo": ">=55.0.0",
     "react": "*",
     "react-native": "*",
-    "react-native-nitro-modules": "^0.36.1"
+    "react-native-nitro-modules": "^0.37.1"
   },
   "peerDependenciesMeta": {
     "expo": {

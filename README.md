@@ -332,6 +332,32 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 
 > **iOS:** models over ~2 GB need the [Extended Virtual Addressing entitlement](#ios-entitlements) — that includes all three models above. For a sub-2 GB option, download Gemma 3 1B manually from [HuggingFace](https://huggingface.co/litert-community).
 
+## Manifest Resolution
+
+Instead of hardcoding a URL and config, point `resolveFromManifest()` at a HuggingFace repo. It reads that repo's `litertlm_manifest.json` and picks the `.litertlm` variant, backend, sampler defaults, and stream channels that fit **this** device:
+
+```typescript
+import { resolveFromManifest, createLLM, GEMMA_4_E2B_IT } from 'react-native-litert-lm';
+
+const resolution = await resolveFromManifest('litert-community/LFM2.5-1.2B-Instruct');
+const llm = createLLM(resolution ? { streamChannels: resolution.streamChannels } : undefined);
+
+if (resolution) {
+  // config carries the manifest's backend + sampler defaults; your overrides win.
+  await llm.loadModel(resolution.url, { ...resolution.config, temperature: 0.7 });
+  resolution.notes.forEach((n) => console.warn(n)); // platform_notes + known_issues
+} else {
+  await llm.loadModel(GEMMA_4_E2B_IT); // no manifest — your normal path
+}
+```
+
+`platform` defaults to the device OS. Two behaviours worth knowing:
+
+- **It never throws.** You get `null` when the repo ships no manifest, the schema is unsupported, the fetch fails, or you abort it via `options.signal` — so layer it *in front of* your existing loading path rather than replacing it. Only unexpected cases log a warning; a missing manifest and an abort are silent.
+- **`backend` is a filter, not a preference.** Request one and only variants listing it are considered; it returns `null` rather than quietly substituting a different backend.
+
+Lower-level pieces are exported too, so you can drive the steps yourself: `fetchManifest`, `parseManifest`, `resolveVariant`, `resolutionFor`, `mergeStreamChannels`, `declaredChannels`, `thinkingMarkers`, `manifestFetchStatus`. Full reference on the [docs site](https://litert.dev/manifest.html).
+
 ## API Reference
 
 **`createLLM(options?)`** → instance. Options: `enableMemoryTracking`, `maxMemorySnapshots` (default 256), `memoryBudget`, `streamChannels`.
@@ -361,12 +387,14 @@ Other `.litertlm` models (Gemma 3 1B, Phi-4 Mini, Qwen 2.5 1.5B) download manual
 
 **Utilities:** `checkBackendSupport(backend)`, `checkMultimodalSupport()`, `getRecommendedBackend()` — each returns a warning string (or `undefined`) so you can gate features before loading.
 
+**Manifest:** `resolveFromManifest(repo, options?)` → `Promise<ManifestResolution | null>`, plus `fetchManifest`, `parseManifest`, `resolveVariant`, `resolutionFor`, `mergeStreamChannels`, `declaredChannels`, `thinkingMarkers`, `manifestFetchStatus` — see [Manifest Resolution](#manifest-resolution).
+
 ## Requirements & Platform Support
 
 | | |
 | --- | --- |
 | React Native | 0.76+ |
-| react-native-nitro-modules | 0.36.0+ |
+| react-native-nitro-modules | 0.37.1+ |
 | LiteRT-LM engine | 0.15.0 |
 | Android | API 26+, arm64-v8a — CPU (all), GPU (where OpenCL is present), NPU |
 | iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |

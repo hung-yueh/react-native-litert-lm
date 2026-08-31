@@ -132,6 +132,43 @@ describe("parseManifest", () => {
       }),
     ).toThrow(/no backends/);
   });
+
+  it("rejects a manifest without a repo instead of building undefined URLs", () => {
+    const { repo: _repo, ...withoutRepo } = lfmLike();
+    expect(() => parseManifest(withoutRepo)).toThrow(/no repo/);
+  });
+
+  it("rejects a variant without a file instead of a later TypeError", () => {
+    expect(() =>
+      parseManifest({
+        manifest_schema: "0.1.0",
+        repo: "t/x",
+        generated: "2026-08-27",
+        model: { display_name: "X" },
+        variants: [{ quantization: "q", backends: ["cpu"] }],
+      }),
+    ).toThrow(/has no file/);
+  });
+});
+
+describe("resolveVariant on hand-built manifests", () => {
+  it("never fabricates a backend for a variant listing none", () => {
+    // Bypasses parseManifest deliberately: the type technically permits
+    // backends: [], and the resolver must skip such variants, not pick cpu.
+    const hand: Manifest = {
+      ...lfmLike(),
+      variants: [
+        { file: "broken.litertlm", quantization: "q", backends: [] },
+        { file: "ok.litertlm", quantization: "q", backends: ["gpu"] },
+      ],
+    };
+    const r = resolveVariant(hand);
+    expect(r?.file).toBe("ok.litertlm");
+    expect(r?.backend).toBe("gpu");
+
+    hand.variants = [{ file: "broken.litertlm", quantization: "q", backends: [] }];
+    expect(resolveVariant(hand)).toBeNull();
+  });
 });
 
 describe("mergeStreamChannels", () => {
@@ -156,6 +193,19 @@ describe("mergeStreamChannels", () => {
     expect(channels).toContainEqual({ type: "toolCall", start: "<function>", end: "</function>" });
     expect(channels).toContainEqual({ type: "thinking", start: "<think>", end: "</think>" });
     expect(declaredChannels(m)).toHaveLength(2);
+  });
+
+  it("keeps capabilities.thinking markers when channels declares only tool_call", () => {
+    // A 0.1.1 manifest may declare a partial channel list; the thinking
+    // markers in capabilities must still land or reasoning leaks into tokens.
+    const m = lfmLike();
+    m.model.capabilities = {
+      ...m.model.capabilities,
+      channels: [{ name: "tool_call", start: "<function>", end: "</function>" }],
+    };
+    const channels = mergeStreamChannels(m);
+    expect(channels).toContainEqual({ type: "toolCall", start: "<function>", end: "</function>" });
+    expect(channels).toContainEqual({ type: "thinking", start: "<think>", end: "</think>" });
   });
 
   it("returns the defaults untouched for a manifest declaring nothing", () => {
@@ -286,6 +336,17 @@ describe("resolveFromManifest / fetchManifest", () => {
     expect(r?.file).toBe("LFM2.5-1.2B-Instruct_int4_gpu.litertlm");
     expect(r?.url).toContain("/resolve/abc123/");
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("builds URLs from the repo it fetched from, not the manifest's own claim", async () => {
+    // A fork's copied manifest still names the origin repo; downloads must
+    // follow the fork the caller actually asked for.
+    const r = await resolveFromManifest("myorg/LFM2.5-fork");
+    expect(r?.url).toContain("https://huggingface.co/myorg/LFM2.5-fork/resolve/");
+    expect(r?.url).not.toContain("litert-community");
+
+    const m = await fetchManifest("myorg/LFM2.5-fork");
+    expect(m.repo).toBe("myorg/LFM2.5-fork");
   });
 
   it("fetchManifest itself still throws, carrying the URL and status", async () => {

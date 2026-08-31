@@ -79,6 +79,12 @@ export interface ManifestVariant {
 
 export interface Manifest {
   manifest_schema: string;
+  /**
+   * The repo the manifest describes. fetchManifest() overwrites it with the
+   * repo it actually fetched from (like `revision`), so resolveVariant() URLs
+   * follow the fetch source — a fork whose copied manifest still names the
+   * origin repo downloads from the fork, not the origin.
+   */
   repo: string;
   generated: string;
   /**
@@ -145,9 +151,17 @@ export function parseManifest(input: string | object): Manifest {
   if (!/^0\.1\./.test(m.manifest_schema)) {
     throw new Error(`unsupported manifest_schema ${m.manifest_schema} (reader supports 0.1.x)`);
   }
+  if (typeof m.repo !== "string" || m.repo === "") {
+    throw new Error("manifest has no repo (schema requires it) — download URLs need one");
+  }
   for (const v of m.variants) {
     if (!Array.isArray(v.backends) || v.backends.length === 0) {
       throw new Error(`variant ${v?.file ?? "?"} lists no backends (schema requires minItems: 1)`);
+    }
+    if (typeof v.file !== "string" || v.file === "") {
+      throw new Error(
+        `variant with backends [${v.backends.join(", ")}] has no file (schema requires it)`,
+      );
     }
   }
   return m;
@@ -169,7 +183,9 @@ export function manifestFetchStatus(e: unknown): number | undefined {
 
 /**
  * Fetch <repo>'s manifest from the Hugging Face Hub. resolveVariant() URLs
- * follow the revision fetched here. Throws on a non-2xx response (a
+ * follow the repo and revision fetched here — a fork whose copied manifest
+ * still names the origin repo downloads from the fork, not the origin.
+ * Throws on a non-2xx response (a
  * {@link ManifestFetchError} carrying the status), an unsupported schema, or
  * a failed/aborted fetch — {@link resolveFromManifest} turns all of those
  * into null; call this directly when you want the error. `signal` aborts
@@ -191,6 +207,9 @@ export async function fetchManifest(
   }
   const m = parseManifest(await res.text());
   m.revision = revision;
+  // The fetch source is authoritative: a fork's copied manifest may still
+  // name the origin repo, and URLs must point at the repo the caller named.
+  m.repo = repo;
   return m;
 }
 
@@ -223,9 +242,12 @@ export function resolveVariant(
   opts: ResolveVariantOptions = {},
 ): VariantResolution | null {
   const requested = opts.backend;
-  const candidates = requested
-    ? manifest.variants.filter((v) => v.backends.includes(requested))
-    : manifest.variants;
+  // A variant listing no backends is unloadable and never a candidate.
+  // parseManifest() rejects the shape outright; this guard covers hand-built
+  // manifests so the pick below can never fabricate a backend.
+  const candidates = manifest.variants.filter((v) =>
+    requested ? v.backends.includes(requested) : v.backends.length > 0,
+  );
   if (candidates.length === 0) {
     return null;
   }
@@ -260,10 +282,12 @@ export function resolveVariant(
       }
     }
     if (!backend) {
+      // backends is non-empty for every candidate (filter above), so the
+      // first entry always exists — no fallback that could invent a backend.
       backend =
         v.default_backend && v.backends.includes(v.default_backend)
           ? v.default_backend
-          : (v.backends[0] ?? "cpu");
+          : v.backends[0];
     }
     return { variant: v, backend, score, reason };
   });
@@ -340,14 +364,19 @@ export function mergeStreamChannels(
     merged.set(c.type, c);
   }
   const declared = declaredChannels(manifest);
+  let declaredThinking = false;
   for (const c of declared) {
     const type = streamTypeFor(c);
     if (type) {
       merged.set(type, { type, start: c.start, end: c.end });
+      declaredThinking ||= type === "thinking";
     }
   }
-  if (declared.length === 0) {
-    // 0.1.0 manifests declare thinking markers only.
+  if (!declaredThinking) {
+    // capabilities.thinking fills in whenever the channel list doesn't cover
+    // thinking: 0.1.0 manifests declare markers only there, and a 0.1.1
+    // manifest may declare a partial list (e.g. tool_call only) while still
+    // carrying thinking markers in capabilities.
     const t = thinkingMarkers(manifest);
     if (t) {
       merged.set("thinking", { type: "thinking", start: t.start, end: t.end });

@@ -46,7 +46,8 @@ module.exports = {
           }
         }
       ],
-      "react-native-litert-lm"
+      "react-native-litert-lm",
+      "./withGlogModulemapFix"
     ]
   }
 };
