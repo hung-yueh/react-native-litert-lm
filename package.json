@@ -1,6 +1,6 @@
 {
   "name": "react-native-litert-lm",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "litertLm": {
     "version": "0.15.0",
     "androidMavenVersion": "0.15.0",
