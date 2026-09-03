@@ -474,6 +474,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun resetConversation(historyJson: String?, systemPrompt: String?) {
+        // Signal the native inference thread to stop — cancelProcess() is safe
+        // to call from any thread and returns immediately.  Without this, an
+        // in-flight sendMessageAsync keeps generating until EOS/maxTokens even
+        // after the Conversation is closed, blocking the Promise.parallel worker.
+        try { conversation?.cancelProcess() }
+        catch (e: Exception) { Log.w(TAG, "resetConversation — cancelProcess error: ${e.message}") }
         synchronized(history) {
             history.clear()
             // Mirror the replayed transcript into the wrapper's own history so
@@ -658,6 +664,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private fun cleanupInternal() {
         synchronized(initLock) {
             try {
+                // Safety net: signal stop in case stopGeneration was not called before close
+                try { conversation?.cancelProcess() }
+                catch (_: Exception) { /* best-effort */ }
                 conversation?.close()
                 conversation = null
                 engine?.close()        // Direct call
