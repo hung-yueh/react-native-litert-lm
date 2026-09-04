@@ -11,6 +11,7 @@ import android.app.ActivityManager
 import android.content.Context
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
@@ -110,6 +111,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     
     @Volatile
     private var isClosed = false
+
+    /** Latch of the in-flight streaming worker, if any. Used to wait for cancellation to settle. */
+    @Volatile
+    private var activeStreamingLatch: CountDownLatch? = null
 
     private val modelStore = HybridModelStore()
     private var loadedModelPath: String? = null
@@ -474,6 +479,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun resetConversation(historyJson: String?, systemPrompt: String?) {
+        // Signal native inference to cancel and await the in-flight streaming
+        // worker to settle before closing the conversation underneath it.
+        cancelInFlightGeneration()
         synchronized(history) {
             history.clear()
             // Mirror the replayed transcript into the wrapper's own history so
@@ -655,9 +663,32 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         cleanupInternal()
     }
 
+    /**
+     * Signals the native inference thread to cancel and awaits the in-flight
+     * streaming worker to settle before closing or deleting the conversation.
+     * Prevents native race conditions where close() deletes native conversation
+     * state while the decode loop is still running on a background worker thread.
+     */
+    private fun cancelInFlightGeneration() {
+        try {
+            conversation?.cancelProcess()
+            val latch = activeStreamingLatch
+            if (latch != null) {
+                val settled = latch.await(2, TimeUnit.SECONDS)
+                if (!settled) {
+                    Log.w(TAG, "cancelInFlightGeneration: worker did not settle within timeout")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "cancelInFlightGeneration error: ${e.message}")
+        }
+    }
+
     private fun cleanupInternal() {
         synchronized(initLock) {
             try {
+                // Abort any in-flight generation and let worker settle before close
+                cancelInFlightGeneration()
                 conversation?.close()
                 conversation = null
                 engine?.close()        // Direct call
@@ -930,6 +961,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
+                    activeStreamingLatch = latch
                     val errorRef = AtomicReference<Throwable?>(null)
                     val fullResponseBuilder = StringBuilder()
 
@@ -946,26 +978,32 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
 
                     try {
-                        conversation!!.sendMessageAsync(
-                            message = userMsg,
-                            callback = listener,
-                            repetitionPenaltyConfig = repetitionPenaltyConfig,
-                            noRepeatNgramConfig = noRepeatNgramConfig,
-                            suppressTokensConfig = suppressTokensConfig,
-                            maxOutputToken = perCallMaxOutput,
-                            thinkingConfig = perCallThinking,
-                            responseFormat = responseFormat,
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "execute streaming failed", e)
-                        errorRef.set(e)
-                        onToken("Error: ${e.message}", true)
-                        latch.countDown()
-                    }
+                        try {
+                            conversation!!.sendMessageAsync(
+                                message = userMsg,
+                                callback = listener,
+                                repetitionPenaltyConfig = repetitionPenaltyConfig,
+                                noRepeatNgramConfig = noRepeatNgramConfig,
+                                suppressTokensConfig = suppressTokensConfig,
+                                maxOutputToken = perCallMaxOutput,
+                                thinkingConfig = perCallThinking,
+                                responseFormat = responseFormat,
+                            )
+                        } catch (e: Exception) {
+                            Log.e(TAG, "execute streaming failed", e)
+                            errorRef.set(e)
+                            onToken("Error: ${e.message}", true)
+                            latch.countDown()
+                        }
 
-                    latch.await()
-                    errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
-                    fullResponseBuilder.toString()
+                        latch.await()
+                        errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
+                        fullResponseBuilder.toString()
+                    } finally {
+                        if (activeStreamingLatch === latch) {
+                            activeStreamingLatch = null
+                        }
+                    }
 
                 } else {
                     // ── Blocking path ─────────────────────────────────────────────────
