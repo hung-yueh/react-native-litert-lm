@@ -1,8 +1,31 @@
 # react-native-litert-lm
 
-High-performance **on-device LLM inference** for React Native, powered by [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) and [Nitro Modules](https://github.com/mrousavy/nitro). Optimized for **Gemma 4** and other on-device models — with first-class **memory safety** so a 1–4 GB model can't silently OOM-kill your app.
+**Gemma 4 on iPhone and Android from React Native.** On-device inference with [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) and [Nitro Modules](https://github.com/mrousavy/nitro), with first-class **memory safety** so a 1–4 GB model can't silently OOM-kill your app.
 
-📖 **[Documentation →](https://litert.dev)** — guides and the full API reference.
+One install:
+
+```bash
+npm install react-native-litert-lm react-native-nitro-modules
+```
+
+Five lines to a Gemma 4 answer:
+
+```typescript
+import { createLLM, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+const llm = createLLM();
+await llm.loadModel(GEMMA_4_E2B_IT, { backend: "gpu" }); // downloads 2.58 GB once, then cached
+console.log(await llm.sendMessage("What is the capital of France?"));
+llm.unload(); // frees the engine; llm stays reusable
+```
+
+Check the JS layer on your Mac, no device or model needed:
+
+```bash
+git clone https://github.com/hung-yueh/react-native-litert-lm && cd react-native-litert-lm && npm install && npm test
+```
+
+📖 **[Documentation →](https://litert.dev)** — guides and the full API reference. Expo and bare setup: [Installation](#installation). iOS needs one [entitlement](#ios-entitlements) for models over ~2 GB.
 
 ## Highlights
 
