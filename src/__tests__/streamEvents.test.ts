@@ -6,7 +6,7 @@ import {
   createStreamEventParser,
   DEFAULT_CHANNELS,
   type StreamEvent,
-} from "../streamEvents";
+} from "../core/streamEvents";
 
 /** Run a whole stream through the parser and collect every event. */
 function collect(chunks: string[]): StreamEvent[] {

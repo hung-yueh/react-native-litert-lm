@@ -1,0 +1,7 @@
+{
+  "main": "../lib/core/index.js",
+  "types": "../lib/core/index.d.ts",
+  "react-native": "../src/core/index.ts",
+  "source": "../src/core/index.ts",
+  "sideEffects": false
+}

@@ -9,7 +9,7 @@ import {
   resolveMaxContextTokens,
   evaluateBudget,
   ESTIMATOR_CONSTANTS,
-} from "../memoryEstimator";
+} from "../core/memoryEstimator";
 
 const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;

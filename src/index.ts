@@ -5,7 +5,7 @@ import {
   resolveFromManifest as resolveFromManifestCore,
   type ManifestResolution,
   type ResolveFromManifestOptions,
-} from "./manifestResolver";
+} from "./core/manifestResolver";
 
 export type {
   LiteRTLM,
@@ -39,7 +39,7 @@ export {
   forecastMemory,
   evaluateBudget,
   ESTIMATOR_CONSTANTS,
-} from "./memoryEstimator";
+} from "./core/memoryEstimator";
 export type {
   MemoryEstimate,
   MemoryEstimateInputs,
@@ -48,20 +48,20 @@ export type {
   MemoryBudget,
   MemoryVerdict,
   BudgetLevel,
-} from "./memoryEstimator";
+} from "./core/memoryEstimator";
 
 // Typed errors — branch on `error.code` instead of parsing messages
-export { LiteRTLMError, MemoryError, isMemoryError } from "./errors";
-export type { LiteRTLMErrorCode } from "./errors";
+export { LiteRTLMError, MemoryError, isMemoryError } from "./core/errors";
+export type { LiteRTLMErrorCode } from "./core/errors";
 
 // Typed streaming events (tool calls / thinking channels, LiteRT-LM v0.14+)
-export { createStreamEventParser, DEFAULT_CHANNELS } from "./streamEvents";
+export { createStreamEventParser, DEFAULT_CHANNELS } from "./core/streamEvents";
 export type {
   StreamEvent,
   StreamEventType,
   StreamChannel,
   StreamEventParser,
-} from "./streamEvents";
+} from "./core/streamEvents";
 
 // Manifest-driven variant/backend/channel selection from a model repo's
 // litertlm_manifest.json (issue #23). Core is react-native-free; this wrapper
@@ -75,7 +75,7 @@ export {
   manifestFetchStatus,
   thinkingMarkers,
   declaredChannels,
-} from "./manifestResolver";
+} from "./core/manifestResolver";
 export type {
   Manifest,
   ManifestFetchError,
@@ -89,7 +89,7 @@ export type {
   VariantResolution,
   DeclaredChannel,
   ThinkingChannel,
-} from "./manifestResolver";
+} from "./core/manifestResolver";
 
 /**
  * Fetch `<repo>`'s litertlm_manifest.json from the Hugging Face Hub and pick

@@ -10,8 +10,8 @@ import {
   resolveVariant,
   thinkingMarkers,
   type Manifest,
-} from "../manifestResolver";
-import { createStreamEventParser, DEFAULT_CHANNELS } from "../streamEvents";
+} from "../core/manifestResolver";
+import { createStreamEventParser, DEFAULT_CHANNELS } from "../core/streamEvents";
 
 /**
  * Trimmed from the live litert-community/LFM2.5-1.2B-Instruct manifest: a

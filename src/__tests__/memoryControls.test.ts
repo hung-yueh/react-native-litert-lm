@@ -4,7 +4,7 @@
  * typed event streaming, and unload.
  */
 import { createLLM } from "../modelFactory";
-import { MemoryError, isMemoryError } from "../errors";
+import { MemoryError, isMemoryError } from "../core/errors";
 import {
   mockLiteRTLM,
   mockModelStore,

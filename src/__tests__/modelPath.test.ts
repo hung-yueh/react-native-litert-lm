@@ -1,4 +1,4 @@
-import { extractFileName, resolveModelFileName } from "../modelPath";
+import { extractFileName, resolveModelFileName } from "../core/modelPath";
 
 describe("modelPath", () => {
   it("strips query strings from URLs", () => {

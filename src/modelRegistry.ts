@@ -1,6 +1,6 @@
 import { NitroModules } from "react-native-nitro-modules";
 import type { ModelStore, ModelFile } from "./specs/LiteRTLM.nitro";
-import { resolveModelFileName } from "./modelPath";
+import { resolveModelFileName } from "./core/modelPath";
 
 export type { ModelFile } from "./specs/LiteRTLM.nitro";
 

@@ -20,6 +20,30 @@ module.exports = tseslint.config(
     },
   },
   {
+    // src/core is the react-native-free entry point (react-native-litert-lm/core):
+    // type-only imports are fine, runtime imports of RN or Nitro are not.
+    files: ["src/core/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "react-native", allowTypeImports: true },
+            { name: "react-native-nitro-modules", allowTypeImports: true },
+            { name: "react", allowTypeImports: true },
+          ],
+          patterns: [
+            {
+              group: ["../*", "!../specs/*"],
+              allowTypeImports: true,
+              message: "src/core may only import other core modules (or types from ../specs).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // React Native asset imports use require().
     files: ["example/App.tsx", "example/src/**/*.{ts,tsx}"],
     rules: {

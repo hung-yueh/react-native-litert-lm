@@ -23,14 +23,14 @@ import {
   type MemoryForecast,
   type MemoryBudget,
   type BudgetLevel,
-} from "./memoryEstimator";
-import { MemoryError } from "./errors";
+} from "./core/memoryEstimator";
+import { MemoryError } from "./core/errors";
 import {
   createStreamEventParser,
   DEFAULT_CHANNELS,
   type StreamEvent,
   type StreamChannel,
-} from "./streamEvents";
+} from "./core/streamEvents";
 
 /** Callback receiving typed streaming events from `executeWithEvents`. */
 export type StreamEventCallback = (event: StreamEvent) => void;

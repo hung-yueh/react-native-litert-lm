@@ -1,4 +1,4 @@
-import type { Backend, LLMConfig } from "./specs/LiteRTLM.nitro";
+import type { Backend, LLMConfig } from "../specs/LiteRTLM.nitro";
 
 /**
  * Pure memory estimation math for crash-free model loading.

@@ -21,7 +21,7 @@
  * https://github.com/hung-yueh/react-native-litert-lm/issues/23
  */
 
-import type { Backend, LLMConfig } from "./specs/LiteRTLM.nitro";
+import type { Backend, LLMConfig } from "../specs/LiteRTLM.nitro";
 import { DEFAULT_CHANNELS, type StreamChannel } from "./streamEvents";
 
 // ─── Vendored reference reader (types) ──────────────────────────────────────

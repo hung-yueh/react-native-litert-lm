@@ -3,9 +3,9 @@ import { LLMConfig, MemoryWarningLevel } from "./index";
 import { createLLM } from "./modelFactory";
 import type { LiteRTLMInstance } from "./modelFactory";
 import type { MemoryTracker, MemoryTrackerSummary } from "./memoryTracker";
-import type { MemoryEstimate, MemoryForecast } from "./memoryEstimator";
+import type { MemoryEstimate, MemoryForecast } from "./core/memoryEstimator";
 import { ModelRegistry } from "./modelRegistry";
-import { extractFileName } from "./modelPath";
+import { extractFileName } from "./core/modelPath";
 
 export interface UseModelConfig extends LLMConfig {
   autoLoad?: boolean;
