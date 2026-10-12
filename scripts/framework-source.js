@@ -36,6 +36,22 @@ const FRAMEWORKS_DIR = path.join(PACKAGE_ROOT, 'ios', 'Frameworks');
 /** Fully-resolved download URL for the framework zip. */
 const ASSET_URL = `https://github.com/${GITHUB_REPO}/releases/download/${FRAMEWORK_TAG}/${ASSET_NAME}`;
 
+/**
+ * Records which engine tag the extracted framework came from. Without it a
+ * checkout that bumps `litertLm.iosGitTag` keeps silently linking the old
+ * framework, because "frameworks already present" was the only skip check.
+ */
+const STAMP_FILE = path.join(FRAMEWORKS_DIR, '.engine-tag');
+
+/** The engine tag of the installed framework, or null if absent/unstamped. */
+function installedFrameworkTag() {
+  try {
+    return require('fs').readFileSync(STAMP_FILE, 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   GITHUB_REPO,
   ASSET_NAME,
@@ -43,4 +59,6 @@ module.exports = {
   PACKAGE_ROOT,
   FRAMEWORKS_DIR,
   ASSET_URL,
+  STAMP_FILE,
+  installedFrameworkTag,
 };

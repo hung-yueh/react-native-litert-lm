@@ -39,6 +39,7 @@ import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
 import com.google.ai.edge.litertlm.ResponseFormat
 import com.google.ai.edge.litertlm.SuppressTokensConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
+import com.google.ai.edge.litertlm.ActivationDataType as SdkActivationDataType
 import com.google.ai.edge.litertlm.tool
 import org.json.JSONException
 import org.json.JSONObject
@@ -149,6 +150,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var enableSpeculativeDecoding: Boolean = false
     private var loraPath: String? = null
     private var audioLoraPath: String? = null
+    private var activationDataType: ActivationDataType? = null
 
     /** Size of the loaded model file in bytes (0 when unloaded). */
     @Volatile
@@ -201,8 +203,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     sessionThinking = cfg.thinking
                     loraPath = cfg.loraPath
                     audioLoraPath = cfg.audioLoraPath
-                    // numThreads / prefillChunkSize / activationDataType / loraRank are
-                    // iOS-only: the Kotlin SDK does not expose them (see LLMConfig docs).
+                    // Exposed by the Kotlin SDK since LiteRT-LM 0.18.0.
+                    activationDataType = cfg.activationDataType
+                    // numThreads / prefillChunkSize / loraRank are iOS-only: the
+                    // Kotlin SDK does not expose them (see LLMConfig docs).
                     if (cfg.streamToolCalls == true) {
                         Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
                             "wired on Android yet. Completed tool calls ARE surfaced as typed " +
@@ -278,14 +282,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                     visionBackend = visionBackend,
                                     audioBackend = audioBackend,
                                     maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory
+                                    cacheDir = cacheDirectory,
+                                    activationDataType = activationDataType?.toSdk(),
                                 )
                             } else {
                                 EngineConfig(
                                     modelPath = modelPath,
                                     backend = mainBackend,
                                     maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory
+                                    cacheDir = cacheDirectory,
+                                    activationDataType = activationDataType?.toSdk(),
                                 )
                             }
                             Engine(cfg).also { it.initialize() }
@@ -941,20 +947,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         windowSize = options?.noRepeatNgramWindowSize?.toInt(),
                     )
                 } else null
-                // suppressTokens is unusable on Android with LiteRT-LM 0.15.0/0.16.0:
-                // the SDK's JNI layer looks up SuppressTokensConfig.getSuppressTokensArray(),
-                // but Kotlin name-mangles that `internal` method in the shipped AAR
-                // (getSuppressTokensArray$third_party_odml_…). The failed lookup raises
-                // a JNI fatal error that aborts the whole process — it cannot be caught,
-                // so the config must never be constructed. iOS drives the C API directly
-                // and is unaffected. Verified on-device (SM-S901U, Android 16).
-                // Upstream: https://github.com/google-ai-edge/LiteRT-LM/issues/3229
-                if (options?.suppressTokens != null) {
-                    Log.w(TAG, "suppressTokens is ignored on Android: LiteRT-LM " +
-                        "0.15.0's SuppressTokensConfig JNI binding is broken upstream " +
-                        "(mangled internal accessor) and would abort the process.")
+                // Safe since LiteRT-LM 0.17.0: the JNI layer takes the ids as int[]
+                // (google-ai-edge/LiteRT-LM#3229). Through 0.16.1 it looked up a
+                // Kotlin-mangled accessor and aborted the process.
+                val suppressTokensConfig = options?.suppressTokens?.let { ids ->
+                    SuppressTokensConfig(ids.map { it.toInt() })
                 }
-                val suppressTokensConfig: SuppressTokensConfig? = null
                 val perCallThinking = options?.thinking?.toSdkThinkingConfig()
                 val perCallMaxOutput = options?.maxOutputTokens?.toInt()
 
@@ -1056,6 +1054,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun countTokens(text: String): Double {
         return -1.0
     }
+}
+
+/** Map the Nitro ActivationDataType to the LiteRT-LM SDK enum (same ordinal values). */
+private fun ActivationDataType.toSdk(): SdkActivationDataType = when (this) {
+    ActivationDataType.F32 -> SdkActivationDataType.FLOAT32
+    ActivationDataType.F16 -> SdkActivationDataType.FLOAT16
+    ActivationDataType.I16 -> SdkActivationDataType.INT16
+    ActivationDataType.I8 -> SdkActivationDataType.INT8
 }
 
 /** Map the Nitro ThinkingOptions to the LiteRT-LM SDK config (engine defaults: enabled, unlimited budget). */

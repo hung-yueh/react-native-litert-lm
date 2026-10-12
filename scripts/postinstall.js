@@ -21,7 +21,13 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const { ASSET_URL, FRAMEWORKS_DIR, FRAMEWORK_TAG } = require('./framework-source');
+const {
+  ASSET_URL,
+  FRAMEWORKS_DIR,
+  FRAMEWORK_TAG,
+  STAMP_FILE,
+  installedFrameworkTag,
+} = require('./framework-source');
 
 /** ZIP local-file-header magic ("PK\x03\x04"). Guards against truncated downloads / HTML error pages. */
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
@@ -45,10 +51,18 @@ function shouldSkip() {
     return true;
   }
 
-  // Skip if frameworks already exist
+  // Skip only if the frameworks present match the pinned engine tag
   if (fs.existsSync(FRAMEWORKS_DIR) && fs.readdirSync(FRAMEWORKS_DIR).length > 0) {
-    log('iOS frameworks already present, skipping download.');
-    return true;
+    const installed = installedFrameworkTag();
+    if (installed === FRAMEWORK_TAG) {
+      log(`iOS frameworks (engine ${FRAMEWORK_TAG}) already present, skipping download.`);
+      return true;
+    }
+    log(
+      `iOS frameworks present are for engine ${installed ?? 'an unknown version'}, ` +
+        `but ${FRAMEWORK_TAG} is pinned — replacing them.`
+    );
+    fs.rmSync(FRAMEWORKS_DIR, { recursive: true, force: true });
   }
 
   return false;
@@ -121,6 +135,7 @@ async function main() {
     // Extract
     fs.mkdirSync(FRAMEWORKS_DIR, { recursive: true });
     execSync(`unzip -o -q "${tmpZip}" -d "${FRAMEWORKS_DIR}"`, { stdio: 'inherit' });
+    fs.writeFileSync(STAMP_FILE, `${FRAMEWORK_TAG}\n`);
 
     // Cleanup
     fs.unlinkSync(tmpZip);

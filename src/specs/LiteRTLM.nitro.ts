@@ -177,9 +177,9 @@ export interface LLMConfig {
 
   /**
    * Activation tensor data type. Lower precision reduces activation memory:
-   * 'f16' roughly halves activation memory vs 'f32'.
-   *
-   * @remarks **iOS only** — the Android Kotlin SDK does not expose this.
+   * 'f16' roughly halves activation memory vs 'f32'. A type the model or
+   * backend does not support fails the load (engine default when unset:
+   * typically 'f16' on GPU, 'f32' on CPU).
    */
   activationDataType?: ActivationDataType;
 
@@ -333,10 +333,8 @@ export interface ExecuteOptions {
    * Token IDs that must never be generated in this response —
    * their logits are forced to -inf.
    *
-   * @remarks **iOS only.** Ignored (with a warning) on Android: LiteRT-LM
-   * 0.15.0's `SuppressTokensConfig` JNI binding looks up a Kotlin-mangled
-   * `internal` accessor and aborts the process, so the library refuses to
-   * use it there until upstream fixes the mismatch.
+   * Supported on both platforms (Android since LiteRT-LM 0.17.0, which fixed
+   * the JNI binding that aborted the process through 0.16.1).
    */
   suppressTokens?: number[];
 

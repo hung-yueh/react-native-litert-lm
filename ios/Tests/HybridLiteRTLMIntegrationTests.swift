@@ -31,11 +31,17 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         return path
     }
 
+    /// Backend for the shared engine: `LITERTLM_TEST_BACKEND=gpu` (pass it as
+    /// `TEST_RUNNER_LITERTLM_TEST_BACKEND=gpu` to xcodebuild); default CPU.
+    static var testBackend: Backend {
+        ProcessInfo.processInfo.environment["LITERTLM_TEST_BACKEND"] == "gpu" ? .gpu : .cpu
+    }
+
     /// Greedy sampling + tiny output budget: deterministic and fast on CPU.
     static func makeConfig(tools: [ToolDefinition]? = nil) -> LLMConfig {
         LLMConfig(
             systemPrompt: nil,
-            backend: .cpu,
+            backend: testBackend,
             maxContextTokens: 2048,
             maxOutputTokens: 64,
             maxTokens: nil,
@@ -119,6 +125,35 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     // MARK: - Tests (alphabetical order = execution order)
+
+    /// Throughput baseline for engine bumps — reported, not gated. One warm-up
+    /// plus three measured runs of a fixed prompt under greedy sampling. TTFT
+    /// and decode tok/s come from the engine's own benchmark info (getStats()).
+    /// Sorts first, so the shared engine's load is timed here.
+    func test0_BenchmarkDecodeThroughput() async throws {
+        let loadStart = Date()
+        let bridge = try await ensureLoaded()
+        let loadSeconds = Date().timeIntervalSince(loadStart)
+
+        let prompt = "Write a detailed paragraph about the history of the bicycle."
+        var ttfts: [Double] = []
+        var rates: [Double] = []
+        for run in 0..<4 {
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+            _ = try await self.run(bridge, prompt,
+                                   options: Self.makeOptions(maxOutputTokens: 128)) { _, _ in }
+            let stats = try bridge.getStats()
+            print(String(format: "[bench] run %d: ttft=%.3fs decode=%.2f tok/s completion=%.0f tok",
+                         run, stats.timeToFirstToken, stats.tokensPerSecond, stats.completionTokens))
+            if run == 0 { continue } // warm-up
+            ttfts.append(stats.timeToFirstToken)
+            rates.append(stats.tokensPerSecond)
+        }
+        func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+        print(String(format: "[bench] SUMMARY backend=%@ load=%.1fs median_ttft=%.3fs median_decode=%.2f tok/s",
+                     bridge.backend.stringValue, loadSeconds, median(ttfts), median(rates)))
+        XCTAssertGreaterThan(median(rates), 0, "engine reported no decode throughput")
+    }
 
     /// v0.15 stream-chunk callback: tokens arrive incrementally and terminate.
     func test1_StreamingDeliversTokensAndCompletes() async throws {
@@ -227,9 +262,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         let bridge = try await ensureLoaded()
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
 
-        // Includes suppressTokens + thinking, which the C API supports directly
-        // (the Kotlin SDK's SuppressTokensConfig binding is broken upstream in
-        // 0.15.0, so Android ignores that one — see HybridLiteRTLM.kt).
+        // Includes suppressTokens + thinking (both platforms since LiteRT-LM 0.17.0).
         let response = try await run(
             bridge,
             "Describe the moon in one sentence.",

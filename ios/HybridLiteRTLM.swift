@@ -46,7 +46,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var isLoaded = false
     
     // Default configuration variables
-    private var backend: Backend = .cpu
+    /// Readable by tests: a failed GPU/NPU init falls back to CPU and updates this.
+    private(set) var backend: Backend = .cpu
     private var temperature: Double = 0.7
     private var topK: Int = 40
     private var topP: Double = 0.95

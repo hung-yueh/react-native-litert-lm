@@ -71,6 +71,11 @@ class HybridLiteRTLMInstrumentedTest {
         private var bridge: HybridLiteRTLM? = null
         private var bridgeHasTools = false
 
+        /** `am instrument -e backend gpu` selects the GPU backend; default CPU. */
+        fun testBackend(): Backend =
+            if (InstrumentationRegistry.getArguments().getString("backend") == "gpu") Backend.GPU
+            else Backend.CPU
+
         fun modelFile(): File? {
             val context = InstrumentationRegistry.getInstrumentation().targetContext
             val dir = context.getExternalFilesDir(null) ?: return null
@@ -130,7 +135,7 @@ class HybridLiteRTLMInstrumentedTest {
             model!!.absolutePath,
             LLMConfig(
                 /* systemPrompt */ null,
-                /* backend */ Backend.CPU,
+                /* backend */ testBackend(),
                 /* maxContextTokens */ 2048.0,
                 /* maxOutputTokens */ 64.0,
                 /* maxTokens */ null,
@@ -212,6 +217,55 @@ class HybridLiteRTLMInstrumentedTest {
     }
 
     // ── Engine without tools ────────────────────────────────────────────────
+
+    /**
+     * Throughput baseline for engine bumps — reported, not gated. One warm-up
+     * plus three measured runs of a fixed prompt under greedy sampling. The
+     * Kotlin SDK exposes no benchmark info, so rates are measured from the
+     * stream itself: TTFT = first chunk, decode = chunks/s after the first
+     * (one chunk per decoded token on this path). Sorts first, so the shared
+     * engine's load is timed here.
+     */
+    @Test
+    fun test0_benchmarkDecodeThroughput() {
+        val loadStart = System.nanoTime()
+        val llm = engine(withTools = false)
+        val loadSec = (System.nanoTime() - loadStart) / 1e9
+
+        val prompt = "Write a detailed paragraph about the history of the bicycle."
+        val ttftsMs = mutableListOf<Double>()
+        val rates = mutableListOf<Double>()
+        for (run in 0 until 4) {
+            llm.resetConversation(null, null)
+            var first = 0L
+            var last = 0L
+            var chunks = 0
+            val done = CountDownLatch(1)
+            val start = System.nanoTime()
+            llm.execute(arrayOf(textPart(prompt)), { token, isDone ->
+                if (token.isNotEmpty() && !isDone) {
+                    val now = System.nanoTime()
+                    if (first == 0L) first = now
+                    last = now
+                    chunks++
+                }
+                if (isDone) done.countDown()
+            }, options(maxOutputTokens = 128.0))
+            assertTrue("benchmark run $run timed out", done.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+            val ttftMs = (first - start) / 1e6
+            val rate = if (chunks > 1 && last > first) (chunks - 1) / ((last - first) / 1e9) else 0.0
+            println("[android-bench] run $run: ttft=${"%.0f".format(ttftMs)}ms decode=${"%.2f".format(rate)} tok/s chunks=$chunks")
+            if (run == 0) continue // warm-up
+            ttftsMs.add(ttftMs)
+            rates.add(rate)
+        }
+        fun median(xs: List<Double>) = xs.sorted()[xs.size / 2]
+        println(
+            "[android-bench] SUMMARY backend=${testBackend()} load=${"%.1f".format(loadSec)}s " +
+                "median_ttft=${"%.0f".format(median(ttftsMs))}ms median_decode=${"%.2f".format(median(rates))} tok/s"
+        )
+        assertTrue("no decode throughput measured", median(rates) > 0)
+    }
 
     @Test
     fun test1_streamingDeliversTokensAndCompletes() {
@@ -318,7 +372,11 @@ class HybridLiteRTLMInstrumentedTest {
         )
     }
 
-    /** Penalties / n-gram ban / token suppression must not break generation. */
+    /**
+     * Penalties / n-gram ban / token suppression must not break generation.
+     * suppressTokens is the regression guard for google-ai-edge/LiteRT-LM#3229:
+     * through 0.16.1 constructing SuppressTokensConfig aborted the process.
+     */
     @Test
     fun test7_generationControlsSmoke() {
         val llm = engine(withTools = false)

@@ -40,14 +40,50 @@ jobs:
         run: |
           PINNED_TAG="v${{ steps.compare.outputs.pinned }}"
           LATEST_TAG="${{ steps.compare.outputs.latest_tag }}"
-          curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$PINNED_TAG/c/engine.h" -o old.h || echo "" > old.h
-          curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$LATEST_TAG/c/engine.h" -o new.h
+          # Since v0.17 the public C API spans every non-internal header in c/
+          # (engine, conversation, model_info, embedding_engine, error_reporter,
+          # experimental, ...) — diffing engine.h alone misses most changes.
+          list_headers() {
+            curl -fsSL "https://api.github.com/repos/google-ai-edge/LiteRT-LM/contents/c?ref=$1" \
+              | node -e 'for (const f of JSON.parse(require("fs").readFileSync(0))) if (f.name.endsWith(".h") && !/_internal|_test/.test(f.name)) console.log(f.name)' \
+              || true
+          }
+          HEADERS=$( { list_headers "$PINNED_TAG"; list_headers "$LATEST_TAG"; } | sort -u )
+          mkdir -p old new
+          for h in $HEADERS; do
+            curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$PINNED_TAG/c/$h" -o "old/$h" || : > "old/$h"
+            curl -fsSL "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/$LATEST_TAG/c/$h" -o "new/$h" || : > "new/$h"
+          done
+          symbols() { cat "$1"/*.h | tr '\n' ' ' | grep -oE 'litert_lm_[a-z0-9_]+ *\(' | tr -d ' (' | sort -u; }
+          symbols old > old.syms
+          symbols new > new.syms
           {
-            echo '### C API diff (`c/engine.h`, '"$PINNED_TAG"' → '"$LATEST_TAG"')'
-            echo '```diff'
-            diff -u old.h new.h | head -400 || true
+            echo "### C API symbols ($PINNED_TAG → $LATEST_TAG)"
+            echo
+            echo 'Removed (breaking if `ios/*.swift` calls any):'
             echo '```'
-          } > header-diff.md
+            comm -23 old.syms new.syms || true
+            echo '```'
+            echo 'Added:'
+            echo '```'
+            comm -13 old.syms new.syms || true
+            echo '```'
+            for h in $HEADERS; do
+              cmp -s "old/$h" "new/$h" && continue
+              echo
+              echo "<details><summary><code>c/$h</code></summary>"
+              echo
+              echo '```diff'
+              diff -u "old/$h" "new/$h" | head -150 || true
+              echo '```'
+              echo '</details>'
+            done
+          } > header-diff-full.md
+          # GitHub caps issue bodies at 65,536 characters.
+          head -c 55000 header-diff-full.md > header-diff.md
+          if [ "$(wc -c < header-diff-full.md)" -gt 55000 ]; then
+            printf '\n\n_…truncated — diff the tags locally for the rest._\n' >> header-diff.md
+          fi
 
       - name: Open (or skip existing) upgrade issue
         if: steps.compare.outputs.outdated == 'true'
@@ -63,12 +99,12 @@ jobs:
           {
             echo "Upstream released **${{ steps.compare.outputs.latest_tag }}**; this package pins **v${{ steps.compare.outputs.pinned }}**."
             echo
-            echo "Checklist (see docs/LiteRT-LM v0.15.0 Upgrade.md for the pattern):"
-            echo "- [ ] Bump \`litertLm\` versions in package.json"
-            echo "- [ ] Re-vendor \`cpp/include\` headers"
-            echo "- [ ] Refresh \`ios/Frameworks\` via scripts/download-ios-frameworks.sh"
-            echo "- [ ] Review the header diff below for breaking C API changes"
-            echo "- [ ] Verify the Android Kotlin API (javap the new AAR)"
+            echo "Checklist (see docs/LiteRT-LM v0.18.0 Upgrade.md for the pattern):"
+            echo "- [ ] Bump \`litertLm\` versions in package.json (postinstall replaces \`ios/Frameworks\` when the pinned tag changes)"
+            echo "- [ ] Confirm every C symbol \`ios/*.swift\` calls is exported by both framework slices (\`nm -gU\`)"
+            echo "- [ ] Review the C API diff below for breaking changes"
+            echo "- [ ] Verify the Android Kotlin API (javap the new AAR) and its Kotlin metadata version against the app.plugin.js pin"
+            echo "- [ ] Run the on-device integration suites + benchmarks (ios/Tests, android/src/androidTest)"
             echo "- [ ] Run the on-device memory scenarios (scripts/device-memory-scenarios.md)"
             echo
             cat header-diff.md
