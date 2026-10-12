@@ -61,9 +61,7 @@ class HybridLiteRTLMTests: XCTestCase {
             _ = try await promise.await()
             XCTFail("Should have failed without model")
         } catch {
-            let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "LiteRTLM")
-            XCTAssertEqual(nsError.code, 400)
+            assertNativeError(error, phase: .execute, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED")
         }
     }
 
@@ -78,9 +76,7 @@ class HybridLiteRTLMTests: XCTestCase {
             _ = try await promise.await()
             XCTFail("Should have failed without model")
         } catch {
-            let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "LiteRTLM")
-            XCTAssertEqual(nsError.code, 400)
+            assertNativeError(error, phase: .execute, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED")
         }
     }
 
@@ -93,9 +89,7 @@ class HybridLiteRTLMTests: XCTestCase {
             _ = try await promise.await()
             XCTFail("Should have failed without model")
         } catch {
-            let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "LiteRTLM")
-            XCTAssertEqual(nsError.code, 400)
+            assertNativeError(error, phase: .execute, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED")
         }
     }
 
@@ -105,8 +99,7 @@ class HybridLiteRTLMTests: XCTestCase {
             _ = try await promise.await()
             XCTFail("Should have failed without model")
         } catch {
-            let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "LiteRTLM")
+            assertNativeError(error, phase: .execute, status: "NOT_FOUND", code: "INVALID_INPUT")
         }
     }
 
@@ -116,8 +109,7 @@ class HybridLiteRTLMTests: XCTestCase {
             _ = try await promise.await()
             XCTFail("Should have failed without model")
         } catch {
-            let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "LiteRTLM")
+            assertNativeError(error, phase: .execute, status: "NOT_FOUND", code: "INVALID_INPUT")
         }
     }
 
@@ -325,5 +317,77 @@ class HybridLiteRTLMTests: XCTestCase {
 
         _ = try bridge.unload()
         XCTAssertFalse(try bridge.isReady())
+    }
+
+    // MARK: - Typed native errors (src/core/nativeError.ts decodes these)
+
+    func testNativeErrorRendersTheTagProtocol() {
+        let plain = LiteRTLMNativeError(.load, status: "INVALID_ARGUMENT", "bad dtype")
+        XCTAssertEqual(plain.description, "[LiteRTLM:load:INVALID_ARGUMENT] bad dtype")
+        let explicit = LiteRTLMNativeError(.execute, status: "FAILED_PRECONDITION",
+                                           code: "MODEL_NOT_LOADED", "No model loaded.")
+        XCTAssertEqual(explicit.description,
+                       "[LiteRTLM:execute:FAILED_PRECONDITION:MODEL_NOT_LOADED] No model loaded.")
+        // Nitro bridges a Swift error to JS through String(describing:)
+        XCTAssertEqual(String(describing: explicit as Error), explicit.description)
+    }
+
+    func testNativeErrorClassifiesStatusPrefixedMessages() {
+        let oom = LiteRTLMNativeError.fromStatusMessage(.execute, "RESOURCE_EXHAUSTED: KV cache full")
+        XCTAssertEqual(oom.status, "RESOURCE_EXHAUSTED")
+        XCTAssertEqual(oom.message, "KV cache full")
+        let other = LiteRTLMNativeError.fromStatusMessage(.execute, "decoder hiccup")
+        XCTAssertEqual(other.status, "UNKNOWN")
+        XCTAssertEqual(other.message, "decoder hiccup")
+    }
+
+    func testNativeErrorFromEngineWithoutARecordedErrorFallsBack() {
+        LiteRTLMNativeError.clearEngineError()
+        let e = LiteRTLMNativeError.fromEngine(.load, context: "Nothing recorded")
+        XCTAssertEqual(e.status, "UNKNOWN")
+        XCTAssertEqual(e.message, "Nothing recorded")
+    }
+
+    func testLoadModelRejectsMissingFileAsModelNotFound() async throws {
+        do {
+            _ = try await bridge.loadModel(modelPath: "/nonexistent/model.litertlm", config: nil).await()
+            XCTFail("loading a missing file should fail")
+        } catch {
+            assertNativeError(error, phase: .load, status: "NOT_FOUND", code: "MODEL_NOT_FOUND")
+        }
+        XCTAssertFalse(try bridge.isReady())
+    }
+
+    func testLoadModelReportsTheEnginesReasonForAnInvalidBundle() async throws {
+        // A file that exists but is not a .litertlm bundle: every engine attempt
+        // fails, and the rejection must carry the engine's canonical status
+        // (read from its thread-local error state), not a generic message.
+        let junk = NSTemporaryDirectory() + "not_a_model.litertlm"
+        FileManager.default.createFile(atPath: junk, contents: Data(repeating: 0x42, count: 4096))
+        defer { try? FileManager.default.removeItem(atPath: junk) }
+        do {
+            _ = try await bridge.loadModel(modelPath: junk, config: nil).await()
+            XCTFail("loading a non-model file should fail")
+        } catch let e as LiteRTLMNativeError {
+            XCTAssertEqual(e.phase, .load)
+            XCTAssertNotEqual(e.status, "UNKNOWN", "engine status was not captured: \(e)")
+            XCTAssertTrue(e.message.contains("tried cpu"), "missing fallback context: \(e)")
+            print("[unit] invalid-bundle rejection: \(e)")
+        } catch {
+            XCTFail("expected LiteRTLMNativeError, got \(error)")
+        }
+    }
+
+    private func assertNativeError(
+        _ error: Error, phase: NativePhase, status: String, code: String?,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        guard let e = error as? LiteRTLMNativeError else {
+            XCTFail("expected LiteRTLMNativeError, got \(error)", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(e.phase, phase, file: file, line: line)
+        XCTAssertEqual(e.status, status, file: file, line: line)
+        XCTAssertEqual(e.code, code, file: file, line: line)
     }
 }

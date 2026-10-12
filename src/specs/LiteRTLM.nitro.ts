@@ -177,9 +177,10 @@ export interface LLMConfig {
 
   /**
    * Activation tensor data type. Lower precision reduces activation memory:
-   * 'f16' roughly halves activation memory vs 'f32'. A type the model or
-   * backend does not support fails the load (engine default when unset:
-   * typically 'f16' on GPU, 'f32' on CPU).
+   * 'f16' roughly halves activation memory vs 'f32'. Mainly a GPU setting —
+   * GPU backends default to 'f16'; on CPU the engine picks its own kernels
+   * and, for quantized bundles such as Gemma 4 E2B, generates identically
+   * whatever the value. A type the model and backend cannot run fails the load.
    */
   activationDataType?: ActivationDataType;
 

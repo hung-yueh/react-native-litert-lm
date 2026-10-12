@@ -1,6 +1,8 @@
 import { NitroModules } from "react-native-nitro-modules";
 import type { ModelStore, ModelFile } from "./specs/LiteRTLM.nitro";
 import { resolveModelFileName } from "./core/modelPath";
+import { LiteRTLMError } from "./core/errors";
+import { cleanNativeMessage } from "./core/nativeError";
 
 export type { ModelFile } from "./specs/LiteRTLM.nitro";
 
@@ -84,7 +86,8 @@ export const ModelRegistry = {
     const cleanPath = pathOrUrl.startsWith("file://") ? pathOrUrl.substring(7) : pathOrUrl;
     if (cleanPath.startsWith("http://") || cleanPath.startsWith("https://")) {
       if (cleanPath.startsWith("http://")) {
-        throw new Error(
+        throw new LiteRTLMError(
+          "INVALID_INPUT",
           "Insecure HTTP URLs are not allowed for model downloads. " +
             "Use HTTPS instead: " +
             cleanPath.replace("http://", "https://")
@@ -94,19 +97,26 @@ export const ModelRegistry = {
       const urlWithoutQuery = cleanPath.split("?")[0];
       const fileName = urlWithoutQuery.split("/").pop();
       if (!fileName) {
-        throw new Error(`Invalid model URL: ${cleanPath}`);
+        throw new LiteRTLMError("INVALID_INPUT", `Invalid model URL: ${cleanPath}`);
       }
 
       const headersJson = options?.headers ? JSON.stringify(options.headers) : "{}";
       
-      return nativeStore.downloadFile(
-        cleanPath,
-        fileName,
-        headersJson,
-        (progress) => {
-          options?.onProgress?.(progress);
-        }
-      );
+      try {
+        return await nativeStore.downloadFile(
+          cleanPath,
+          fileName,
+          headersJson,
+          (progress) => {
+            options?.onProgress?.(progress);
+          }
+        );
+      } catch (e) {
+        const message = cleanNativeMessage(e instanceof Error ? e.message : String(e));
+        throw new LiteRTLMError("DOWNLOAD_FAILED", `Failed to download ${cleanPath}: ${message}`, {
+          cause: e,
+        });
+      }
     }
 
     return cleanPath;

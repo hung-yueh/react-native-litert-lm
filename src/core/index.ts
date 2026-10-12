@@ -25,7 +25,9 @@ export type {
 } from "./memoryEstimator";
 
 export { LiteRTLMError, MemoryError, isMemoryError } from "./errors";
-export type { LiteRTLMErrorCode } from "./errors";
+export type { LiteRTLMErrorCode, LiteRTLMErrorOptions, MemoryErrorCode } from "./errors";
+export { toLiteRTLMError } from "./nativeError";
+export type { NativeStatus, NativeStatusName, NativePhase } from "./nativeError";
 
 export { createStreamEventParser, DEFAULT_CHANNELS } from "./streamEvents";
 export type {

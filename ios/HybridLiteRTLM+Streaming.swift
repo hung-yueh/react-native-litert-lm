@@ -76,8 +76,9 @@ extension HybridLiteRTLM {
                 let msg = String(cString: errorMsg)
                 ctx.onToken("Error: \(msg)", true)
                 ctx.cleanup()
-                ctx.promise.reject(withError: NSError(domain: "LiteRTLM", code: 500,
-                    userInfo: [NSLocalizedDescriptionKey: msg]))
+                // Stream errors arrive as text on the engine's thread — classify
+                // from the absl::Status prefix ("RESOURCE_EXHAUSTED: …") if any.
+                ctx.promise.reject(withError: LiteRTLMNativeError.fromStatusMessage(.execute, msg))
                 Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
                 return
             }
@@ -92,13 +93,14 @@ extension HybridLiteRTLM {
             }
         }
 
+        LiteRTLMNativeError.clearEngineError()
         let status = litert_lm_conversation_send_message_stream(
             conversation, msgJson, nil, optionalArgs, cb, ptr)
         if status != 0 {
+            let failure = LiteRTLMNativeError.fromEngine(.execute, context: "Failed to start streaming")
             Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
             fullCleanup()
-            promise.reject(withError: NSError(domain: "LiteRTLM", code: Int(status),
-                userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: execute streaming failed."]))
+            promise.reject(withError: failure)
         }
     }
 

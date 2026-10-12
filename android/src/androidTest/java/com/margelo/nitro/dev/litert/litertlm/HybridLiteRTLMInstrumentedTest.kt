@@ -90,16 +90,12 @@ class HybridLiteRTLMInstrumentedTest {
         }
     }
 
-    /** Load (or reuse) an engine; `withTools` registers a tool definition. */
-    private fun engine(withTools: Boolean): HybridLiteRTLM {
-        val model = modelFile()
-        assumeTrue(
-            "No .litertlm in the test app's external files dir — skipping on-device inference",
-            model != null,
-        )
-        // A React Native app bootstraps these at startup; a bare test APK must do
-        // it itself. fbjni's HybridData (used by Nitro's Promise) loads its own
-        // .so through NativeLoader, which throws until it is initialized.
+    /**
+     * A React Native app bootstraps these at startup; a bare test APK must do
+     * it itself. fbjni's HybridData (used by Nitro's Promise) loads its own
+     * .so through NativeLoader, which throws until it is initialized.
+     */
+    private fun ensureNativeInit() {
         if (!NativeLoader.isInitialized()) {
             NativeLoader.init(SystemDelegate())
         }
@@ -112,6 +108,16 @@ class HybridLiteRTLMInstrumentedTest {
             field.isAccessible = true
             field.set(null, InstrumentationRegistry.getInstrumentation().targetContext)
         }
+    }
+
+    /** Load (or reuse) an engine; `withTools` registers a tool definition. */
+    private fun engine(withTools: Boolean): HybridLiteRTLM {
+        val model = modelFile()
+        assumeTrue(
+            "No .litertlm in the test app's external files dir — skipping on-device inference",
+            model != null,
+        )
+        ensureNativeInit()
 
         bridge?.let { existing ->
             if (bridgeHasTools == withTools) return existing
@@ -439,6 +445,86 @@ class HybridLiteRTLMInstrumentedTest {
             "raw message JSON leaked into the token stream: $response",
             response.contains("\"tool_calls\""),
         )
+    }
+
+    // ── Typed failures from the real SDK (src/core/nativeError.ts decodes these) ──
+
+    /** Run a load that must fail; returns the typed exception it threw. */
+    private fun failedLoad(path: String, config: LLMConfig? = null): LiteRTLMNativeException {
+        ensureNativeInit()
+        val llm = HybridLiteRTLM()
+        try {
+            llm.loadModelBlocking(path, config)
+        } catch (e: LiteRTLMNativeException) {
+            println("[android-int][errors] ${e.message}")
+            assertFalse("a failed load must leave the instance unloaded", llm.isReady())
+            return e
+        } finally {
+            llm.close()
+        }
+        throw AssertionError("loading $path should have failed")
+    }
+
+    @Test
+    fun testE1_missingFileIsModelNotFound() {
+        val e = failedLoad("/data/local/tmp/does-not-exist.litertlm")
+        assertEquals("load", e.phase)
+        assertEquals("NOT_FOUND", e.status)
+        assertEquals("MODEL_NOT_FOUND", e.code)
+    }
+
+    /** The SDK's own status must reach JS, not a generic "failed to load". */
+    @Test
+    fun testE2_invalidBundleCarriesTheSdkStatus() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val junk = File(context.cacheDir, "not_a_model.litertlm").apply { writeBytes(ByteArray(4096) { 0x42 }) }
+        try {
+            val e = failedLoad(junk.absolutePath)
+            assertEquals("load", e.phase)
+            assertTrue("SDK status was not captured: ${e.message}", e.status != "UNKNOWN")
+            assertTrue("missing fallback context: ${e.message}", e.detail.contains("then the CPU fallbacks"))
+        } finally {
+            junk.delete()
+        }
+    }
+
+    /**
+     * activationDataType reaches the engine (EngineConfig, new on Android in
+     * LiteRT-LM 0.18.0): greedy output under INT8 activations must differ from
+     * FLOAT32. The CPU backend accepts INT8 for this quantized bundle rather
+     * than rejecting it, so a numerics difference is the observable signal.
+     * Skips — rather than fails — if the outputs coincide, since then the run
+     * proves nothing either way. Frees the suite's shared engine first.
+     */
+    @Test
+    fun testE3_activationDataTypeReachesTheEngine() {
+        val model = modelFile()
+        assumeTrue("No .litertlm — skipping", model != null)
+        bridge?.close()
+        bridge = null
+        fun greedy(adt: ActivationDataType): String {
+            ensureNativeInit()
+            val llm = HybridLiteRTLM()
+            try {
+                llm.loadModelBlocking(
+                    model!!.absolutePath,
+                    LLMConfig(
+                        null, Backend.CPU, 2048.0, 64.0, null, 0.0, 1.0, 1.0, false, null, null, null,
+                        ThinkingOptions(false, null), null, null, /* activationDataType */ adt,
+                        null, null, null, null, null, true,
+                    ),
+                )
+                return generate(llm, "Write one sentence about rivers.", options(maxOutputTokens = 32.0)).first
+            } finally {
+                llm.close()
+            }
+        }
+        val f32 = greedy(ActivationDataType.F32)
+        val i8 = greedy(ActivationDataType.I8)
+        println("[android-int][adt] f32: $f32")
+        println("[android-int][adt] i8:  $i8")
+        assertFalse("FLOAT32 generation was empty", f32.isBlank())
+        assumeTrue("identical output under F32 and I8 — cannot tell whether the type was applied", f32 != i8)
     }
 
     // ── Two LIVE conversations on one engine (upstream #2807) ────────────────

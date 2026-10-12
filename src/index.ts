@@ -52,7 +52,9 @@ export type {
 
 // Typed errors — branch on `error.code` instead of parsing messages
 export { LiteRTLMError, MemoryError, isMemoryError } from "./core/errors";
-export type { LiteRTLMErrorCode } from "./core/errors";
+export type { LiteRTLMErrorCode, LiteRTLMErrorOptions, MemoryErrorCode } from "./core/errors";
+export { toLiteRTLMError } from "./core/nativeError";
+export type { NativeStatus, NativeStatusName, NativePhase } from "./core/nativeError";
 
 // Typed streaming events (tool calls / thinking channels, LiteRT-LM v0.14+)
 export { createStreamEventParser, DEFAULT_CHANNELS } from "./core/streamEvents";

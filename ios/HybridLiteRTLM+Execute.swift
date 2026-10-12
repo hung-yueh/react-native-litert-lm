@@ -54,9 +54,9 @@ extension HybridLiteRTLM {
         // Structured output needs the constraint provider, which is initialized
         // at conversation creation — fail fast with an actionable error.
         if (options?.responseSchema != nil || options?.responseRegex != nil) && !enableStructuredOutput {
-            promise.reject(withError: NSError(domain: "LiteRTLM", code: 400,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "LiteRTLM: responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config."]))
+            promise.reject(withError: LiteRTLMNativeError(
+                .execute, status: "FAILED_PRECONDITION", code: "INVALID_CONFIG",
+                "responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config."))
             return promise
         }
 
@@ -99,8 +99,9 @@ extension HybridLiteRTLM {
 
             guard let conversation = self.conversation else {
                 cleanup()
-                promise.reject(withError: NSError(domain: "LiteRTLM", code: 400,
-                    userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: No model loaded. Call loadModel() first."]))
+                promise.reject(withError: LiteRTLMNativeError(
+                    .execute, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED",
+                    "No model loaded. Call loadModel() first."))
                 return
             }
 
@@ -133,10 +134,8 @@ extension HybridLiteRTLM {
 
     private func validateMediaPath(_ path: String, label: String) throws {
         if !FileManager.default.fileExists(atPath: path) {
-            throw NSError(
-                domain: "LiteRTLM", code: 404,
-                userInfo: [NSLocalizedDescriptionKey: "\(label) file not found: \(path)"]
-            )
+            throw LiteRTLMNativeError(.execute, status: "NOT_FOUND", code: "INVALID_INPUT",
+                                      "\(label) file not found: \(path)")
         }
     }
 
@@ -197,7 +196,7 @@ extension HybridLiteRTLM {
         let payload: [String: Any] = ["role": "user", "content": contents]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         guard let jsonString = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON payload"])
+            throw LiteRTLMNativeError(.execute, status: "INTERNAL", "Failed to encode the message payload")
         }
         return (jsonString, temps)
     }
@@ -337,10 +336,11 @@ extension HybridLiteRTLM {
         let startTime = Date()
         let optionalArgs = makeOptionalArgs(options)
         defer { if let optionalArgs = optionalArgs { litert_lm_conversation_optional_args_delete(optionalArgs) } }
+        LiteRTLMNativeError.clearEngineError()
         guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, optionalArgs) else {
+            let failure = LiteRTLMNativeError.fromEngine(.execute, context: "Inference failed")
             cleanup()
-            promise.reject(withError: NSError(domain: "LiteRTLM", code: 500,
-                userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: execute failed."]))
+            promise.reject(withError: failure)
             return
         }
         defer { litert_lm_json_response_delete(response) }

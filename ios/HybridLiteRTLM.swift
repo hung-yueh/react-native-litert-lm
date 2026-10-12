@@ -97,7 +97,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     public func resetConversation(historyJson: String?, systemPrompt: String?) throws {
-        queue.sync {
+        let failure: LiteRTLMNativeError? = queue.sync {
             history.removeAll()
             // Mirror the replayed transcript into the wrapper's own history so
             // getHistory() stays truthful for the restored conversation.
@@ -119,13 +119,13 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 totalTime: 0.0,
                 tokensPerSecond: 0.0
             )
-            if isLoaded && engine != nil {
-                createNewConversation(
-                    initialMessagesJson: historyJson,
-                    systemPromptOverride: systemPrompt
-                )
-            }
+            guard isLoaded && engine != nil else { return nil }
+            return createNewConversation(
+                initialMessagesJson: historyJson,
+                systemPromptOverride: systemPrompt
+            )
         }
+        if let failure = failure { throw failure }
     }
     
     public func getStats() throws -> GenerationStats {
@@ -254,6 +254,15 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         queue.async {
             // Teardown any previous contexts
             self.closeInternal()
+
+            // A missing file would otherwise burn through all four engine
+            // attempts below and surface as a generic creation failure.
+            guard FileManager.default.fileExists(atPath: modelPath) else {
+                promise.reject(withError: LiteRTLMNativeError(
+                    .load, status: "NOT_FOUND", code: "MODEL_NOT_FOUND",
+                    "Model file not found: \(modelPath)"))
+                return
+            }
             
             // Extract configurations
             if let config = config {
@@ -307,6 +316,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             let audioBackend = isMultimodal ? "cpu" : nil
             
             var rawEngine: OpaquePointer? = nil
+            /// The engine's own reason for the most recent failed attempt.
+            var lastEngineError: LiteRTLMNativeError?
             
             // Set LiteRT C Log Level to WARNING for clean production output.
             // v0.15: takes a typed LiteRtLmLogSeverity (previously a raw int,
@@ -315,6 +326,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             
             // Creation helper with scoped FFI pointer lifetime
             let createEngine = { (main: String, vision: String?, audio: String?) -> OpaquePointer? in
+                LiteRTLMNativeError.clearEngineError()
                 let settings = modelPath.withCString { modelC in
                     self.withOptionalCString(main) { mainC in
                         self.withOptionalCString(vision) { visionC in
@@ -325,7 +337,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     }
                 }
                 
-                guard let s = settings else { return nil }
+                guard let s = settings else {
+                    lastEngineError = LiteRTLMNativeError.fromEngine(
+                        .load, context: "Invalid engine settings (\(main))")
+                    return nil
+                }
                 defer { litert_lm_engine_settings_delete(s) }
                 
                 litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxContextTokens))
@@ -374,7 +390,15 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     litert_lm_engine_settings_set_cache_dir(s, cacheC)
                 }
                 
-                return litert_lm_engine_create(s)
+                // Read the engine's thread-local error right after the call,
+                // on this same queue thread (c/error_reporter.h).
+                LiteRTLMNativeError.clearEngineError()
+                let created = litert_lm_engine_create(s)
+                if created == nil {
+                    lastEngineError = LiteRTLMNativeError.fromEngine(
+                        .load, context: "Failed to create the engine (\(main))")
+                }
+                return created
             }
             
             // Attempt primary backend configuration
@@ -405,19 +429,25 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
             
             guard let engine = rawEngine else {
-                promise.reject(withError: NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to construct LiteRT-LM engine. Checked backends and fallback chains."]))
+                // Report the last attempt (the most permissive config): if even
+                // CPU text-only failed, its reason is the real one.
+                let reason = lastEngineError
+                    ?? LiteRTLMNativeError(.load, status: "UNKNOWN", "Failed to create the LiteRT-LM engine")
+                promise.reject(withError: LiteRTLMNativeError(
+                    .load, status: reason.status, code: reason.code,
+                    "\(reason.message) — tried \(mainBackendStr), then the CPU fallbacks"))
                 return
             }
             
             self.engine = engine
-            self.createNewConversation()
+            let conversationFailure = self.createNewConversation()
             self.loadedModelPath = modelPath
             self.loadedModelSizeBytes =
                 (try? FileManager.default.attributesOfItem(atPath: modelPath)[.size] as? Int).flatMap { $0 } ?? 0
             
-            guard self.conversation != nil else {
+            if let failure = conversationFailure {
                 self.closeInternal()
-                promise.reject(withError: NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to create conversation context."]))
+                promise.reject(withError: failure)
                 return
             }
             
@@ -507,21 +537,31 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     // MARK: - Internal Engine Helpers
     
+    /// Replace the active conversation. Returns the failure (nil on success);
+    /// must run on `queue` so the engine's thread-local error is readable.
+    @discardableResult
     private func createNewConversation(
         initialMessagesJson: String? = nil,
         systemPromptOverride: String? = nil
-    ) {
-        guard let engine = self.engine else { return }
+    ) -> LiteRTLMNativeError? {
+        guard let engine = self.engine else {
+            return LiteRTLMNativeError(.load, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED",
+                                       "No model loaded. Call loadModel() first.")
+        }
         
         if let oldConv = self.conversation {
             litert_lm_conversation_delete(oldConv)
             self.conversation = nil
         }
         
-        guard let convConfig = litert_lm_conversation_config_create() else { return }
+        guard let convConfig = litert_lm_conversation_config_create() else {
+            return LiteRTLMNativeError(.load, status: "INTERNAL", "Failed to allocate a conversation config")
+        }
         defer { litert_lm_conversation_config_delete(convConfig) }
         
-        guard let sessionConfig = litert_lm_session_config_create() else { return }
+        guard let sessionConfig = litert_lm_session_config_create() else {
+            return LiteRTLMNativeError(.load, status: "INTERNAL", "Failed to allocate a session config")
+        }
         defer { litert_lm_session_config_delete(sessionConfig) }
         
         litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
@@ -622,7 +662,12 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
         }
         
+        LiteRTLMNativeError.clearEngineError()
         self.conversation = litert_lm_conversation_create(engine, convConfig)
+        if self.conversation == nil {
+            return LiteRTLMNativeError.fromEngine(.load, context: "Failed to create the conversation")
+        }
+        return nil
     }
     
     private func closeInternal() {

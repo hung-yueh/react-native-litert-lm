@@ -167,213 +167,238 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // loadModel - Initialize LiteRT-LM Engine and Conversation
     // -------------------------------------------------------------------------
     override fun loadModel(modelPath: String, config: LLMConfig?): Promise<Unit> {
-        return Promise.parallel {
-            // Serialize initialization to prevent OOM from concurrent loads
-            synchronized(initLock) {
-                if (isClosed) {
-                    throw RuntimeException("Cannot load model: LiteRTLM instance is closed")
-                }
-                
-                Log.i(TAG, "loadModel: $modelPath")
-    
-                // Clean up existing resources
-                // We call internal cleanup that doesn't set isClosed
-                cleanupInternal()
-    
-                // Apply configuration
-                config?.let { cfg ->
-                    cfg.backend?.let { backend = it }
-                    cfg.temperature?.let { temperature = it }
-                    cfg.topK?.let { topK = it.toInt() }
-                    cfg.topP?.let { topP = it }
-                    // New split fields take priority over legacy maxTokens
-                    cfg.maxContextTokens?.let { maxContextTokens = it.toInt() }
-                    cfg.maxOutputTokens?.let { maxOutputTokens = it.toInt() }
-                    // Legacy: if only maxTokens is set, map to both for backward compat
-                    if (cfg.maxContextTokens == null && cfg.maxOutputTokens == null) {
-                        cfg.maxTokens?.let {
-                            maxContextTokens = it.toInt()
-                            maxOutputTokens = it.toInt()
-                        }
-                    }
-                    cfg.systemPrompt?.let { systemPrompt = it }
-                    tools = cfg.tools
-                    enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
-                    enableStructuredOutput = cfg.enableStructuredOutput ?: false
-                    sessionThinking = cfg.thinking
-                    loraPath = cfg.loraPath
-                    audioLoraPath = cfg.audioLoraPath
-                    // Exposed by the Kotlin SDK since LiteRT-LM 0.18.0.
-                    activationDataType = cfg.activationDataType
-                    // numThreads / prefillChunkSize / loraRank are iOS-only: the
-                    // Kotlin SDK does not expose them (see LLMConfig docs).
-                    if (cfg.streamToolCalls == true) {
-                        Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
-                            "wired on Android yet. Completed tool calls ARE surfaced as typed " +
-                            "toolCall events when generation finishes; only token-by-token " +
-                            "tool-call streaming is iOS-only for now.")
+        return Promise.parallel { loadModelBlocking(modelPath, config) }
+    }
+
+    /**
+     * The body of [loadModel], run on a Promise worker. Internal so on-device
+     * tests can observe the typed failure without Promise/JSI plumbing.
+     */
+    internal fun loadModelBlocking(modelPath: String, config: LLMConfig?) {
+        // Serialize initialization to prevent OOM from concurrent loads
+        synchronized(initLock) {
+            if (isClosed) {
+                throw LiteRTLMNativeException(
+                    "load", "FAILED_PRECONDITION", null,
+                    "This LiteRTLM instance is closed; create a new one with createLLM().",
+                )
+            }
+            
+            Log.i(TAG, "loadModel: $modelPath")
+
+            // Clean up existing resources
+            // We call internal cleanup that doesn't set isClosed
+            cleanupInternal()
+
+            // Apply configuration
+            config?.let { cfg ->
+                cfg.backend?.let { backend = it }
+                cfg.temperature?.let { temperature = it }
+                cfg.topK?.let { topK = it.toInt() }
+                cfg.topP?.let { topP = it }
+                // New split fields take priority over legacy maxTokens
+                cfg.maxContextTokens?.let { maxContextTokens = it.toInt() }
+                cfg.maxOutputTokens?.let { maxOutputTokens = it.toInt() }
+                // Legacy: if only maxTokens is set, map to both for backward compat
+                if (cfg.maxContextTokens == null && cfg.maxOutputTokens == null) {
+                    cfg.maxTokens?.let {
+                        maxContextTokens = it.toInt()
+                        maxOutputTokens = it.toInt()
                     }
                 }
-    
-                try {
-                    // Early GPU hardware check: probe for OpenCL library.
-                    // LiteRT-LM's GPU delegate requires OpenCL, which is absent on
-                    // most Samsung/Qualcomm devices. Log a warning — fallback will
-                    // handle it gracefully below.
-                    if (backend == Backend.GPU) {
-                        val hasOpenCL = openCLAvailable ?: run {
-                            val result = try {
-                                System.loadLibrary("OpenCL")
-                                true
-                            } catch (_: UnsatisfiedLinkError) {
-                                val paths = arrayOf(
-                                    "/vendor/lib64/libOpenCL.so",
-                                    "/system/vendor/lib64/libOpenCL.so",
-                                    "/vendor/lib/libOpenCL.so",
-                                    "/system/lib64/libOpenCL.so"
-                                )
-                                var loaded = false
-                                for (path in paths) {
-                                    try {
-                                        System.load(path)
-                                        loaded = true
-                                        break
-                                    } catch (_: UnsatisfiedLinkError) {}
-                                }
-                                loaded
+                cfg.systemPrompt?.let { systemPrompt = it }
+                tools = cfg.tools
+                enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                enableStructuredOutput = cfg.enableStructuredOutput ?: false
+                sessionThinking = cfg.thinking
+                loraPath = cfg.loraPath
+                audioLoraPath = cfg.audioLoraPath
+                // Exposed by the Kotlin SDK since LiteRT-LM 0.18.0.
+                activationDataType = cfg.activationDataType
+                // numThreads / prefillChunkSize / loraRank are iOS-only: the
+                // Kotlin SDK does not expose them (see LLMConfig docs).
+                if (cfg.streamToolCalls == true) {
+                    Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
+                        "wired on Android yet. Completed tool calls ARE surfaced as typed " +
+                        "toolCall events when generation finishes; only token-by-token " +
+                        "tool-call streaming is iOS-only for now.")
+                }
+            }
+
+            // A missing file would otherwise burn through every engine
+            // attempt below and surface as a generic creation failure.
+            if (!File(modelPath).exists()) {
+                throw LiteRTLMNativeException(
+                    "load", "NOT_FOUND", "MODEL_NOT_FOUND", "Model file not found: $modelPath",
+                )
+            }
+
+            try {
+                // Early GPU hardware check: probe for OpenCL library.
+                // LiteRT-LM's GPU delegate requires OpenCL, which is absent on
+                // most Samsung/Qualcomm devices. Log a warning — fallback will
+                // handle it gracefully below.
+                if (backend == Backend.GPU) {
+                    val hasOpenCL = openCLAvailable ?: run {
+                        val result = try {
+                            System.loadLibrary("OpenCL")
+                            true
+                        } catch (_: UnsatisfiedLinkError) {
+                            val paths = arrayOf(
+                                "/vendor/lib64/libOpenCL.so",
+                                "/system/vendor/lib64/libOpenCL.so",
+                                "/vendor/lib/libOpenCL.so",
+                                "/system/lib64/libOpenCL.so"
+                            )
+                            var loaded = false
+                            for (path in paths) {
+                                try {
+                                    System.load(path)
+                                    loaded = true
+                                    break
+                                } catch (_: UnsatisfiedLinkError) {}
                             }
-                            openCLAvailable = result
-                            result
+                            loaded
                         }
-                        if (!hasOpenCL) {
-                            Log.w(TAG, "OpenCL library not found — GPU backend will likely fail, fallback chain will attempt CPU")
+                        openCLAvailable = result
+                        result
+                    }
+                    if (!hasOpenCL) {
+                        Log.w(TAG, "OpenCL library not found — GPU backend will likely fail, fallback chain will attempt CPU")
+                    } else {
+                        Log.i(TAG, "OpenCL library found — GPU backend is available")
+                    }
+                }
+
+                // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
+                // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
+                // Passing vision/audio backends to a text-only model causes
+                // vision_litert_compiled_model_executor init failures.
+                val modelFileName = modelPath.substringAfterLast("/").lowercase()
+                val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
+
+                // Get cache directory from application context
+                val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
+                Log.i(TAG, "Using cache directory: $cacheDirectory")
+
+                if (enableSpeculativeDecoding) {
+                    @OptIn(ExperimentalApi::class)
+                    ExperimentalFlags.enableSpeculativeDecoding = true
+                }
+
+                // The SDK's own reason for the most recent failed attempt.
+                var lastEngineError: Throwable? = null
+
+                // Helper: attempt engine creation with given backends, return null on failure
+                fun tryCreateEngine(
+                    mainBackend: com.google.ai.edge.litertlm.Backend,
+                    visionBackend: com.google.ai.edge.litertlm.Backend?,
+                    audioBackend: com.google.ai.edge.litertlm.Backend?
+                ): Engine? {
+                    return try {
+                        val cfg = if (visionBackend != null && audioBackend != null) {
+                            EngineConfig(
+                                modelPath = modelPath,
+                                backend = mainBackend,
+                                visionBackend = visionBackend,
+                                audioBackend = audioBackend,
+                                maxNumTokens = maxContextTokens,
+                                cacheDir = cacheDirectory,
+                                activationDataType = activationDataType?.toSdk(),
+                            )
                         } else {
-                            Log.i(TAG, "OpenCL library found — GPU backend is available")
+                            EngineConfig(
+                                modelPath = modelPath,
+                                backend = mainBackend,
+                                maxNumTokens = maxContextTokens,
+                                cacheDir = cacheDirectory,
+                                activationDataType = activationDataType?.toSdk(),
+                            )
                         }
+                        Engine(cfg).also { it.initialize() }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
+                        lastEngineError = e
+                        null
                     }
+                }
 
-                    // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
-                    // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
-                    // Passing vision/audio backends to a text-only model causes
-                    // vision_litert_compiled_model_executor init failures.
-                    val modelFileName = modelPath.substringAfterLast("/").lowercase()
-                    val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
-    
-                    // Get cache directory from application context
-                    val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
-                    Log.i(TAG, "Using cache directory: $cacheDirectory")
-
-                    if (enableSpeculativeDecoding) {
-                        @OptIn(ExperimentalApi::class)
-                        ExperimentalFlags.enableSpeculativeDecoding = true
+                // Map our Backend enum to LiteRT-LM Backend sealed class
+                val lmBackend = when (backend) {
+                    Backend.GPU -> com.google.ai.edge.litertlm.Backend.GPU()
+                    Backend.NPU -> {
+                        Log.i(TAG, "NPU backend requested - requires hardware support")
+                        com.google.ai.edge.litertlm.Backend.NPU()
                     }
+                    else -> com.google.ai.edge.litertlm.Backend.CPU()
+                }
 
-                    // Helper: attempt engine creation with given backends, return null on failure
-                    fun tryCreateEngine(
-                        mainBackend: com.google.ai.edge.litertlm.Backend,
-                        visionBackend: com.google.ai.edge.litertlm.Backend?,
-                        audioBackend: com.google.ai.edge.litertlm.Backend?
-                    ): Engine? {
-                        return try {
-                            val cfg = if (visionBackend != null && audioBackend != null) {
-                                EngineConfig(
-                                    modelPath = modelPath,
-                                    backend = mainBackend,
-                                    visionBackend = visionBackend,
-                                    audioBackend = audioBackend,
-                                    maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory,
-                                    activationDataType = activationDataType?.toSdk(),
-                                )
-                            } else {
-                                EngineConfig(
-                                    modelPath = modelPath,
-                                    backend = mainBackend,
-                                    maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory,
-                                    activationDataType = activationDataType?.toSdk(),
-                                )
-                            }
-                            Engine(cfg).also { it.initialize() }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
-                            null
-                        }
-                    }
+                val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
+                val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
 
-                    // Map our Backend enum to LiteRT-LM Backend sealed class
-                    val lmBackend = when (backend) {
-                        Backend.GPU -> com.google.ai.edge.litertlm.Backend.GPU()
-                        Backend.NPU -> {
-                            Log.i(TAG, "NPU backend requested - requires hardware support")
-                            com.google.ai.edge.litertlm.Backend.NPU()
-                        }
-                        else -> com.google.ai.edge.litertlm.Backend.CPU()
-                    }
+                Log.i(TAG, "Backend config: main=$lmBackend, vision=$lmVisionBackend, audio=$lmAudioBackend, multimodal=$isMultimodal")
 
-                    val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
-                    val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-    
-                    Log.i(TAG, "Backend config: main=$lmBackend, vision=$lmVisionBackend, audio=$lmAudioBackend, multimodal=$isMultimodal")
-    
-                    if (isClosed) return@synchronized
+                if (isClosed) return@synchronized
 
-                    // Attempt primary backend
-                    var eng = tryCreateEngine(lmBackend, lmVisionBackend, lmAudioBackend)
+                // Attempt primary backend
+                var eng = tryCreateEngine(lmBackend, lmVisionBackend, lmAudioBackend)
 
-                    // Fallback sequence if GPU/NPU fails to initialize (mirrors iOS behavior)
-                    if (eng == null && backend != Backend.CPU) {
-                        val requestedName = if (backend == Backend.GPU) "GPU" else "NPU"
-                        Log.w(TAG, "$requestedName backend failed — trying fallback chain...")
+                // Fallback sequence if GPU/NPU fails to initialize (mirrors iOS behavior)
+                if (eng == null && backend != Backend.CPU) {
+                    val requestedName = if (backend == Backend.GPU) "GPU" else "NPU"
+                    Log.w(TAG, "$requestedName backend failed — trying fallback chain...")
 
-                        // Fallback 1: CPU main + GPU vision + CPU audio
+                    // Fallback 1: CPU main + GPU vision + CPU audio
+                    eng = tryCreateEngine(
+                        com.google.ai.edge.litertlm.Backend.CPU(),
+                        if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
+                        if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
+                    )
+
+                    // Fallback 2: Full CPU for all modalities
+                    if (eng == null) {
                         eng = tryCreateEngine(
                             com.google.ai.edge.litertlm.Backend.CPU(),
-                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
+                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
                             if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
                         )
-
-                        // Fallback 2: Full CPU for all modalities
-                        if (eng == null) {
-                            eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
-                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
-                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-                            )
-                        }
-
-                        // Fallback 3: Text-only CPU (no vision/audio executors)
-                        if (eng == null) {
-                            eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
-                                null,
-                                null
-                            )
-                        }
-
-                        if (eng != null) {
-                            Log.w(TAG, "$requestedName backend unavailable — fell back to CPU successfully")
-                            backend = Backend.CPU
-                        }
                     }
 
-                    engine = eng ?: throw RuntimeException(
-                        "Failed to create LiteRT-LM engine. Tried primary backend and all CPU fallbacks."
-                    )
-                    Log.i(TAG, "Engine created and initialized successfully")
-    
-                    // Create Conversation
-                    createNewConversation()
-                    Log.i(TAG, "Conversation created successfully")
-                    loadedModelPath = modelPath
-                    loadedModelSizeBytes = try { File(modelPath).length() } catch (_: Exception) { 0L }
-    
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load model: ${e.message}", e)
-                    // Clean up partial state so isReady() returns false
-                    cleanupInternal()
-                    throw RuntimeException("Failed to load model: ${e.message}", e)
+                    // Fallback 3: Text-only CPU (no vision/audio executors)
+                    if (eng == null) {
+                        eng = tryCreateEngine(
+                            com.google.ai.edge.litertlm.Backend.CPU(),
+                            null,
+                            null
+                        )
+                    }
+
+                    if (eng != null) {
+                        Log.w(TAG, "$requestedName backend unavailable — fell back to CPU successfully")
+                        backend = Backend.CPU
+                    }
                 }
+
+                // Report the last attempt (the most permissive config): if even
+                // CPU text-only failed, its reason is the real one.
+                engine = eng ?: throw LiteRTLMNativeException.from(
+                    "load",
+                    "Failed to create the engine — tried ${backend.name.lowercase()}, then the CPU fallbacks",
+                    lastEngineError ?: IllegalStateException("no engine was created"),
+                )
+                Log.i(TAG, "Engine created and initialized successfully")
+
+                // Create Conversation
+                createNewConversation()
+                Log.i(TAG, "Conversation created successfully")
+                loadedModelPath = modelPath
+                loadedModelSizeBytes = try { File(modelPath).length() } catch (_: Exception) { 0L }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load model: ${e.message}", e)
+                // Clean up partial state so isReady() returns false
+                cleanupInternal()
+                throw LiteRTLMNativeException.from("load", "Failed to load the model", e)
             }
         }
     }
@@ -396,7 +421,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
      */
     private fun resizeImageIfNeeded(imagePath: String, maxDimension: Int = 1024): String {
         val originalBitmap = android.graphics.BitmapFactory.decodeFile(imagePath)
-            ?: throw RuntimeException("Failed to decode image: $imagePath")
+            ?: throw LiteRTLMNativeException(
+                "execute", "INVALID_ARGUMENT", "INVALID_INPUT", "Failed to decode image: $imagePath",
+            )
 
         val width = originalBitmap.width
         val height = originalBitmap.height
@@ -709,7 +736,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
     private fun ensureLoaded() {
         if (engine == null) {
-            throw RuntimeException("LiteRTLM: No model loaded. Call loadModel() first.")
+            throw LiteRTLMNativeException(
+                "execute", "FAILED_PRECONDITION", "MODEL_NOT_LOADED",
+                "No model loaded. Call loadModel() first.",
+            )
+        }
+    }
+
+    /** Mirrors iOS validateMediaPath: a typed error instead of a decode failure later. */
+    private fun requireMediaFile(path: String, label: String) {
+        if (!File(path).exists()) {
+            throw LiteRTLMNativeException("execute", "NOT_FOUND", "INVALID_INPUT", "$label file not found: $path")
         }
     }
 
@@ -884,6 +921,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 else -> null
                             }
                             if (imagePath != null) {
+                                requireMediaFile(imagePath, "Image")
                                 val processedPath = resizeImageIfNeeded(imagePath)
                                 if (processedPath != imagePath) tempFiles.add(java.io.File(processedPath))
                                 contents.add(Content.ImageFile(processedPath))
@@ -905,6 +943,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 else -> null
                             }
                             if (audioPath != null) {
+                                requireMediaFile(audioPath, "Audio")
                                 contents.add(Content.AudioFile(audioPath))
                                 userTextRepresentation += "[Audio] "
                             }
@@ -922,8 +961,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 val responseFormat = options?.responseSchema?.let { ResponseFormat.json(it) }
                     ?: options?.responseRegex?.let { ResponseFormat.regex(it) }
                 if (responseFormat != null && !enableStructuredOutput) {
-                    throw IllegalArgumentException(
-                        "LiteRTLM: responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config."
+                    throw LiteRTLMNativeException(
+                        "execute", "FAILED_PRECONDITION", "INVALID_CONFIG",
+                        "responseSchema/responseRegex require enableStructuredOutput: true in the loadModel() config.",
                     )
                 }
 
@@ -995,7 +1035,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         }
 
                         latch.await()
-                        errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
+                        errorRef.get()?.let { throw LiteRTLMNativeException.from("execute", "Inference failed", it) }
                         fullResponseBuilder.toString()
                     } finally {
                         if (activeStreamingLatch === latch) {
@@ -1006,15 +1046,19 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 } else {
                     // ── Blocking path ─────────────────────────────────────────────────
                     val startTime = System.nanoTime()
-                    val responseMsg = conversation!!.sendMessage(
-                        message = userMsg,
-                        repetitionPenaltyConfig = repetitionPenaltyConfig,
-                        noRepeatNgramConfig = noRepeatNgramConfig,
-                        suppressTokensConfig = suppressTokensConfig,
-                        maxOutputToken = perCallMaxOutput,
-                        thinkingConfig = perCallThinking,
-                        responseFormat = responseFormat,
-                    )
+                    val responseMsg = try {
+                        conversation!!.sendMessage(
+                            message = userMsg,
+                            repetitionPenaltyConfig = repetitionPenaltyConfig,
+                            noRepeatNgramConfig = noRepeatNgramConfig,
+                            suppressTokensConfig = suppressTokensConfig,
+                            maxOutputToken = perCallMaxOutput,
+                            thinkingConfig = perCallThinking,
+                            responseFormat = responseFormat,
+                        )
+                    } catch (e: Exception) {
+                        throw LiteRTLMNativeException.from("execute", "Inference failed", e)
+                    }
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
 
                     val textResponse = responseMsg.contents.contents

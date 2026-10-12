@@ -24,7 +24,8 @@ import {
   type MemoryBudget,
   type BudgetLevel,
 } from "./core/memoryEstimator";
-import { MemoryError } from "./core/errors";
+import { LiteRTLMError, MemoryError } from "./core/errors";
+import { toLiteRTLMError, type NativePhase } from "./core/nativeError";
 import {
   createStreamEventParser,
   DEFAULT_CHANNELS,
@@ -198,6 +199,32 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     });
   };
 
+  /**
+   * Type a native rejection. Engine out-of-memory becomes a MemoryError that
+   * carries the pre-flight estimate for the same model and config, so
+   * `isMemoryError()` covers both "refused up front" and "ran out mid-way".
+   */
+  const toTypedError = (
+    e: unknown,
+    phase: NativePhase,
+    estimateFor?: { modelPath?: string; config?: LLMConfig },
+  ): LiteRTLMError => {
+    const error = toLiteRTLMError(e, phase);
+    if (error.code !== "OUT_OF_MEMORY") return error;
+    let estimate: MemoryEstimate | null = null;
+    try {
+      estimate = runEstimate(estimateFor?.modelPath, estimateFor?.config);
+    } catch {
+      // No estimate available (no file, no memory reading) — keep the plain error.
+    }
+    if (!estimate) return error;
+    return new MemoryError(error.message, estimate, {
+      code: "OUT_OF_MEMORY",
+      nativeStatus: error.nativeStatus,
+      cause: error.cause,
+    });
+  };
+
   const augmentedLoadModel = async (
     pathOrUrl: string,
     config?: LLMConfig,
@@ -227,7 +254,9 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
     }
 
-    const result = await native.loadModel(modelPath, config);
+    const result = await native.loadModel(modelPath, config).catch((e: unknown) => {
+      throw toTypedError(e, "load", { modelPath, config });
+    });
 
     loadedModelPath = modelPath;
     loadedModelFileSize = fileSize;
@@ -266,19 +295,22 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       return part;
     });
 
+    const rethrow = (e: unknown): never => {
+      throw toTypedError(e, "execute");
+    };
     if (onToken) {
       const wrapped: TokenCallback = (token, done) => {
         onToken(token, done);
         if (done) recordMemorySnapshot();
       };
-      return native.execute(processedParts, wrapped, options);
+      return native.execute(processedParts, wrapped, options).catch(rethrow);
     }
     return native
       .execute(processedParts, undefined, options)
       .then((result: string) => {
         recordMemorySnapshot();
         return result;
-      });
+      }, rethrow);
   };
 
   /** Typed-event streaming: raw token stream → token/toolCall/thinking events. */
@@ -457,7 +489,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
         return (historyJson?: string, systemPrompt?: string) => {
           // A manual reset clears the live context — ownership returns to the
           // default conversation.
-          const result = target.resetConversation(historyJson, systemPrompt);
+          let result: void;
+          try {
+            result = target.resetConversation(historyJson, systemPrompt);
+          } catch (e) {
+            throw toLiteRTLMError(e, "load");
+          }
           activeConversationId = null;
           savedTranscripts.delete(null);
           recordMemorySnapshot();
