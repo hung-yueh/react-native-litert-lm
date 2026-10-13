@@ -4,6 +4,7 @@
  * The capability facts come from the bundle itself, never from its file name.
  */
 import type { Backend, LLMConfig } from "../specs/LiteRTLM.nitro";
+import type { EmbedderConfig } from "../specs/Embedder.nitro";
 import type {
   Modality,
   ModelType,
@@ -89,6 +90,11 @@ export function normalizeModelInfo(path: string, native: NativeModelInfo): Model
   for (const modality of MODALITIES) {
     const m = byModality.get(modality);
     modalities[modality] = m?.supported ?? false;
+    // A real vision encoder always reports its compiled signatures; some
+    // bundles (the text-only EmbeddingGemma 2) claim vision without one.
+    if (modality === "vision" && native.visionSignatureSelection.length === 0) {
+      modalities.vision = false;
+    }
     backends[modality] = m ? [...m.backends] : [];
     if (m && (m.npuBrand !== "unknown" || m.socName)) {
       npu[modality] = { brand: m.npuBrand, socName: m.socName ?? null };
@@ -342,6 +348,54 @@ export function preflightLoad(
   }
   if (config?.multimodal === true && !info.modalities.vision && !info.modalities.audio) {
     notes.push("multimodal: true, but this bundle has no vision or audio encoder — loading text-only.");
+  }
+  return { config: resolved, changed, notes };
+}
+
+/** Result of {@link preflightEmbedder}. */
+export interface EmbedderPreflightResult {
+  /** The config to load with: backend chosen, input length fitted */
+  config: EmbedderConfig;
+  /** Whether `config` differs from the caller's */
+  changed: boolean;
+  /** Adjustments that were made, worth logging */
+  notes: string[];
+}
+
+/**
+ * {@link preflightLoad} for embedding bundles: refuses an LLM bundle
+ * (`MODEL_TYPE_MISMATCH`), one needing a newer runtime (`RUNTIME_TOO_OLD`),
+ * and — when no backend was given — one this device can't run
+ * (`UNSUPPORTED`); otherwise fills the backend from the bundle (so a per-SoC
+ * NPU build runs on its NPU) and caps `maxInputLength` at the longest input
+ * the encoder was compiled for.
+ */
+export function preflightEmbedder(
+  info: ModelInfo,
+  config: EmbedderConfig | undefined,
+  options: Omit<PreflightOptions, "expectType"> = {},
+): EmbedderPreflightResult {
+  assertLoadable(info, "embedding", options.runtimeVersion);
+
+  const notes: string[] = [];
+  const resolved: EmbedderConfig = { ...config };
+  let changed = false;
+  if (resolved.backend === undefined) {
+    const rec = compatibleRecommendation(info, options.device);
+    if (rec.backend !== "cpu") {
+      resolved.backend = rec.backend;
+      changed = true;
+      notes.push(`Using the ${rec.backend} backend: ${rec.reason}`);
+    }
+  }
+  const lengths = info.embedding?.inputLengthOptions ?? [];
+  const longest = lengths.length ? Math.max(...lengths) : 0;
+  if (resolved.maxInputLength !== undefined && longest > 0 && resolved.maxInputLength > longest) {
+    notes.push(
+      `maxInputLength ${resolved.maxInputLength} exceeds the encoder's longest input of ${longest}; using ${longest}.`,
+    );
+    resolved.maxInputLength = longest;
+    changed = true;
   }
   return { config: resolved, changed, notes };
 }

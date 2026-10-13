@@ -152,6 +152,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     public func getMemoryUsage() throws -> MemoryUsage {
+        Self.processMemoryUsage()
+    }
+
+    /// Process memory, shared with the embedder (one app, one memory budget).
+    static func processMemoryUsage() -> MemoryUsage {
         var residentBytes: Double = 0.0
         var nativeHeapBytes: Double = 0.0
         
@@ -344,9 +349,9 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             let createEngine = { (main: String, vision: String?, audio: String?) -> OpaquePointer? in
                 LiteRTLMNativeError.clearEngineError()
                 let settings = modelPath.withCString { modelC in
-                    self.withOptionalCString(main) { mainC in
-                        self.withOptionalCString(vision) { visionC in
-                            self.withOptionalCString(audio) { audioC in
+                    withOptionalCString(main) { mainC in
+                        withOptionalCString(vision) { visionC in
+                            withOptionalCString(audio) { audioC in
                                 return litert_lm_engine_settings_create(modelC, mainC, visionC, audioC)
                             }
                         }
@@ -371,16 +376,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk))
                 }
                 if let adt = self.activationDataType {
-                    // v0.15: takes a typed LiteRtLmActivationDataType (raw values
-                    // unchanged: 0=F32, 1=F16, 2=I16, 3=I8)
-                    let cType: LiteRtLmActivationDataType
-                    switch adt.rawValue {
-                    case 1: cType = kLiteRtLmActivationDataTypeFloat16
-                    case 2: cType = kLiteRtLmActivationDataTypeInt16
-                    case 3: cType = kLiteRtLmActivationDataTypeInt8
-                    default: cType = kLiteRtLmActivationDataTypeFloat32
-                    }
-                    litert_lm_engine_settings_set_activation_data_type(s, cType)
+                    litert_lm_engine_settings_set_activation_data_type(s, adt.cValue)
                 }
                 if let rank = self.loraRank {
                     litert_lm_engine_settings_set_lora_rank(s, Int32(rank))
@@ -800,12 +796,4 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return stripControlTokens(jsonResponse)
     }
     
-    private func withOptionalCString<R>(_ string: String?, _ block: (UnsafePointer<CChar>?) -> R) -> R {
-        if let string = string {
-            return string.withCString { block($0) }
-        } else {
-            return block(nil)
-        }
-    }
-
 }

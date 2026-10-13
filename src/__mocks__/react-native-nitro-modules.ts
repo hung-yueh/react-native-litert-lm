@@ -164,6 +164,35 @@ export const mockModelInspector = {
   })),
 };
 
+/** Deterministic fake vectors: [len, first char code, 1, 0, ...] as float32. */
+const fakeVector = (parts: MultimodalPart[], size = 8): ArrayBuffer => {
+  const text = parts.map((p) => p.text ?? p.type).join(" ");
+  const v = new Float32Array(size);
+  v[0] = text.length;
+  v[1] = text.charCodeAt(0) || 0;
+  v[2] = 1;
+  return v.buffer;
+};
+
+export const mockEmbedder = {
+  loadModel: jest.fn().mockResolvedValue(undefined),
+  embed: jest.fn(async (parts: MultimodalPart[], options?: { outputSize?: number }) =>
+    fakeVector(parts, options?.outputSize ?? 8),
+  ),
+  embedBatch: jest.fn(async (inputs: MultimodalPart[][], options?: { outputSize?: number }) =>
+    inputs.map((parts) => fakeVector(parts, options?.outputSize ?? 8)),
+  ),
+  isReady: jest.fn(() => true),
+  getMemoryUsage: jest.fn(() => ({
+    nativeHeapBytes: 1000000,
+    residentBytes: 2000000,
+    availableMemoryBytes: 4000000,
+    isLowMemory: false,
+  })),
+  unload: jest.fn().mockResolvedValue(undefined),
+  close: jest.fn(),
+};
+
 export const NitroModules = {
   createHybridObject: jest.fn((name: string) => {
     if (name === "LiteRTLM") {
@@ -174,6 +203,9 @@ export const NitroModules = {
     }
     if (name === "ModelInspector") {
       return mockModelInspector;
+    }
+    if (name === "Embedder") {
+      return mockEmbedder;
     }
     throw new Error(`Mock not implemented for hybrid object: ${name}`);
   }),

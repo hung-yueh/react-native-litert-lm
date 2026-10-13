@@ -79,7 +79,10 @@ class HybridLiteRTLMInstrumentedTest {
         fun modelFile(): File? {
             val context = InstrumentationRegistry.getInstrumentation().targetContext
             val dir = context.getExternalFilesDir(null) ?: return null
-            return dir.listFiles()?.firstOrNull { it.name.endsWith(".litertlm") }
+            // Embedding bundles sit alongside; they belong to HybridEmbedderInstrumentedTest.
+            return dir.listFiles()?.firstOrNull {
+                it.name.endsWith(".litertlm") && !it.name.startsWith("embeddinggemma")
+            }
         }
 
         /** example/test.jpeg / test.wav, pushed next to the model; null if absent. */

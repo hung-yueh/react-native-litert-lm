@@ -28,8 +28,7 @@ import {
 import {
   useModel,
   estimateMemory,
-  checkBackendSupport,
-  checkMultimodalSupport,
+  getDeviceInfo,
   GEMMA_3N_E2B_IT_INT4,
   GEMMA_4_E2B_IT,
   type MemoryEstimate,
@@ -43,6 +42,7 @@ import {
   type ChatMsg,
 } from "./src/components/ChatView";
 import { MemoryPanel } from "./src/components/MemoryPanel";
+import { SearchPanel } from "./src/components/SearchPanel";
 import { Pill, ProgressBar, SectionLabel } from "./src/components/ui";
 import { fmtBytes } from "./src/format";
 import { T, VERDICT_COLORS } from "./src/theme";
@@ -110,6 +110,7 @@ function Main() {
     useState(false);
   const [enableTools, setEnableTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState<ChatMsg | null>(null);
@@ -143,6 +144,8 @@ function Main() {
     isReady,
     downloadProgress,
     error,
+    errorCode,
+    modelInfo,
     load,
     deleteModel,
     memorySummary,
@@ -287,11 +290,22 @@ function Main() {
   // so the Load button comes back for a retry.
   const isLoading = downloadProgress === 1 && !isReady && !error;
   const canInteract = !isReady && !isDownloading && !isLoading;
-  const gpuWarning = useMemo(() => checkBackendSupport("gpu"), []);
+  // No GPU driver (e.g. no OpenCL on most Samsung/Qualcomm Android phones, or
+  // an emulator): GPU would only fall back to CPU, so don't offer it.
+  const gpuWarning = useMemo(() => {
+    try {
+      return getDeviceInfo().gpuAvailable ? undefined : "unavailable";
+    } catch {
+      return undefined;
+    }
+  }, []);
   const snapshots = model?.memoryTracker?.getSnapshots() ?? [];
   const errorIsMemory =
-    error?.includes("MEMORY_ESTIMATE_EXCEEDED") ||
-    error?.includes("Refusing to load");
+    errorCode === "MEMORY_ESTIMATE_EXCEEDED" || errorCode === "OUT_OF_MEMORY";
+  // Offer only the attachments the loaded bundle actually accepts.
+  const attachable = (["image", "audio"] as const).filter((kind) =>
+    kind === "image" ? modelInfo?.modalities.vision : modelInfo?.modalities.audio,
+  );
   const canSend = (!!input.trim() || !!attachment) && !busy && isReady;
 
   return (
@@ -318,13 +332,22 @@ function Main() {
             <Text style={s.nameChevron}>⌄</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            testID="new-chat-btn"
-            style={s.circleBtn}
-            onPress={() => setChat([])}
-          >
-            <Text style={s.circleIcon}>✎</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              testID="search-open-btn"
+              style={s.circleBtn}
+              onPress={() => setShowSearch(true)}
+            >
+              <Text style={s.circleIcon}>⌕</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="new-chat-btn"
+              style={s.circleBtn}
+              onPress={() => setChat([])}
+            >
+              <Text style={s.circleIcon}>✎</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* ── Conversation ─────────────────────────────────────────────────── */}
@@ -412,18 +435,12 @@ function Main() {
           >
             <TouchableOpacity
               testID="attach-btn"
-              style={s.circleBtn}
-              disabled={busy}
+              style={[s.circleBtn, attachable.length === 0 && { opacity: 0.4 }]}
+              disabled={busy || attachable.length === 0}
               onPress={() => {
-                const warning = checkMultimodalSupport();
-                if (warning) return;
-                setAttachment(
-                  attachment === null
-                    ? "image"
-                    : attachment === "image"
-                      ? "audio"
-                      : null,
-                );
+                // Cycle none → each supported kind → none.
+                const next = attachment === null ? 0 : attachable.indexOf(attachment) + 1;
+                setAttachment(attachable[next] ?? null);
               }}
             >
               <Text style={s.plusIcon}>＋</Text>
@@ -478,6 +495,33 @@ function Main() {
           </View>
         )}
       </KeyboardAvoidingView>
+
+      {/* ── Semantic search sheet (on-device embeddings) ─────────────────── */}
+      <Modal
+        visible={showSearch}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowSearch(false)}
+      >
+        <View style={s.sheetRoot}>
+          <View style={s.sheetHeader}>
+            <Text style={s.sheetTitle}>Search notes</Text>
+            <TouchableOpacity
+              testID="search-done"
+              style={s.circleBtn}
+              onPress={() => setShowSearch(false)}
+            >
+              <Text style={s.circleIcon}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView
+            contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 24 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            <SearchPanel />
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* ── Settings sheet ─────────────────────────────────────────────────── */}
       <Modal

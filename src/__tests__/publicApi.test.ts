@@ -14,6 +14,14 @@ const FUNCTIONS = [
   // inference + lifecycle
   "createLLM",
   "useModel",
+  // embeddings
+  "createEmbedder",
+  "useEmbedder",
+  "cosineSimilarity",
+  "dotProduct",
+  "normalize",
+  "topK",
+  "preflightEmbedder",
   // bundle introspection
   "inspectModel",
   "recommendBackend",
@@ -72,6 +80,10 @@ describe("public API", () => {
     expect(api.GEMMA_4_E2B_IT).toMatch(/^https:\/\//);
     expect(api.GEMMA_4_E4B_IT).toMatch(/^https:\/\//);
     expect(api.GEMMA_3N_E2B_IT_INT4).toMatch(/^https:\/\//);
+    expect(api.EMBEDDING_GEMMA_2_TEXT_270M).toMatch(/embeddinggemma-2-text-270m\.litertlm$/);
+    expect(api.EMBEDDING_GEMMA_2_740M).toMatch(/embeddinggemma-2-740m\.litertlm$/);
+    expect(api.EmbeddingTask.searchQuery("q")).toBe("task: search result | query: q");
+    expect(api.EmbeddingTask.document("d")).toBe("title: none | text: d");
   });
 
   it("re-exports the react-native-free core", () => {

@@ -39,7 +39,6 @@ import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
 import com.google.ai.edge.litertlm.ResponseFormat
 import com.google.ai.edge.litertlm.SuppressTokensConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
-import com.google.ai.edge.litertlm.ActivationDataType as SdkActivationDataType
 import com.google.ai.edge.litertlm.tool
 import org.json.JSONException
 import org.json.JSONObject
@@ -82,6 +81,51 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
             ComponentCallbacks2.TRIM_MEMORY_MODERATE -> MemoryWarningLevel.MODERATE
             else -> null
+        }
+
+        /** Process memory, shared with the embedder (one app, one memory budget). */
+        internal fun processMemoryUsage(): MemoryUsage {
+            // Native heap: allocated bytes from Debug APIs (most accurate for native allocations)
+            val nativeHeapBytes = Debug.getNativeHeapAllocatedSize().toDouble()
+
+            // Process RSS: read from /proc/self/status (VmRSS) in kB
+            var residentBytes = 0.0
+            try {
+                java.io.File("/proc/self/status").forEachLine { line ->
+                    if (line.startsWith("VmRSS:")) {
+                        val kb = line.substringAfter("VmRSS:").trim().split("\\s+".toRegex())[0].toDoubleOrNull()
+                        if (kb != null) {
+                            residentBytes = kb * 1024.0
+                        }
+                        return@forEachLine
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to read /proc/self/status: ${e.message}")
+            }
+
+            // Available memory and low-memory flag from ActivityManager
+            var availableMemoryBytes = 0.0
+            var isLowMemory = false
+            try {
+                val context = LiteRTLMInitProvider.applicationContext
+                if (context != null) {
+                    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                    val memInfo = ActivityManager.MemoryInfo()
+                    activityManager.getMemoryInfo(memInfo)
+                    availableMemoryBytes = memInfo.availMem.toDouble()
+                    isLowMemory = memInfo.lowMemory
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get ActivityManager memory info: ${e.message}")
+            }
+
+            return MemoryUsage(
+                nativeHeapBytes = nativeHeapBytes,
+                residentBytes = residentBytes,
+                availableMemoryBytes = availableMemoryBytes,
+                isLowMemory = isLowMemory
+            )
         }
 
         /**
@@ -538,49 +582,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return lastStats
     }
 
-    override fun getMemoryUsage(): MemoryUsage {
-        // Native heap: allocated bytes from Debug APIs (most accurate for native allocations)
-        val nativeHeapBytes = Debug.getNativeHeapAllocatedSize().toDouble()
+    override fun getMemoryUsage(): MemoryUsage = processMemoryUsage()
 
-        // Process RSS: read from /proc/self/status (VmRSS) in kB
-        var residentBytes = 0.0
-        try {
-            java.io.File("/proc/self/status").forEachLine { line ->
-                if (line.startsWith("VmRSS:")) {
-                    val kb = line.substringAfter("VmRSS:").trim().split("\\s+".toRegex())[0].toDoubleOrNull()
-                    if (kb != null) {
-                        residentBytes = kb * 1024.0
-                    }
-                    return@forEachLine
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to read /proc/self/status: ${e.message}")
-        }
-
-        // Available memory and low-memory flag from ActivityManager
-        var availableMemoryBytes = 0.0
-        var isLowMemory = false
-        try {
-            val context = LiteRTLMInitProvider.applicationContext
-            if (context != null) {
-                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                val memInfo = ActivityManager.MemoryInfo()
-                activityManager.getMemoryInfo(memInfo)
-                availableMemoryBytes = memInfo.availMem.toDouble()
-                isLowMemory = memInfo.lowMemory
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to get ActivityManager memory info: ${e.message}")
-        }
-
-        return MemoryUsage(
-            nativeHeapBytes = nativeHeapBytes,
-            residentBytes = residentBytes,
-            availableMemoryBytes = availableMemoryBytes,
-            isLowMemory = isLowMemory
-        )
-    }
 
     override fun getContextTokenCount(): Double {
         // The LiteRT-LM Kotlin SDK does not expose a conversation-level token
@@ -1086,14 +1089,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 }
 
-/** Map the Nitro ActivationDataType to the LiteRT-LM SDK enum (same ordinal values). */
-private fun ActivationDataType.toSdk(): SdkActivationDataType = when (this) {
-    ActivationDataType.F32 -> SdkActivationDataType.FLOAT32
-    ActivationDataType.F16 -> SdkActivationDataType.FLOAT16
-    ActivationDataType.I16 -> SdkActivationDataType.INT16
-    ActivationDataType.I8 -> SdkActivationDataType.INT8
-}
-
 /** Map the Nitro ThinkingOptions to the LiteRT-LM SDK config (engine defaults: enabled, unlimited budget). */
 private fun ThinkingOptions.toSdkThinkingConfig(): ThinkingConfig =
     ThinkingConfig(
@@ -1117,10 +1112,3 @@ internal fun serializeToolCallMarkers(
 
 /** One engine-creation attempt in loadModel()'s fallback chain. */
 private data class Attempt(val main: Backend, val vision: Backend?, val audio: Backend?)
-
-/** Map the Nitro Backend to a fresh LiteRT-LM SDK backend. */
-private fun Backend.toSdk(): com.google.ai.edge.litertlm.Backend = when (this) {
-    Backend.GPU -> com.google.ai.edge.litertlm.Backend.GPU()
-    Backend.NPU -> com.google.ai.edge.litertlm.Backend.NPU()
-    Backend.CPU -> com.google.ai.edge.litertlm.Backend.CPU()
-}

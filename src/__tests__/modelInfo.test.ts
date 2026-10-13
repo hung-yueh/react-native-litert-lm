@@ -119,6 +119,20 @@ describe("normalizeModelInfo", () => {
     expect(info.npu).toEqual({});
   });
 
+  it("doesn't trust a vision claim without a compiled vision encoder", () => {
+    // embeddinggemma-2-text-270m declares vision support but ships no encoder
+    const claimed = normalizeModelInfo(
+      "/m/text-only.litertlm",
+      native({ modalities: { vision: { supported: true, backends: ["cpu"] } }, visionSignatureSelection: [] }),
+    );
+    expect(claimed.modalities.vision).toBe(false);
+    const real = normalizeModelInfo(
+      "/m/vision.litertlm",
+      native({ modalities: { vision: { supported: true } }, visionSignatureSelection: [70, 140] }),
+    );
+    expect(real.modalities.vision).toBe(true);
+  });
+
   it("reports undeclared fields as absent, not as zeros", () => {
     const info = normalizeModelInfo("/m/old.litertlm", native());
     expect(info.llm?.samplerDefaults).toBeNull();

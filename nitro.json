@@ -22,6 +22,10 @@
     "ModelInspector": {
       "ios": { "language": "swift", "implementationClassName": "HybridModelInspector" },
       "android": { "language": "kotlin", "implementationClassName": "HybridModelInspector" }
+    },
+    "Embedder": {
+      "ios": { "language": "swift", "implementationClassName": "HybridEmbedder" },
+      "android": { "language": "kotlin", "implementationClassName": "HybridEmbedder" }
     }
   },
   "ignorePaths": ["**/node_modules"]

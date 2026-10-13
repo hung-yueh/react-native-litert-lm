@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { LLMConfig, MemoryWarningLevel } from "./index";
 import { createLLM } from "./modelFactory";
+import { createEmbedder, type EmbedderInstance, type EmbeddingInput } from "./embedder";
+import type { EmbedderConfig, EmbeddingOptions } from "./specs/Embedder.nitro";
 import type { LiteRTLMInstance } from "./modelFactory";
 import type { MemoryTracker, MemoryTrackerSummary } from "./memoryTracker";
 import type { MemoryEstimate, MemoryForecast } from "./core/memoryEstimator";
@@ -323,5 +325,132 @@ export function useModel(
     memoryEstimate,
     memoryForecast,
     memoryWarning,
+  };
+}
+
+export interface UseEmbedderConfig extends EmbedderConfig {
+  /** Load as soon as the hook mounts (default true) */
+  autoLoad?: boolean;
+}
+
+export interface UseEmbedderResult {
+  embedder: EmbedderInstance | null;
+  isReady: boolean;
+  downloadProgress: number;
+  error: string | null;
+  /** Typed code of the last failure, e.g. `'MODEL_TYPE_MISMATCH'` */
+  errorCode: LiteRTLMErrorCode | null;
+  /** What the loaded bundle declares: dimension, input lengths, modalities (null until loaded) */
+  modelInfo: ModelInfo | null;
+  /** One vector for one input (rejects until ready) */
+  embed: (input: EmbeddingInput, options?: EmbeddingOptions) => Promise<Float32Array>;
+  /** One vector per input, in one engine call */
+  embedBatch: (inputs: EmbeddingInput[], options?: EmbeddingOptions) => Promise<Float32Array[]>;
+  load: () => Promise<void>;
+}
+
+/**
+ * React hook managing an embedding model's lifecycle: download, pre-flight,
+ * load, and cleanup on unmount — the embedding counterpart of `useModel`.
+ *
+ * @example
+ * ```tsx
+ * const { isReady, embed } = useEmbedder(EMBEDDING_GEMMA_2_TEXT_270M);
+ * const vector = isReady ? await embed(EmbeddingTask.searchQuery(text), { normalize: true }) : null;
+ * ```
+ */
+export function useEmbedder(pathOrUrl: string, config?: UseEmbedderConfig): UseEmbedderResult {
+  const embedderRef = useRef<EmbedderInstance | null>(null);
+  const [isReady, setIsReady] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<LiteRTLMErrorCode | null>(null);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+
+  // Primitives keep the config stable across renders with inline objects.
+  const autoLoad = config?.autoLoad ?? true;
+  const backend = config?.backend;
+  const visionBackend = config?.visionBackend;
+  const audioBackend = config?.audioBackend;
+  const maxInputLength = config?.maxInputLength;
+  const visionTokensPerImage = config?.visionTokensPerImage;
+  const activationDataType = config?.activationDataType;
+  const forceLoad = config?.forceLoad;
+  const embedderConfig = useMemo<EmbedderConfig>(
+    () => ({
+      ...(backend !== undefined && { backend }),
+      ...(visionBackend !== undefined && { visionBackend }),
+      ...(audioBackend !== undefined && { audioBackend }),
+      ...(maxInputLength !== undefined && { maxInputLength }),
+      ...(visionTokensPerImage !== undefined && { visionTokensPerImage }),
+      ...(activationDataType !== undefined && { activationDataType }),
+      ...(forceLoad !== undefined && { forceLoad }),
+    }),
+    [backend, visionBackend, audioBackend, maxInputLength, visionTokensPerImage, activationDataType, forceLoad],
+  );
+
+  useEffect(() => {
+    embedderRef.current = createEmbedder();
+    setIsReady(false);
+    return () => {
+      try {
+        embedderRef.current?.close();
+      } catch (e) {
+        console.warn("Failed to close embedder", e);
+      }
+    };
+  }, []);
+
+  const load = useCallback(async () => {
+    setIsReady(false);
+    setError(null);
+    setErrorCode(null);
+    setDownloadProgress(0);
+    try {
+      if (embedderRef.current) {
+        await embedderRef.current.loadModel(pathOrUrl, embedderConfig, setDownloadProgress);
+        setModelInfo(embedderRef.current.getModelInfo());
+        setIsReady(true);
+      }
+    } catch (e: any) {
+      setError(e.message || "Failed to load embedding model");
+      setErrorCode(e instanceof LiteRTLMError ? e.code : null);
+    }
+  }, [pathOrUrl, embedderConfig]);
+
+  useEffect(() => {
+    if (autoLoad) load();
+  }, [autoLoad, load]);
+
+  const embed = useCallback(
+    (input: EmbeddingInput, options?: EmbeddingOptions) => {
+      if (!embedderRef.current || !isReady) {
+        return Promise.reject(new LiteRTLMError("MODEL_NOT_LOADED", "The embedding model is not loaded yet."));
+      }
+      return embedderRef.current.embed(input, options);
+    },
+    [isReady],
+  );
+
+  const embedBatch = useCallback(
+    (inputs: EmbeddingInput[], options?: EmbeddingOptions) => {
+      if (!embedderRef.current || !isReady) {
+        return Promise.reject(new LiteRTLMError("MODEL_NOT_LOADED", "The embedding model is not loaded yet."));
+      }
+      return embedderRef.current.embedBatch(inputs, options);
+    },
+    [isReady],
+  );
+
+  return {
+    embedder: embedderRef.current,
+    isReady,
+    downloadProgress,
+    error,
+    errorCode,
+    modelInfo,
+    embed,
+    embedBatch,
+    load,
   };
 }

@@ -141,6 +141,9 @@ enum ModelBundle {
         guard let info = try? read(path) else { return nil }
         func plan(_ modality: Modality, undeclared: String) -> String? {
             guard let m = info.modalities.first(where: { $0.modality == modality }), m.supported else { return nil }
+            // A real vision encoder always reports its compiled signatures; the
+            // text-only EmbeddingGemma 2 bundle claims vision support without one.
+            if modality == .vision && info.visionSignatureSelection.isEmpty { return nil }
             if m.backends.isEmpty { return undeclared }
             for backend in m.backends {
                 if backend == .cpu { return "cpu" }

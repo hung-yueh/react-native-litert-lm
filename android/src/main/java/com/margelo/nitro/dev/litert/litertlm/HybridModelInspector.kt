@@ -129,6 +129,9 @@ internal object ModelBundle {
         fun plan(modality: Modality, undeclared: Backend): Backend? {
             val m = info.modalities.firstOrNull { it.modality == modality }
             if (m == null || !m.supported) return null
+            // A real vision encoder always reports its compiled signatures; the
+            // text-only EmbeddingGemma 2 bundle claims vision support without one.
+            if (modality == Modality.VISION && info.visionSignatureSelection.isEmpty()) return null
             if (m.backends.isEmpty()) return undeclared
             return m.backends.firstOrNull { it == Backend.CPU || (it == Backend.GPU && GpuProbe.openCLAvailable()) }
                 ?: Backend.CPU

@@ -66,7 +66,7 @@ export type {
 
 export { extractFileName, resolveModelFileName } from "./modelPath";
 
-export { recommendBackend, preflightLoad } from "./modelInfo";
+export { recommendBackend, preflightLoad, preflightEmbedder } from "./modelInfo";
 export type {
   ModelInfo,
   DeviceInfo,
@@ -76,9 +76,12 @@ export type {
   RecommendBackendOptions,
   PreflightResult,
   PreflightOptions,
+  EmbedderPreflightResult,
   Modality,
   ModelType,
   NpuBrand,
 } from "./modelInfo";
 export { LITERT_LM_VERSION, compareVersions } from "./version";
+export { EmbeddingTask, cosineSimilarity, dotProduct, normalize, topK } from "./embeddings";
+export type { EmbeddingDocument, EmbeddingMatch } from "./embeddings";
 export { setDeprecationWarningsEnabled } from "./deprecations";

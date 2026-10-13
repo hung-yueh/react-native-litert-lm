@@ -81,6 +81,11 @@ export type {
   ConversationOptions,
 } from "./modelFactory";
 export { ModelRegistry } from "./modelRegistry";
+
+// On-device embeddings (LiteRT-LM EmbeddingEngine, 0.17+)
+export { createEmbedder } from "./embedder";
+export type { EmbedderInstance, EmbeddingInput } from "./embedder";
+export type { EmbedderConfig, EmbeddingOptions } from "./specs/Embedder.nitro";
 export type { ModelDownloadOptions } from "./modelRegistry";
 export * from "./hooks";
 
@@ -143,6 +148,10 @@ export const Models = {
   PHI_4_MINI: "Phi-4-mini-instruct_multi-prefill-seq_q8_ekv4096",
   /** Qwen 2.5 1.5B Instruct */
   QWEN_2_5_1_5B: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096",
+  /** EmbeddingGemma 2 text encoder (270M, 165 MB) — use with createEmbedder() */
+  EMBEDDING_GEMMA_2_TEXT_270M: "embeddinggemma-2-text-270m-litert-lm",
+  /** EmbeddingGemma 2 text + image + audio encoder (740M, 485 MB) — use with createEmbedder() */
+  EMBEDDING_GEMMA_2_740M: "embeddinggemma-2-740m-litert-lm",
 } as const;
 
 export type ModelId = (typeof Models)[keyof typeof Models];
@@ -277,3 +286,20 @@ export const GEMMA_4_E2B_IT =
  */
 export const GEMMA_4_E4B_IT =
   "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm";
+
+/**
+ * Download URL for EmbeddingGemma 2 Text 270M (165 MB): text-only, 768-dim
+ * vectors with Matryoshka truncation to 512/256/128, 100+ languages and code.
+ * Public — no Hugging Face account required. Load with `createEmbedder()`.
+ */
+export const EMBEDDING_GEMMA_2_TEXT_270M =
+  "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm";
+
+/**
+ * Download URL for EmbeddingGemma 2 740M (485 MB): text, images and audio in
+ * one 768-dim space (cross-modal search). Public — no Hugging Face account
+ * required. Load with `createEmbedder()`; per-SoC NPU variants live in the
+ * same repository.
+ */
+export const EMBEDDING_GEMMA_2_740M =
+  "https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/main/embeddinggemma-2-740m.litertlm";
