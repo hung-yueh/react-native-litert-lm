@@ -41,6 +41,11 @@ describe('multi-conversation manager', () => {
     expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, true);
   });
 
+  it('passes speculative decoding through a manual resetConversation()', () => {
+    llm.resetConversation(undefined, 'Be brief.', true);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, 'Be brief.', true);
+  });
+
   it('drops speculative decoding for a loaded bundle without a drafter', async () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     await llm.loadModel('/m/plain.litertlm', { backend: 'cpu' }); // the mock bundle declares no drafter

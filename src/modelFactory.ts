@@ -105,8 +105,9 @@ export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
   getMemoryForecast: () => MemoryForecast | null;
   /**
    * Execute inference receiving typed streaming events (token / toolCall /
-   * thinking) instead of a raw token stream. Requires `streamToolCalls: true`
-   * in the load config for tool-call events to appear.
+   * thinking) instead of a raw token stream. Completed tool calls arrive as
+   * `toolCall` events on both platforms; `streamToolCalls: true` streams them
+   * token by token (iOS). Answer them with `toolResultPart()`.
    */
   executeWithEvents: (
     parts: MultimodalPart[],
@@ -395,23 +396,28 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   const savedTranscripts = new Map<string | null, Message[]>();
   let switchQueue: Promise<void> = Promise.resolve();
 
+  /**
+   * A per-conversation speculative-decoding request the loaded bundle can
+   * honor: without a drafter the engine would fail the first message.
+   */
+  const supportedSpeculativeDecoding = (requested: boolean | undefined): boolean | undefined => {
+    if (requested === true && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
+      console.warn(
+        "[react-native-litert-lm] speculativeDecoding: this bundle has no multi-token-prediction drafter — ignoring it.",
+      );
+      return undefined;
+    }
+    return requested;
+  };
+
   const switchTo = (id: string | null, options?: ConversationOptions) => {
     if (activeConversationId === id) return;
     savedTranscripts.set(activeConversationId, native.getHistory());
     const transcript = savedTranscripts.get(id) ?? [];
-    // Speculative decoding needs the bundle's drafter; without one, the engine
-    // would fail the conversation's first message.
-    let speculativeDecoding = options?.speculativeDecoding;
-    if (speculativeDecoding === true && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
-      console.warn(
-        "[react-native-litert-lm] speculativeDecoding: this bundle has no multi-token-prediction drafter — ignoring it.",
-      );
-      speculativeDecoding = undefined;
-    }
     native.resetConversation(
       transcript.length > 0 ? JSON.stringify(transcript) : undefined,
       options?.systemPrompt,
-      speculativeDecoding,
+      supportedSpeculativeDecoding(options?.speculativeDecoding),
     );
     activeConversationId = id;
   };
@@ -551,12 +557,16 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
           );
       }
       if (prop === "resetConversation") {
-        return (historyJson?: string, systemPrompt?: string) => {
+        return (historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean) => {
           // A manual reset clears the live context — ownership returns to the
           // default conversation.
           let result: void;
           try {
-            result = target.resetConversation(historyJson, systemPrompt);
+            result = target.resetConversation(
+              historyJson,
+              systemPrompt,
+              supportedSpeculativeDecoding(speculativeDecoding),
+            );
           } catch (e) {
             throw toLiteRTLMError(e, "load");
           }
