@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Embeddings — litert·lm</title>
+<meta name="description" content="createEmbedder() and useEmbedder(): on-device embeddings with EmbeddingGemma 2 for semantic search, RAG retrieval, clustering and classification in react-native-litert-lm." />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="index.html"><span class="ns">react-native-</span>litert<span class="dot">-</span>lm</a>
+  <span class="ver">v0.7.0</span>
+  <nav>
+    <a href="getting-started.html">Docs</a>
+    <a href="use-model.html" class="active">API</a>
+    <a href="https://github.com/hung-yueh/react-native-litert-lm">GitHub</a>
+  </nav>
+  <button class="menu-btn" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<div class="shell">
+<aside class="side">
+  <div class="group">
+    <div class="group-label">Start</div>
+    <a href="index.html">Overview</a>
+    <a href="getting-started.html">Getting started</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Core API</div>
+    <a href="use-model.html">useModel hook</a>
+    <a href="create-llm.html">createLLM &amp; instances</a>
+    <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html" class="here">Embeddings</a>
+    <a href="configuration.html">Configuration</a>
+  </div>
+  <div class="group">
+    <div class="group-label">Platform</div>
+    <a href="memory.html">Memory &amp; errors</a>
+    <a href="models.html">Models &amp; registry</a>
+    <a href="manifest.html">Manifest resolution</a>
+    <a href="configuration.html#platform-support">Platform support</a>
+  </div>
+</aside>
+
+<main class="doc">
+  <p class="eyebrow">Core API</p>
+  <h1>Embeddings</h1>
+  <p class="lede">
+    <code>createEmbedder()</code> turns text, images and audio into vectors on
+    the device — semantic search, RAG retrieval, deduplication, clustering and
+    classification, with no server in the loop. It runs beside an LLM, or on
+    its own.
+  </p>
+
+  <h2 id="quick-start">Quick start</h2>
+  <p>
+    Load an EmbeddingGemma 2 bundle, embed what you search with
+    <code>EmbeddingTask.document</code> and the query with
+    <code>EmbeddingTask.searchQuery</code>, then rank with <code>topK</code>:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { createEmbedder, EmbeddingTask, topK, EMBEDDING_GEMMA_2_TEXT_270M } from "react-native-litert-lm";
+
+const embedder = createEmbedder();
+await embedder.loadModel(EMBEDDING_GEMMA_2_TEXT_270M, { maxInputLength: 256 });
+
+const options = { normalize: true, outputSize: 256 } as const; // Matryoshka: 768 → 256 dimensions
+const index = await embedder.embedBatch(notes.map(EmbeddingTask.document), options);
+const query = await embedder.embed(EmbeddingTask.searchQuery("when is my flight?"), options);
+const best = topK(query, index, 3); // [{ index, score }], best first</code></pre>
+  </div>
+  <ul>
+    <li><strong>Prompts matter.</strong> EmbeddingGemma 2 was trained with task prompts, and <a href="#embeddingtask"><code>EmbeddingTask</code></a> builds them for you.</li>
+    <li><strong>Vectors are <code>Float32Array</code>s</strong> over native memory, with no JSON on the way. The <a href="#vector-helpers">vector helpers</a> work on them in plain JS, which is plenty for the thousands of vectors an on-device index holds.</li>
+    <li><strong><code>outputSize</code></strong> truncates to 512, 256 or 128 dimensions, and the engine re-normalizes after truncating — see <a href="#matryoshka">Matryoshka output sizes</a>.</li>
+    <li><strong><code>maxInputLength</code></strong> picks the smallest compiled input that fits (128–8192 tokens): less memory, faster calls.</li>
+  </ul>
+
+  <h2 id="models">Embedding models</h2>
+  <p>
+    EmbeddingGemma 2 is the embedding family the engine supports. Both bundles
+    are public on the Hugging Face Hub — no account or authentication
+    required — and produce 768-dimension vectors:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Constant</th><th>Inputs</th><th>Size</th><th>Min RAM</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>EMBEDDING_GEMMA_2_TEXT_270M</code></td>
+          <td>Text — 100+ languages and code</td>
+          <td>165&nbsp;MB</td>
+          <td>2&nbsp;GB+</td>
+        </tr>
+        <tr>
+          <td><code>EMBEDDING_GEMMA_2_740M</code></td>
+          <td>Text, images and audio, in one space</td>
+          <td>485&nbsp;MB</td>
+          <td>3&nbsp;GB+</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Both models were verified end to end on the iOS simulator and an Android
+    emulator for this release, and both fit on iOS without the
+    <a href="getting-started.html#entitlements">Extended Virtual Addressing
+    entitlement</a>. Per-SoC NPU variants of the 740M model live in the same
+    repository; with <code>backend</code> left unset, a per-SoC NPU build runs
+    on its NPU.
+  </p>
+  <div class="note">
+    <span class="note-label">One model type per factory</span>
+    <p>
+      Embedding bundles load with <code>createEmbedder()</code>, LLMs with
+      <code>createLLM()</code>. The bundle says which it is, so the wrong
+      pairing rejects with <code>MODEL_TYPE_MISMATCH</code> before any weights
+      load — see <a href="models.html#know-the-model">Know the model before
+      loading it</a>.
+    </p>
+  </div>
+
+  <h2 id="createembedder">createEmbedder()</h2>
+  <div class="sig">function createEmbedder(): EmbedderInstance</div>
+  <p>
+    Creates an embedding model — LiteRT-LM's EmbeddingEngine. It is a separate
+    engine from <code>createLLM()</code>, with its own serial queue (iOS) or
+    worker thread (Android), so an embedder and a loaded LLM can work at the
+    same time.
+  </p>
+
+  <h3 id="embedderinstance">EmbedderInstance</h3>
+  <div class="sig">export interface EmbedderInstance {
+  loadModel(
+    pathOrUrl: string,
+    config?: EmbedderConfig,
+    onDownloadProgress?: (progress: number) =&gt; void,
+  ): Promise&lt;void&gt;;
+  embed(input: EmbeddingInput, options?: EmbeddingOptions): Promise&lt;Float32Array&gt;;
+  embedBatch(inputs: EmbeddingInput[], options?: EmbeddingOptions): Promise&lt;Float32Array[]&gt;;
+  getModelInfo(): ModelInfo | null;
+  isReady(): boolean;
+  getMemoryUsage(): MemoryUsage;
+  unload(): Promise&lt;void&gt;;
+  close(): void;
+}
+
+/** Text, or the same multimodal parts execute() takes. */
+export type EmbeddingInput = string | MultimodalPart[];</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Method</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>loadModel(pathOrUrl, config?, onDownloadProgress?)</code></td>
+          <td>Download (for an HTTPS URL, reporting 0–1 progress) and load an embedding bundle, after the same pre-flight checks as <code>createLLM().loadModel()</code> — see <a href="#loading">Loading</a>.</td>
+        </tr>
+        <tr>
+          <td><code>embed(input, options?)</code></td>
+          <td>One vector for one input: a string, or <code>MultimodalPart</code>s. The <code>Float32Array</code> views native memory — no copy, no JSON. Apply an <a href="#embeddingtask"><code>EmbeddingTask</code></a> prompt to text first.</td>
+        </tr>
+        <tr>
+          <td><code>embedBatch(inputs, options?)</code></td>
+          <td>One vector per input, computed in a single engine call. An empty array resolves to <code>[]</code>.</td>
+        </tr>
+        <tr>
+          <td><code>getModelInfo()</code></td>
+          <td>What the loaded bundle declares — dimension, input lengths, modalities (<a href="models.html#modelinfo"><code>ModelInfo</code></a>). <code>null</code> before a load, or when the bundle's metadata could not be read.</td>
+        </tr>
+        <tr>
+          <td><code>isReady()</code></td>
+          <td>Whether a model is loaded.</td>
+        </tr>
+        <tr>
+          <td><code>getMemoryUsage()</code></td>
+          <td>Real memory usage from the OS — the same <a href="memory.html#memoryusage"><code>MemoryUsage</code></a> an LLM instance reports.</td>
+        </tr>
+        <tr>
+          <td><code>unload()</code></td>
+          <td>Free the engine; the instance can load again.</td>
+        </tr>
+        <tr>
+          <td><code>close()</code></td>
+          <td>Free the engine for good. It returns at once and frees the engine after any in-flight call.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    As with <code>execute()</code>, a leading <code>file://</code> is stripped
+    from part paths, so URIs from image pickers work as-is.
+  </p>
+
+  <h3 id="loading">Loading</h3>
+  <p>
+    <code>loadModel()</code> resolves the path through
+    <a href="models.html#model-registry"><code>ModelRegistry</code></a> — an
+    HTTPS URL downloads once, then comes from the cache — and reads the
+    bundle's metadata to check it before any weights load:
+  </p>
+  <ul>
+    <li><strong>An LLM bundle</strong> rejects with <code>MODEL_TYPE_MISMATCH</code>.</li>
+    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>.</li>
+    <li><strong>With <code>backend</code> omitted</strong>, the bundle's preferred backend that this device can run is used, so a per-SoC NPU build runs on its NPU. A bundle this device can't run at all rejects with <code>UNSUPPORTED</code>.</li>
+    <li><strong><code>maxInputLength</code></strong> above the encoder's longest compiled input is capped to it, with a console note.</li>
+    <li><strong>Memory</strong> gets the same pre-flight estimate as an LLM, with the input length (<code>maxInputLength</code>, 512 when unset) standing in for the context. A <code>'critical'</code> verdict throws a <a href="memory.html#error-classes"><code>MemoryError</code></a> instead of loading; <code>forceLoad: true</code> skips the check.</li>
+  </ul>
+  <p>
+    A bundle whose metadata can't be read loads without the bundle checks,
+    with a warning, and the engine has the final say.
+  </p>
+
+  <h2 id="embedderconfig">EmbedderConfig</h2>
+  <p>
+    Load-time settings, passed to <code>loadModel()</code> or as the second
+    argument to <code>useEmbedder()</code>. All fields are optional.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>backend</code></td>
+          <td><code>Backend</code></td>
+          <td>the bundle's preference, else <code>'cpu'</code></td>
+          <td>Backend for the text encoder.</td>
+        </tr>
+        <tr>
+          <td><code>visionBackend</code></td>
+          <td><code>Backend</code></td>
+          <td>the bundle's</td>
+          <td>Backend for the image encoder. Unset: the backend the bundle declares, or no image encoder when it declares none.</td>
+        </tr>
+        <tr>
+          <td><code>audioBackend</code></td>
+          <td><code>Backend</code></td>
+          <td>the bundle's</td>
+          <td>Backend for the audio encoder. Unset: the backend the bundle declares, or no audio encoder when it declares none.</td>
+        </tr>
+        <tr>
+          <td><code>maxInputLength</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Longest input, in tokens, the encoder is prepared for. Picks the smallest compiled signature that fits (EmbeddingGemma 2: 128–8192), so a smaller value means less memory and faster calls. The compiled lengths are in <code>getModelInfo().embedding.inputLengthOptions</code>.</td>
+        </tr>
+        <tr>
+          <td><code>visionTokensPerImage</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Visual tokens per image (EmbeddingGemma 2: 70 or 140).</td>
+        </tr>
+        <tr>
+          <td><code>activationDataType</code></td>
+          <td><code>ActivationDataType</code></td>
+          <td>—</td>
+          <td>Activation precision; support depends on model and backend.</td>
+        </tr>
+        <tr>
+          <td><code>forceLoad</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Skip the pre-flight memory check (like <code>LLMConfig.forceLoad</code>).</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="embeddingoptions">EmbeddingOptions</h2>
+  <p>Per-call settings for <code>embed()</code> and <code>embedBatch()</code>.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>normalize</code></td>
+          <td><code>boolean</code></td>
+          <td>—</td>
+          <td>Return a unit-length vector, so dot product equals cosine similarity.</td>
+        </tr>
+        <tr>
+          <td><code>outputSize</code></td>
+          <td><code>number</code></td>
+          <td>full width</td>
+          <td>Matryoshka truncation: keep only the first N dimensions (EmbeddingGemma 2: 128, 256, 512 or 768). Smaller vectors cost less to store and compare.</td>
+        </tr>
+        <tr>
+          <td><code>insertSpecialTokens</code></td>
+          <td><code>boolean</code></td>
+          <td>engine default</td>
+          <td>Add the model's special tokens around text input.</td>
+        </tr>
+        <tr>
+          <td><code>visionTokensPerImage</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Visual tokens for images in this call.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="embeddingtask">Task prompts: EmbeddingTask</h2>
+  <p>
+    EmbeddingGemma 2 was trained with task prompts, so send them.
+    <code>EmbeddingTask</code> builds the prompts from its model card. Each
+    builder trims its input and takes one argument, so it can be passed
+    straight to <code>Array.map</code> —
+    <code>notes.map(EmbeddingTask.document)</code>.
+  </p>
+  <div class="sig">// EmbeddingTask.&lt;builder&gt;(input) returns the text to embed:
+searchQuery(query)          // task: search result | query: …
+document(doc)               // title: … | text: …
+questionAnswering(question) // task: question answering | query: …
+factChecking(claim)         // task: fact checking | query: …
+codeRetrieval(query)        // task: code retrieval | query: …
+classification(text)        // task: classification | query: …
+clustering(text)            // task: clustering | query: …
+sentenceSimilarity(text)    // task: sentence similarity | query: …</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Builder</th><th>Use it for</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>searchQuery(query)</code></td>
+          <td>The query side of search.</td>
+        </tr>
+        <tr>
+          <td><code>document(doc)</code></td>
+          <td>Every corpus item, for any retrieval task. Takes a string, or <code>{ title, text }</code> when the item has a real title (a heading, subject line or file name); a missing title is written as <code>none</code>, as the model expects.</td>
+        </tr>
+        <tr>
+          <td><code>questionAnswering(question)</code></td>
+          <td>The question; passages use <code>document</code>.</td>
+        </tr>
+        <tr>
+          <td><code>factChecking(claim)</code></td>
+          <td>The claim; evidence uses <code>document</code>.</td>
+        </tr>
+        <tr>
+          <td><code>codeRetrieval(query)</code></td>
+          <td>The query side of code search; code uses <code>document</code> with the file name as its title.</td>
+        </tr>
+        <tr>
+          <td><code>classification(text)</code></td>
+          <td>Every input to a classifier built on the embeddings.</td>
+        </tr>
+        <tr>
+          <td><code>clustering(text)</code></td>
+          <td>Every input to clustering.</td>
+        </tr>
+        <tr>
+          <td><code>sentenceSimilarity(text)</code></td>
+          <td>Both sides of a similarity comparison.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Which prompt goes where depends on the task:</p>
+  <ul>
+    <li><strong>Retrieval is asymmetric.</strong> The query gets its task prompt (<code>searchQuery</code>, <code>questionAnswering</code>, <code>factChecking</code>, <code>codeRetrieval</code>), and every corpus item gets <code>document</code>.</li>
+    <li><strong>Classification, clustering and similarity are symmetric.</strong> Every input being compared gets the same prompt.</li>
+    <li><strong>Images and audio take no prompt.</strong> Pass them as parts — see <a href="#images-audio">Images and audio</a>.</li>
+  </ul>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// Titled corpus items: the title is part of what the model reads
+const docs = await embedder.embedBatch(
+  articles.map((a) =&gt; EmbeddingTask.document({ title: a.heading, text: a.body })),
+  options,
+);
+
+// Symmetric tasks: the same prompt on both sides
+const [a, b] = await embedder.embedBatch(
+  [EmbeddingTask.sentenceSimilarity(first), EmbeddingTask.sentenceSimilarity(second)],
+  options,
+);</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">The model card wins</span>
+    <p>
+      LiteRT-LM's embedding page shows an older
+      <code>task: search query | text:</code> form. These builders follow the
+      prompts EmbeddingGemma 2 was trained and benchmarked with, from its
+      <a href="https://huggingface.co/google/embeddinggemma-2">model card</a>.
+    </p>
+  </div>
+
+  <h2 id="vector-helpers">Vectors and similarity</h2>
+  <p>
+    <code>embed()</code> resolves with a <code>Float32Array</code> over native
+    memory. The helpers below work on any <code>ArrayLike&lt;number&gt;</code>
+    in plain JS. They are pure, and they are also importable from
+    <code>react-native-litert-lm/core</code> for Node scripts and tests.
+  </p>
+  <div class="sig">function cosineSimilarity(a: ArrayLike&lt;number&gt;, b: ArrayLike&lt;number&gt;): number
+function dotProduct(a: ArrayLike&lt;number&gt;, b: ArrayLike&lt;number&gt;): number
+function normalize(v: ArrayLike&lt;number&gt;): Float32Array
+function topK(
+  query: ArrayLike&lt;number&gt;,
+  candidates: ReadonlyArray&lt;ArrayLike&lt;number&gt;&gt;,
+  k: number,
+): EmbeddingMatch[]
+
+/** One ranked hit from topK. */
+interface EmbeddingMatch {
+  /** Index into the `candidates` array */
+  index: number;
+  /** Cosine similarity to the query */
+  score: number;
+}</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Helper</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td><code>cosineSimilarity(a, b)</code></td><td>Cosine similarity in [-1, 1]. Returns <code>0</code> if either vector is all zeros.</td></tr>
+        <tr><td><code>dotProduct(a, b)</code></td><td>The dot product. Equals cosine similarity when both vectors are unit length (<code>normalize: true</code>).</td></tr>
+        <tr><td><code>normalize(v)</code></td><td>A unit-length copy of <code>v</code> (all-zero input returns zeros). The only helper that copies.</td></tr>
+        <tr><td><code>topK(query, candidates, k)</code></td><td>The <code>k</code> candidates most similar to <code>query</code>, best first, as <code>{ index, score }</code>. A linear scan — plenty for the thousands of vectors an on-device index typically holds.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="warn">
+    <span class="note-label">Same model, same size</span>
+    <p>
+      Vectors of different lengths throw a <code>RangeError</code>
+      (<code>Embedding dimensions differ (… vs …)</code>). Compare only vectors
+      produced with the same model and the same <code>outputSize</code>.
+    </p>
+  </div>
+
+  <h2 id="matryoshka">Matryoshka output sizes</h2>
+  <p>
+    EmbeddingGemma 2 vectors are 768 dimensions wide, trained so that their
+    leading dimensions still work as an embedding on their own.
+    <code>outputSize</code> keeps the first 512, 256 or 128 — close to
+    lossless down to 256 — and the engine re-normalizes after truncating.
+    Smaller vectors cost less to store and compare: at 256 dimensions an
+    index takes a third of the space.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// Index and queries must share one outputSize
+const options = { normalize: true, outputSize: 256 } as const;
+
+const index = await embedder.embedBatch(notes.map(EmbeddingTask.document), options);
+const query = await embedder.embed(EmbeddingTask.searchQuery(input), options);
+topK(query, index, 5); // 256-dimension vectors on both sides</code></pre>
+  </div>
+  <p>
+    Changing <code>outputSize</code> later means re-embedding the index: a
+    256-dimension query can't be compared with 768-dimension documents.
+  </p>
+
+  <h2 id="max-input-length">Input length</h2>
+  <p>
+    The encoder is compiled for a set of input lengths.
+    <code>maxInputLength</code> picks the smallest one that fits — less memory,
+    faster calls — so set it to the longest input you expect rather than the
+    model's maximum. The loaded bundle lists its options:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await embedder.loadModel(EMBEDDING_GEMMA_2_TEXT_270M, { maxInputLength: 256 });
+
+const info = embedder.getModelInfo();
+info?.embedding?.dimension;          // output width before any outputSize truncation
+info?.embedding?.inputLengthOptions; // the input lengths the encoder was compiled for</code></pre>
+  </div>
+
+  <h2 id="images-audio">Images and audio</h2>
+  <p>
+    <code>EMBEDDING_GEMMA_2_740M</code> embeds images and audio into the same
+    space as text, so a text query can find a photo or a recording. Images and
+    audio take no prompt: pass them as the same
+    <a href="inference.html#multimodalpart"><code>MultimodalPart</code></a>s
+    <code>execute()</code> takes, by path or as a buffer.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { createEmbedder, EmbeddingTask, topK, EMBEDDING_GEMMA_2_740M } from "react-native-litert-lm";
+
+const embedder = createEmbedder();
+await embedder.loadModel(EMBEDDING_GEMMA_2_740M);
+
+const options = { normalize: true } as const;
+const photos = await embedder.embedBatch(
+  photoPaths.map((path) =&gt; [{ type: "image" as const, path }]),
+  options,
+);
+const query = await embedder.embed(EmbeddingTask.searchQuery("a dog on a beach"), options);
+const matches = topK(query, photos, 5);</code></pre>
+  </div>
+  <p>
+    Images and audio need the 740M model; the 270M bundle is text-only.
+    <code>visionTokensPerImage</code> (70 or 140 for EmbeddingGemma 2) sets
+    how many visual tokens an image gets, at load time or per call.
+  </p>
+
+  <h2 id="useembedder">useEmbedder</h2>
+  <div class="sig">function useEmbedder(
+  pathOrUrl: string,
+  config?: UseEmbedderConfig,
+): UseEmbedderResult</div>
+  <p>
+    The embedding counterpart of <a href="use-model.html">useModel</a>: it
+    manages download, pre-flight, load and cleanup. <code>UseEmbedderConfig</code>
+    extends <a href="#embedderconfig"><code>EmbedderConfig</code></a> with one
+    field of its own, <code>autoLoad</code> (default <code>true</code>): load
+    as soon as the hook mounts.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>embedder</code></td>
+          <td><code>EmbedderInstance | null</code></td>
+          <td>The underlying instance. <code>null</code> until created.</td>
+        </tr>
+        <tr>
+          <td><code>isReady</code></td>
+          <td><code>boolean</code></td>
+          <td>True once the model is loaded.</td>
+        </tr>
+        <tr>
+          <td><code>downloadProgress</code></td>
+          <td><code>number</code></td>
+          <td>Download progress as a 0–1 fraction.</td>
+        </tr>
+        <tr>
+          <td><code>error</code></td>
+          <td><code>string | null</code></td>
+          <td>The last load error message, or <code>null</code>.</td>
+        </tr>
+        <tr>
+          <td><code>errorCode</code></td>
+          <td><code>LiteRTLMErrorCode | null</code></td>
+          <td>Typed code of the last load failure, e.g. <code>'MODEL_TYPE_MISMATCH'</code>.</td>
+        </tr>
+        <tr>
+          <td><code>modelInfo</code></td>
+          <td><code>ModelInfo | null</code></td>
+          <td>What the loaded bundle declares: dimension, input lengths, modalities. <code>null</code> until loaded.</td>
+        </tr>
+        <tr>
+          <td><code>embed</code></td>
+          <td><code>(input, options?) =&gt; Promise&lt;Float32Array&gt;</code></td>
+          <td>One vector for one input. Rejects with <code>MODEL_NOT_LOADED</code> until the model is ready.</td>
+        </tr>
+        <tr>
+          <td><code>embedBatch</code></td>
+          <td><code>(inputs, options?) =&gt; Promise&lt;Float32Array[]&gt;</code></td>
+          <td>One vector per input, in one engine call. Rejects with <code>MODEL_NOT_LOADED</code> until the model is ready.</td>
+        </tr>
+        <tr>
+          <td><code>load</code></td>
+          <td><code>() =&gt; Promise&lt;void&gt;</code></td>
+          <td>Download (if needed) and load the model — for <code>autoLoad: false</code>, or to retry after an error.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><strong>Create on mount, close on unmount.</strong> The hook creates the embedder when it mounts and closes it when the component unmounts.</li>
+    <li><strong>Reloads follow the inputs.</strong> With <code>autoLoad</code> on, it loads on mount and again when <code>pathOrUrl</code> or a config value changes. The config is destructured into primitives, so an inline object literal does not cause reload loops.</li>
+    <li><strong>Load failures land in state.</strong> <code>error</code> and <code>errorCode</code> describe a failed load; a failed <code>embed()</code> rejects with a typed error for you to catch.</li>
+  </ul>
+  <div class="code">
+    <div class="code-head"><span>useNoteSearch.ts</span></div>
+    <pre><code>import { useEffect, useState } from "react";
+import { EMBEDDING_GEMMA_2_TEXT_270M, EmbeddingTask, topK, useEmbedder } from "react-native-litert-lm";
+
+const NOTES = [
+  "Dentist appointment moved to Thursday at 3pm.",
+  "Flight to Tokyo departs SFO on May 4, seat 32A.",
+  // …
+];
+const OPTIONS = { normalize: true, outputSize: 256 } as const;
+
+function useNoteSearch() {
+  const { isReady, embed, embedBatch } = useEmbedder(EMBEDDING_GEMMA_2_TEXT_270M, {
+    maxInputLength: 256,
+  });
+  const [index, setIndex] = useState&lt;Float32Array[] | null&gt;(null);
+
+  // Embed the notes once, as soon as the model is ready (the document side of search)
+  useEffect(() =&gt; {
+    if (!isReady || index) return;
+    embedBatch(NOTES.map(EmbeddingTask.document), OPTIONS).then(setIndex, console.warn);
+  }, [isReady, index, embedBatch]);
+
+  return async (query: string) =&gt; {
+    if (!index) return [];
+    const vector = await embed(EmbeddingTask.searchQuery(query), OPTIONS);
+    return topK(vector, index, 3).map(({ index: i, score }) =&gt; ({ note: NOTES[i], score }));
+  };
+}</code></pre>
+  </div>
+
+  <h2 id="example-app">Example app: Search notes</h2>
+  <p>
+    The example app's <strong>Search notes</strong> sheet
+    (<a href="https://github.com/hung-yueh/react-native-litert-lm/blob/main/example/src/components/SearchPanel.tsx"><code>example/src/components/SearchPanel.tsx</code></a>)
+    is a working semantic search over a dozen notes. It loads
+    <code>EMBEDDING_GEMMA_2_TEXT_270M</code> on demand
+    (<code>autoLoad: false</code>, <code>maxInputLength: 256</code>), embeds
+    the notes once in a single <code>embedBatch()</code> call with
+    <code>EmbeddingTask.document</code>, embeds each query with
+    <code>EmbeddingTask.searchQuery</code> on submit, and ranks the notes with
+    <code>topK</code> — vectors truncated to 256 of 768 dimensions. Try
+    “teeth cleaning” or “what do I need for the garden?”: the notes match by
+    meaning, not keywords.
+  </p>
+
+  <h2 id="errors">Errors</h2>
+  <p>
+    Failures are <a href="memory.html#errors"><code>LiteRTLMError</code></a>s
+    with a stable <code>code</code>: <code>MODEL_TYPE_MISMATCH</code>,
+    <code>RUNTIME_TOO_OLD</code> and <code>UNSUPPORTED</code> from the bundle
+    checks, <code>MEMORY_ESTIMATE_EXCEEDED</code> from the memory pre-flight,
+    <code>INVALID_INPUT</code> for a bad part (a missing media file, an
+    unreadable buffer), and <code>EMBEDDING_FAILED</code> when the engine
+    fails a call. <code>useEmbedder()</code> exposes a failed load's code as
+    <code>errorCode</code>.
+  </p>
+
+  <div class="pager">
+    <a href="inference.html"><span>Previous</span>Inference &amp; streaming</a>
+    <a class="next" href="configuration.html"><span>Next</span>Configuration</a>
+  </div>
+</main>
+</div>
+
+<script src="docs.js"></script>
+</body>
+</html>

@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html" class="here">Configuration</a>
   </div>
   <div class="group">
@@ -60,6 +61,9 @@
   <p>
     The session-level configuration, passed to <code>loadModel()</code> or as
     the second argument to <code>useModel()</code>. All fields are optional.
+    <code>loadModel()</code> checks it against the bundle first, filling in an
+    omitted <code>backend</code> and clamping <code>maxContextTokens</code> —
+    see <a href="models.html#load-pre-flight">the load pre-flight</a>.
   </p>
   <div class="tbl-wrap">
     <table>
@@ -74,14 +78,14 @@
         <tr>
           <td><code>backend</code></td>
           <td><code>Backend</code></td>
-          <td><code>'cpu'</code></td>
-          <td>Primary compute backend for text generation. Falls back automatically if unavailable. The vision encoder is always GPU (required by Gemma models); the audio encoder is always CPU.</td>
+          <td>the bundle's preference</td>
+          <td>Primary compute backend for text generation. Omitted: the bundle's preferred backend that this device can run, else CPU — see <a href="#default-backend">Default backend</a>. Falls back to CPU automatically if the requested backend fails to start. Image and audio encoders follow the bundle (see <code>multimodal</code>).</td>
         </tr>
         <tr>
           <td><code>maxContextTokens</code></td>
           <td><code>number</code></td>
           <td><code>4096</code></td>
-          <td>Total engine KV-cache budget in tokens (prompt + history + output combined). Must be ≥ total input tokens + desired output tokens. For compiled bundles, should not exceed the bundle's compiled cache_length.</td>
+          <td>Total engine KV-cache budget in tokens (prompt + history + output combined). Must be ≥ total input tokens + desired output tokens. A value above the bundle's declared maximum is clamped to it, so the memory estimate and the engine agree.</td>
         </tr>
         <tr>
           <td><code>maxOutputTokens</code></td>
@@ -93,7 +97,7 @@
           <td><code>maxTokens</code> <span class="pill dep">deprecated</span></td>
           <td><code>number</code></td>
           <td><code>1024</code></td>
-          <td>Use <code>maxContextTokens</code> and <code>maxOutputTokens</code> instead. When set alone (without the new fields), maps to both for backward compatibility.</td>
+          <td>Use <code>maxContextTokens</code> and <code>maxOutputTokens</code> instead. When set alone (without the new fields), maps to both for backward compatibility. Warns once; removed in 1.0.</td>
         </tr>
         <tr>
           <td><code>temperature</code></td>
@@ -116,20 +120,26 @@
         <tr>
           <td><code>multimodal</code></td>
           <td><code>boolean</code></td>
-          <td>filename sniffing</td>
-          <td>Whether this is a multimodal model. When enabled, the engine handles image/audio tokens properly. If not specified, the system falls back to filename sniffing (&quot;3n&quot;/&quot;gemma3&quot;).</td>
+          <td>from the bundle</td>
+          <td>Unset: every encoder the bundle has (image, audio) loads, on the backend the bundle declares. <code>false</code> keeps the engine text-only; <code>true</code> on a bundle without encoders loads text-only, with a warning. Only for a bundle whose metadata can't be read does the old file-name guess (&quot;3n&quot;/&quot;gemma3&quot;) apply — deprecated, and it warns once.</td>
         </tr>
         <tr>
           <td><code>tools</code></td>
           <td><code>ToolDefinition[]</code></td>
           <td>—</td>
-          <td>List of tools/functions the model can call.</td>
+          <td>Tools the model can call. Calls come back as <code>&lt;tool_call&gt;</code> markers in the response (<code>parseToolCalls()</code> reads them); your app runs the tool and answers with <code>toolResultPart()</code> — see <a href="inference.html#tool-calling">Tool calling</a>.</td>
         </tr>
         <tr>
           <td><code>enableSpeculativeDecoding</code></td>
           <td><code>boolean</code></td>
           <td><code>false</code></td>
-          <td>Enable speculative decoding (multi-token prediction) if the model supports it.</td>
+          <td>Speculative decoding (multi-token prediction), if the bundle has a drafter. The session default; <code>createConversation({ speculativeDecoding })</code> overrides it per conversation. A bundle without a drafter loads without it, with a warning — see <a href="inference.html#speculative-decoding">Speculative decoding</a>.</td>
+        </tr>
+        <tr>
+          <td><code>chatTemplate</code></td>
+          <td><code>string</code></td>
+          <td>the bundle's</td>
+          <td>A Jinja chat template that replaces the bundle's own — the fix for a community bundle whose template is missing or wrong. The engine adds the BOS token itself, so the template must not. An invalid template fails the load — see <a href="inference.html#chat-templates">Chat templates</a>.</td>
         </tr>
         <tr>
           <td><code>enableStructuredOutput</code></td>
@@ -144,10 +154,28 @@
           <td>Session-default thinking/reasoning controls (Gemma 4, LiteRT-LM 0.15+). Override per message via <code>ExecuteOptions.thinking</code>.</td>
         </tr>
         <tr>
-          <td><code>numThreads</code> <span class="pill ios">iOS</span></td>
+          <td><code>numThreads</code></td>
           <td><code>number</code></td>
           <td>—</td>
-          <td>CPU threads for text generation (CPU backend). Lower values reduce peak memory-bandwidth pressure at some speed cost. iOS only — the Android Kotlin SDK does not expose thread control.</td>
+          <td>CPU threads for text generation (CPU backend). Lower values reduce peak memory-bandwidth pressure at some speed cost. Both platforms (Android since LiteRT-LM 0.18's <code>Backend.CPU(threadCount)</code>).</td>
+        </tr>
+        <tr>
+          <td><code>maxVisionTokensPerImage</code></td>
+          <td><code>number</code></td>
+          <td>—</td>
+          <td>Cap on the visual tokens one image may use, set when the engine loads (Gemma 4: 70, 140, 280, 560 or 1120; <code>inspectModel()</code> lists a bundle's options). Lower caps cut image memory and latency; <code>ExecuteOptions.visualTokenBudget</code> picks a budget per message, up to this cap. Both platforms.</td>
+        </tr>
+        <tr>
+          <td><code>gpu.metalResidencySet</code> <span class="pill ios">iOS</span></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Keep model weights resident in GPU memory with a Metal residency set (iOS 18+), so they aren't paged between calls. Ignored on older iOS and by non-GPU backends. Set as <code>gpu: { metalResidencySet: true }</code>.</td>
+        </tr>
+        <tr>
+          <td><code>singleThreadedExecution</code> <span class="pill ios">iOS</span></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Run the engine on a single thread — for debugging and reproducibility, not speed. The Android Kotlin SDK does not expose it.</td>
         </tr>
         <tr>
           <td><code>prefillChunkSize</code> <span class="pill ios">iOS</span></td>
@@ -156,10 +184,10 @@
           <td>Prefill chunk size (CPU backend only). Smaller chunks reduce peak activation memory during long-prompt prefill at some latency cost.</td>
         </tr>
         <tr>
-          <td><code>activationDataType</code> <span class="pill ios">iOS</span></td>
+          <td><code>activationDataType</code></td>
           <td><code>ActivationDataType</code></td>
           <td>—</td>
-          <td>Activation tensor data type; <code>'f16'</code> roughly halves activation memory vs <code>'f32'</code>.</td>
+          <td>Activation tensor data type; <code>'f16'</code> roughly halves activation memory vs <code>'f32'</code>. Mainly a GPU setting — GPU backends default to <code>'f16'</code>; on CPU the engine picks its own kernels and, for quantized bundles such as Gemma 4 E2B, generates identically whatever the value. A type the model and backend cannot run fails the load. Both platforms.</td>
         </tr>
         <tr>
           <td><code>loraPath</code></td>
@@ -209,7 +237,9 @@
       your total input tokens plus the output tokens you want, and for
       compiled bundles it should not exceed the bundle's compiled
       cache_length (just as <code>maxOutputTokens</code> must not exceed the
-      compiled decode-chunk size).
+      compiled decode-chunk size). When a bundle declares its maximum,
+      <code>loadModel()</code> clamps a larger value to it before the memory
+      estimate.
     </p>
   </div>
 
@@ -230,10 +260,10 @@
           <td>Cap output tokens for this message only, overriding session-level <code>maxOutputTokens</code>. Both platforms (LiteRT-LM 0.15+).</td>
         </tr>
         <tr>
-          <td><code>visualTokenBudget</code> <span class="pill ios">iOS</span></td>
+          <td><code>visualTokenBudget</code></td>
           <td><code>number</code></td>
           <td>—</td>
-          <td>Visual token budget for this message (multimodal models). Lower values reduce memory spent encoding images.</td>
+          <td>Visual token budget for images in this message (Gemma 4: 70, 140, 280, 560 or 1120), up to <code>LLMConfig.maxVisionTokensPerImage</code>. Lower values reduce memory and time spent encoding images. Both platforms; on Android the SDK's budget is process-wide, so messages that set it run one at a time.</td>
         </tr>
         <tr>
           <td><code>responseSchema</code></td>
@@ -284,10 +314,10 @@
           <td>Window of recent tokens checked for repeating n-grams. <code>0</code> = entire generation history.</td>
         </tr>
         <tr>
-          <td><code>suppressTokens</code> <span class="pill ios">iOS</span></td>
+          <td><code>suppressTokens</code></td>
           <td><code>number[]</code></td>
           <td>—</td>
-          <td>Token IDs that must never be generated — logits forced to -inf. iOS only; ignored with a warning on Android (see below).</td>
+          <td>Token IDs that must never be generated in this response — logits forced to -inf. Both platforms (Android since LiteRT-LM 0.17.0, which fixed the JNI binding that aborted the process through 0.16.1).</td>
         </tr>
         <tr>
           <td><code>thinking</code></td>
@@ -297,17 +327,6 @@
         </tr>
       </tbody>
     </table>
-  </div>
-
-  <div class="warn">
-    <span class="note-label">suppressTokens on Android</span>
-    <p>
-      <code>suppressTokens</code> is ignored (with a warning) on Android:
-      LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding looks
-      up a Kotlin-mangled <code>internal</code> accessor and aborts the
-      process, so the library refuses to use it there until upstream fixes
-      the mismatch.
-    </p>
   </div>
 
   <h2 id="thinkingoptions">ThinkingOptions</h2>
@@ -348,32 +367,75 @@
   </div>
   <ul>
     <li><code>'cpu'</code> — CPU inference (slowest, always available).</li>
-    <li><code>'gpu'</code> — GPU acceleration (fast, recommended for most devices).</li>
-    <li><code>'npu'</code> — NPU/Neural Engine (fastest on supported hardware). Requires compatible hardware (e.g., Qualcomm Hexagon, MediaTek APU); if NPU is unavailable, LiteRT-LM automatically falls back to GPU.</li>
+    <li><code>'gpu'</code> — GPU acceleration: Metal on iOS, the OpenCL delegate on Android where the device ships <code>libOpenCL.so</code>.</li>
+    <li><code>'npu'</code> — NPU (fastest on supported hardware). Requires compatible hardware (e.g., Qualcomm Hexagon, MediaTek APU), and a per-SoC NPU build runs only on the SoC it was compiled for. iOS has no NPU backend.</li>
   </ul>
   <p>
-    The backend applies to text generation only: the vision encoder is always
-    GPU (required by Gemma models), and the audio encoder is always CPU.
+    If the requested backend fails to start, the engine falls back to CPU.
+    The backend applies to text generation: image and audio encoders load
+    only if the bundle has them, on the backends it declares, and
+    <code>multimodal: false</code> keeps an engine text-only.
   </p>
 
-  <h3 id="getrecommendedbackend">getRecommendedBackend()</h3>
+  <h3 id="default-backend">Default backend</h3>
+  <p>
+    With <code>backend</code> omitted, <code>loadModel()</code> uses the
+    bundle's preferred backend that this device can run, and CPU when the
+    bundle declares none. A bundle that only runs on hardware this device
+    lacks — a per-SoC NPU build on another phone — rejects with
+    <code>UNSUPPORTED</code>. Set <code>backend</code> to keep a fixed choice.
+    The same logic is available as
+    <a href="models.html#recommendbackend"><code>recommendBackend()</code></a>,
+    which also explains its pick:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { inspectModel, recommendBackend } from "react-native-litert-lm";
+
+const rec = recommendBackend(await inspectModel(path));
+rec.backend;    // what loadModel() picks when backend is omitted
+rec.candidates; // every backend this device can run for the bundle, best first
+rec.reason;     // why, including any backends it skipped</code></pre>
+  </div>
+
+  <h3 id="deprecated-backend-helpers">Deprecated helpers <span class="pill dep">deprecated</span></h3>
+  <p>
+    <code>getRecommendedBackend()</code>, <code>checkBackendSupport()</code>
+    and <code>checkMultimodalSupport()</code> guessed from the platform alone.
+    Use <code>recommendBackend(await inspectModel(path))</code> and
+    <code>getDeviceInfo()</code>, which know the bundle and the device.
+  </p>
+  <div class="warn">
+    <span class="note-label">Deprecated in 0.8.0</span>
+    <p>
+      The three helpers below still work and keep their old results, but each
+      warns once and they are removed in 1.0.
+      <code>setDeprecationWarningsEnabled(false)</code> silences the warnings.
+    </p>
+  </div>
+
+  <h3 id="getrecommendedbackend">getRecommendedBackend() <span class="pill dep">deprecated</span></h3>
   <div class="sig">
     <pre><code>function getRecommendedBackend(): Backend</code></pre>
   </div>
   <p>
-    Returns <code>'cpu'</code> as the safe default — always. GPU (Metal on
-    iOS, GPU delegate on Android) is faster but may not be available on all
-    devices or model configurations.
+    Returns <code>'cpu'</code> as the safe default — always. Use
+    <code>recommendBackend(await inspectModel(path))</code>, which knows what
+    the bundle supports and what this device can run; <code>loadModel()</code>
+    already does this when <code>backend</code> is omitted.
   </p>
 
-  <h3 id="checkbackendsupport">checkBackendSupport(backend)</h3>
+  <h3 id="checkbackendsupport">checkBackendSupport(backend) <span class="pill dep">deprecated</span></h3>
   <div class="sig">
     <pre><code>function checkBackendSupport(backend: Backend): string | undefined</code></pre>
   </div>
   <p>
-    Checks whether a backend configuration is supported on the current
-    platform. Returns a warning message if the configuration may have issues,
-    or <code>undefined</code> if OK.
+    Returns a warning message if the backend may have issues on the current
+    platform, or <code>undefined</code> if OK — judged from the platform
+    alone. Use <code>recommendBackend(info)</code>, whose
+    <code>candidates</code>, <code>compatible</code> and <code>reason</code>
+    account for the bundle and this device's GPU driver and SoC, or
+    <code>getDeviceInfo().gpuAvailable</code> for the GPU driver alone.
   </p>
   <div class="tbl-wrap">
     <table>
@@ -388,19 +450,16 @@
     </table>
   </div>
 
-  <h3 id="checkmultimodalsupport">checkMultimodalSupport()</h3>
+  <h3 id="checkmultimodalsupport">checkMultimodalSupport() <span class="pill dep">deprecated</span></h3>
   <div class="sig">
     <pre><code>function checkMultimodalSupport(): string | undefined</code></pre>
   </div>
   <p>
-    Checks whether multimodal features (image/audio) are supported on the
-    current platform — currently always returns <code>undefined</code>: both
-    iOS and Android ship the vision/audio executor ops, so there is no
-    platform-level block. Whether a given call succeeds depends on the
-    <strong>loaded model</strong>: only multimodal models (e.g. Gemma 3n)
-    bundle the vision/audio executors. Pass <code>multimodal: true</code> to
-    <code>loadModel</code> for such models, or rely on filename sniffing
-    (&quot;3n&quot;/&quot;gemma3&quot;).
+    Always returned <code>undefined</code>: both iOS and Android ship the
+    vision/audio executor ops, so there is no platform-level block. Whether
+    images and audio work depends on the <strong>bundle</strong> — use
+    <code>(await inspectModel(path)).modalities</code>, which reports what it
+    actually accepts.
   </p>
 
   <h2 id="activationdatatype">ActivationDataType</h2>
@@ -409,9 +468,10 @@
   </div>
   <p>
     Activation tensor data types (memory/precision trade-off). Set via
-    <code>LLMConfig.activationDataType</code>
-    <span class="pill ios">iOS</span> — <code>'f16'</code> roughly halves
-    activation memory vs <code>'f32'</code>.
+    <code>LLMConfig.activationDataType</code> on both platforms —
+    <code>'f16'</code> roughly halves activation memory vs <code>'f32'</code>.
+    It is mainly a GPU setting: GPU backends default to <code>'f16'</code>,
+    and a type the model and backend cannot run fails the load.
   </p>
 
   <h2 id="platform-support">Platform support</h2>
@@ -420,37 +480,85 @@
       <thead><tr><th>Feature</th><th>iOS</th><th>Android</th><th>Notes</th></tr></thead>
       <tbody>
         <tr>
+          <td>LiteRT-LM engine</td>
+          <td>0.18.0</td>
+          <td>0.18.0</td>
+          <td>iOS: <code>CLiteRTLM.xcframework</code> through the C FFI. Android: the <code>litertlm-android</code> AAR.</td>
+        </tr>
+        <tr>
+          <td><code>inspectModel()</code> and the load pre-flight</td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>See <a href="models.html#know-the-model">Know the model before loading it</a>.</td>
+        </tr>
+        <tr>
+          <td>Embeddings (text, image, audio)</td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>See <a href="embeddings.html">Embeddings</a>.</td>
+        </tr>
+        <tr>
+          <td>Tool results and structured tool history</td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>Depends on the model's chat template — see <a href="inference.html#tool-calling">Tool calling</a>.</td>
+        </tr>
+        <tr>
+          <td>Typed errors with <code>nativeStatus</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>See <a href="memory.html#errors">Errors</a>.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.chatTemplate</code>, per-conversation <code>speculativeDecoding</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>—</td>
+        </tr>
+        <tr>
           <td><code>ExecuteOptions.maxOutputTokens</code> (per message)</td>
           <td><span class="yes">✓</span></td>
           <td><span class="yes">✓</span></td>
           <td>Both platforms since LiteRT-LM 0.15.</td>
         </tr>
         <tr>
-          <td><code>ExecuteOptions.visualTokenBudget</code></td>
+          <td><code>LLMConfig.maxVisionTokensPerImage</code>, <code>ExecuteOptions.visualTokenBudget</code></td>
           <td><span class="yes">✓</span></td>
-          <td><span class="no">✗</span></td>
-          <td>iOS only.</td>
+          <td><span class="yes">✓</span></td>
+          <td>On Android the SDK's budget is process-wide, so image messages that set it run one at a time.</td>
         </tr>
         <tr>
           <td><code>ExecuteOptions.suppressTokens</code></td>
           <td><span class="yes">✓</span></td>
-          <td><span class="no">✗</span></td>
-          <td>Ignored with a warning on Android — LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding aborts the process (Kotlin-mangled <code>internal</code> accessor).</td>
+          <td><span class="yes">✓</span></td>
+          <td>Android since LiteRT-LM 0.17, which fixed the JNI binding that aborted the process (<a href="https://github.com/google-ai-edge/LiteRT-LM/issues/3229">upstream issue #3229</a>).</td>
         </tr>
         <tr>
           <td><code>LLMConfig.numThreads</code></td>
           <td><span class="yes">✓</span></td>
-          <td><span class="no">✗</span></td>
-          <td>Kotlin SDK doesn't expose thread control.</td>
-        </tr>
-        <tr>
-          <td><code>LLMConfig.prefillChunkSize</code></td>
           <td><span class="yes">✓</span></td>
-          <td><span class="no">✗</span></td>
-          <td>iOS only.</td>
+          <td>Android since LiteRT-LM 0.18 (<code>Backend.CPU(threadCount)</code>).</td>
         </tr>
         <tr>
           <td><code>LLMConfig.activationDataType</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="yes">✓</span></td>
+          <td>Mainly a GPU setting.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.gpu.metalResidencySet</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>iOS 18+; ignored on older iOS and by non-GPU backends.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.singleThreadedExecution</code></td>
+          <td><span class="yes">✓</span></td>
+          <td><span class="no">✗</span></td>
+          <td>The Kotlin SDK doesn't expose it.</td>
+        </tr>
+        <tr>
+          <td><code>LLMConfig.prefillChunkSize</code></td>
           <td><span class="yes">✓</span></td>
           <td><span class="no">✗</span></td>
           <td>iOS only.</td>
@@ -475,15 +583,15 @@
         </tr>
         <tr>
           <td>GPU backend</td>
-          <td>Metal, always available</td>
+          <td>Metal</td>
           <td>OpenCL delegate</td>
-          <td>Android requires <code>libOpenCL.so</code> (varies by SoC); auto-fallback to CPU.</td>
+          <td>Android requires <code>libOpenCL.so</code> (varies by SoC); <code>getDeviceInfo().gpuAvailable</code> reports it. Auto-fallback to CPU on both.</td>
         </tr>
         <tr>
           <td>NPU backend</td>
           <td>not supported (mapped to GPU/Metal)</td>
           <td>Qualcomm Hexagon / MediaTek APU</td>
-          <td>Auto-fallback on Android.</td>
+          <td>A per-SoC NPU build runs only on its SoC. Auto-fallback to CPU on Android.</td>
         </tr>
         <tr>
           <td>Memory-pressure source</td>
@@ -513,7 +621,10 @@
       penalties (<code>repetitionPenalty</code>, <code>presencePenalty</code>,
       <code>frequencyPenalty</code>, <code>penaltyWindowSize</code>),
       n-gram bans, and <code>thinking</code> overrides work on
-      <strong>both</strong> platforms (LiteRT-LM 0.15+).
+      <strong>both</strong> platforms (LiteRT-LM 0.15+). So, as of 0.8.0, do
+      <code>suppressTokens</code>, <code>visualTokenBudget</code>,
+      <code>numThreads</code> and <code>activationDataType</code>, which
+      Android used to ignore or refuse.
     </p>
   </div>
 
@@ -521,12 +632,20 @@
   <p>
     Android GPU requires the device to ship <code>libOpenCL.so</code>, which
     varies by vendor and SoC rather than by brand — present on a Galaxy S22 /
-    Snapdragon 8 Gen 1, absent on plenty of other devices. Probe it with
-    <code>checkBackendSupport('gpu')</code> before committing to the GPU
-    backend; the engine auto-falls back to CPU either way. NPU likewise
-    auto-falls back when the hardware (Qualcomm Hexagon, MediaTek APU) is not
-    present.
+    Snapdragon 8 Gen 1, absent on plenty of other devices.
+    <code>getDeviceInfo().gpuAvailable</code> reports whether this device has
+    one, and <code>loadModel()</code> skips GPU without it when you leave
+    <code>backend</code> unset; the engine auto-falls back to CPU either way.
+    NPU likewise falls back to CPU when the hardware (Qualcomm Hexagon,
+    MediaTek APU) is not present.
   </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { getDeviceInfo } from "react-native-litert-lm";
+
+const { gpuAvailable } = getDeviceInfo();
+await llm.loadModel(path, { backend: gpuAvailable ? "gpu" : "cpu" });</code></pre>
+  </div>
 
   <h3 id="ios-large-models">iOS: models over ~2 GB</h3>
   <p>
@@ -537,7 +656,7 @@
   </p>
 
   <div class="pager">
-    <a href="inference.html"><span>Previous</span>Inference &amp; streaming</a>
+    <a href="embeddings.html"><span>Previous</span>Embeddings</a>
     <a class="next" href="memory.html"><span>Next</span>Memory &amp; errors</a>
   </div>
 </main>

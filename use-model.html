@@ -36,6 +36,7 @@
     <a href="use-model.html" class="here">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -64,11 +65,14 @@
   <p>
     <code>pathOrUrl</code> is a local file path or an HTTPS URL. When it is a
     URL, the hook downloads the model to the native cache (reporting
-    <code>downloadProgress</code>), runs the automatic pre-flight memory
-    estimate, loads the engine, and closes the underlying instance when the
-    component unmounts. Use it when a component's lifetime should own the
-    model; for background tasks or your own state management, use
-    <a href="create-llm.html">createLLM</a> directly.
+    <code>downloadProgress</code>), runs the automatic
+    <a href="models.html#load-pre-flight">bundle</a> and
+    <a href="memory.html#automatic-pre-flight">memory</a> pre-flight checks,
+    loads the engine, and closes the underlying instance when the component
+    unmounts. Use it when a component's lifetime should own the model; for
+    background tasks or your own state management, use
+    <a href="create-llm.html">createLLM</a> directly. For embedding models,
+    <a href="embeddings.html#useembedder">useEmbedder</a> does the same job.
   </p>
 
   <h2 id="usage">Usage</h2>
@@ -187,6 +191,16 @@ function Chat() {
           <td>Last load or generation error message, or <code>null</code>.</td>
         </tr>
         <tr>
+          <td><code>errorCode</code></td>
+          <td><code>LiteRTLMErrorCode | null</code></td>
+          <td>Typed code of the last load or <code>generate()</code> failure, e.g. <code>'MEMORY_ESTIMATE_EXCEEDED'</code>, <code>'MODEL_TYPE_MISMATCH'</code>, <code>'INVALID_INPUT'</code> — see <a href="memory.html#error-codes">error codes</a>. <code>null</code> when there is none, or the error was untyped. Cleared when a load starts.</td>
+        </tr>
+        <tr>
+          <td><code>modelInfo</code></td>
+          <td><code>ModelInfo | null</code></td>
+          <td>What the loaded bundle declares about itself — modalities, context limit, backends, thinking and tool support, sampler defaults (<a href="models.html#modelinfo"><code>ModelInfo</code></a>). <code>null</code> until loaded, or when the bundle's metadata could not be read.</td>
+        </tr>
+        <tr>
           <td><code>generate</code></td>
           <td><code>(prompt: string) =&gt; Promise&lt;string&gt;</code></td>
           <td>Run a text prompt and resolve with the full response. Throws if the model is not ready.</td>
@@ -259,7 +273,12 @@ function Chat() {
       <strong><code>generate()</code> before ready throws.</strong> Calling it
       while <code>isReady</code> is false throws
       <code>Error("Model not ready")</code>. On failure it sets
-      <code>error</code> and rethrows.
+      <code>error</code> and <code>errorCode</code>, and rethrows.
+    </li>
+    <li>
+      <strong>A failed load</strong> sets <code>error</code> and
+      <code>errorCode</code> instead of throwing; <code>load()</code> clears
+      both when it starts again.
     </li>
     <li>
       <strong><code>deleteModel()</code> derives the filename from the URL</strong>
@@ -268,7 +287,8 @@ function Chat() {
       and <code>downloadProgress</code>.
     </li>
     <li>
-      <strong>After each successful load</strong>, <code>memoryWarning</code>
+      <strong>After each successful load</strong>, <code>modelInfo</code> is
+      set from <code>model.getModelInfo()</code>, <code>memoryWarning</code>
       is reset, <code>memoryEstimate</code> and <code>memoryForecast</code>
       are refreshed, and the hook subscribes to OS memory-pressure warnings
       via <code>setMemoryWarningCallback</code> (silently skipped on older
@@ -304,6 +324,31 @@ function Chat() {
   &lt;Banner&gt;Device memory is critically low.&lt;/Banner&gt;
 )}</code></pre>
   </div>
+
+  <h2 id="errors-and-model-info">Error codes and bundle facts</h2>
+  <p>
+    <code>errorCode</code> lets the UI branch on what went wrong instead of
+    parsing <code>error</code>, and <code>modelInfo</code> tells it what the
+    loaded bundle can do — so the screen offers only what the model accepts:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>Chat.tsx</span></div>
+    <pre><code>const { isReady, error, errorCode, modelInfo } = useModel(modelUrl);
+
+if (errorCode === "MEMORY_ESTIMATE_EXCEEDED") return &lt;PickSmallerModel /&gt;;
+if (errorCode === "MODEL_TYPE_MISMATCH") return &lt;Text&gt;This is an embedding model.&lt;/Text&gt;;
+if (error) return &lt;Text&gt;{error}&lt;/Text&gt;;
+if (!isReady) return &lt;Spinner /&gt;;
+
+// What the bundle declared about itself
+const canSendImages = modelInfo?.modalities.vision ?? false;
+const canThink = modelInfo?.llm?.supportsThinking ?? false;</code></pre>
+  </div>
+  <p>
+    The codes are listed on <a href="memory.html#error-codes">Memory &amp;
+    errors</a>, and every <code>ModelInfo</code> field on
+    <a href="models.html#modelinfo">Models &amp; registry</a>.
+  </p>
 
   <div class="pager">
     <a href="getting-started.html"><span>Previous</span>Getting started</a>
