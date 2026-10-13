@@ -282,15 +282,15 @@ info?.llm?.supportsFunctionCalling;</code></pre>
         </tr>
         <tr>
           <td><code>getContextTokenCount(): number</code></td>
-          <td>Tokens currently in the conversation KV cache (prompt + history + generated). Returns -1 if unavailable. Exact on iOS; approximated on Android.</td>
+          <td>Tokens in the conversation KV cache (prompt + history + generated) as of the last completed message. Returns -1 if unavailable — always on Android, whose SDK doesn't expose it.</td>
         </tr>
         <tr>
           <td><code>unload(): Promise&lt;void&gt;</code></td>
-          <td>Release the loaded model and conversation, freeing all engine memory, while keeping the instance reusable.</td>
+          <td>Release the loaded model and conversation, freeing all engine memory, while keeping the instance reusable. Reports not-ready at once; resolves once the engine is freed.</td>
         </tr>
         <tr>
           <td><code>close(): void</code></td>
-          <td>Release all native resources. Call when done with the instance.</td>
+          <td>Release all native resources. Call when done with the instance. Returns at once; the engine is freed in the background.</td>
         </tr>
         <tr>
           <td><code>setMemoryWarningCallback(onWarning: (level: MemoryWarningLevel, usage: MemoryUsage) =&gt; void): void</code></td>
@@ -336,8 +336,13 @@ const saved = JSON.stringify(llm.getHistory());
 llm.resetConversation(saved);</code></pre>
   </div>
   <p>
-    It throws a typed <a href="memory.html#errors"><code>LiteRTLMError</code></a>
-    when the new conversation can't be created. A manual reset returns the
+    <code>getHistory()</code> shows the new transcript at once, and messages
+    sent afterwards run in the new conversation. A message sent before the
+    reset that is still generating or waiting to run is cancelled: its promise
+    rejects with <code>INFERENCE_CANCELLED</code>. If the new conversation
+    can't be created, a typed <a href="memory.html#errors"><code>LiteRTLMError</code></a>
+    says why: thrown by the reset on Android, and by the next message on iOS,
+    where the reset returns before the engine does the work. A manual reset returns the
     live context to the default conversation. For several chats over one engine, prefer
     <a href="#multiple-conversations">createConversation()</a>, which does
     this bookkeeping for you, per-conversation
@@ -353,6 +358,13 @@ llm.resetConversation(saved);</code></pre>
       also clears the cached model path, size, config, and conversation state.
       <code>close()</code> permanently invalidates the instance; create a new
       one with <code>createLLM()</code> afterwards.
+    </p>
+    <p>
+      Neither waits for a message still generating: both cancel it (its
+      promise rejects with <code>INFERENCE_CANCELLED</code>) and report
+      not-ready at once. <code>close()</code> returns immediately and frees
+      the engine in the background; a model loaded afterwards, on any
+      instance, waits for that, so two models never sit in memory together.
     </p>
   </div>
 
