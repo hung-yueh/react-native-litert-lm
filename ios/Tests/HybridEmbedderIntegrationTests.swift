@@ -22,11 +22,11 @@ final class HybridEmbedderIntegrationTests: XCTestCase {
     }
 
     private func text(_ s: String) -> MultimodalPart {
-        MultimodalPart(type: .text, text: s, path: nil, imageBuffer: nil, audioBuffer: nil)
+        MultimodalPart(type: .text, text: s, path: nil, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)
     }
 
     private func file(_ type: PartType, _ path: String) -> MultimodalPart {
-        MultimodalPart(type: type, text: nil, path: path, imageBuffer: nil, audioBuffer: nil)
+        MultimodalPart(type: type, text: nil, path: path, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)
     }
 
     private func options(normalize: Bool = true, outputSize: Double? = nil) -> EmbeddingOptions {
@@ -133,7 +133,7 @@ final class HybridEmbedderIntegrationTests: XCTestCase {
         XCTAssertTrue(try embedder.isReady())
 
         for part in [file(.image, "/nope.jpg"),
-                     MultimodalPart(type: .audio, text: nil, path: nil, imageBuffer: nil, audioBuffer: nil)] {
+                     MultimodalPart(type: .audio, text: nil, path: nil, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)] {
             do {
                 _ = try await embedder.embed(parts: [part], options: nil).await()
                 XCTFail("a bad media part must reject")

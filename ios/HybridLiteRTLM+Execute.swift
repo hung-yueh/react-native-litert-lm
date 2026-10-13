@@ -22,6 +22,8 @@ struct PreprocessedPart {
         case imageData(Data)
         case audioPath(String)
         case audioData(Data)
+        /// A tool's result: its name and the result as JSON.
+        case toolResult(name: String, json: String)
     }
     let kind: Kind
     let label: String
@@ -81,10 +83,37 @@ extension HybridLiteRTLM {
                     let data = buf.toData(copyIfNeeded: true)
                     preprocessed.append(PreprocessedPart(kind: .audioData(data), label: "[Audio]"))
                 }
+            case .toolresult:
+                preprocessed.append(PreprocessedPart(
+                    kind: .toolResult(name: part.name ?? "", json: part.responseJson ?? "null"), label: ""))
+            }
+        }
+
+        // A tool-result message is a 'tool' turn: results only, each naming its tool.
+        let toolResults: [(name: String, json: String)] = preprocessed.compactMap {
+            if case .toolResult(let name, let json) = $0.kind { return (name, json) }
+            return nil
+        }
+        if !toolResults.isEmpty {
+            if toolResults.count != preprocessed.count {
+                promise.reject(withError: LiteRTLMNativeError(
+                    .execute, status: "INVALID_ARGUMENT", code: "INVALID_INPUT",
+                    "A message of tool results takes only toolResult parts; send any text in the next message."))
+                return promise
+            }
+            if toolResults.contains(where: { $0.name.isEmpty }) {
+                promise.reject(withError: LiteRTLMNativeError(
+                    .execute, status: "INVALID_ARGUMENT", code: "INVALID_INPUT",
+                    "A toolResult part needs the name of the tool it answers."))
+                return promise
             }
         }
 
         let userLabel = preprocessed.map { $0.label }.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        // What this message adds to getHistory(): one user turn, or one tool turn per result.
+        let inputTurns: [Message] = toolResults.isEmpty
+            ? [Message(role: .user, content: userLabel, toolCalls: nil, toolName: nil)]
+            : toolResults.map { Message(role: .tool, content: $0.json, toolCalls: nil, toolName: $0.name) }
 
         queue.async {
             // Validate and materialize media inputs first so callers get a
@@ -119,6 +148,7 @@ extension HybridLiteRTLM {
                     conversation: conversation,
                     msgJson: msgJson,
                     userLabel: userLabel,
+                    inputTurns: inputTurns,
                     onToken: onToken,
                     promise: promise,
                     cleanup: cleanup,
@@ -129,6 +159,7 @@ extension HybridLiteRTLM {
                     conversation: conversation,
                     msgJson: msgJson,
                     userLabel: userLabel,
+                    inputTurns: inputTurns,
                     promise: promise,
                     cleanup: cleanup,
                     options: options
@@ -147,7 +178,7 @@ extension HybridLiteRTLM {
             switch part.kind {
             case .imagePath, .imageData: if !hasVisionEncoder { return "vision" }
             case .audioPath, .audioData: if !hasAudioEncoder { return "audio" }
-            case .text: continue
+            case .text, .toolResult: continue
             }
         }
         return nil
@@ -161,6 +192,15 @@ extension HybridLiteRTLM {
     }
 
     private func buildExecutePayload(_ preprocessed: [PreprocessedPart]) throws -> (json: String, tempFiles: [String]) {
+        // execute() admits tool results only as a message of their own.
+        let toolResults: [(name: String, json: String)] = preprocessed.compactMap {
+            if case .toolResult(let name, let json) = $0.kind { return (name, json) }
+            return nil
+        }
+        if !toolResults.isEmpty {
+            return (try Self.toolMessageJson(toolResults), [])
+        }
+
         struct Desc { let kind: String; let text: String?; let file: String? }
         var descs: [Desc] = []
         var temps: [String] = []
@@ -168,6 +208,8 @@ extension HybridLiteRTLM {
         do {
             for part in preprocessed {
                 switch part.kind {
+                case .toolResult:
+                    continue
                 case .text(let text):
                     descs.append(Desc(kind: "text", text: text, file: nil))
                 case .imagePath(let path):
@@ -350,6 +392,7 @@ extension HybridLiteRTLM {
         conversation: OpaquePointer,
         msgJson: String,
         userLabel: String,
+        inputTurns: [Message],
         promise: Promise<String>,
         cleanup: @escaping () -> Void,
         options: ExecuteOptions?
@@ -373,7 +416,7 @@ extension HybridLiteRTLM {
         }
 
         commitExecuteTurn(
-            userLabel: userLabel,
+            inputTurns: inputTurns,
             modelResponse: result,
             startTime: startTime,
             conversation: conversation,
@@ -386,7 +429,7 @@ extension HybridLiteRTLM {
 
 
     func commitExecuteTurn(
-        userLabel: String,
+        inputTurns: [Message],
         modelResponse: String,
         startTime: Date,
         conversation: OpaquePointer?,
@@ -406,7 +449,7 @@ extension HybridLiteRTLM {
             ttft = litert_lm_benchmark_info_get_time_to_first_token(bi)
             litert_lm_benchmark_info_delete(bi)
         }
-        let pt = Double(userLabel.count) / 4.0
+        let pt = Double(inputTurns.reduce(0) { $0 + $1.content.count }) / 4.0
         if compTok == 0.0 { compTok = Double(modelResponse.count) / 4.0 }
         lastStats = GenerationStats(
             promptTokens: pt, completionTokens: compTok,
@@ -414,8 +457,10 @@ extension HybridLiteRTLM {
             totalTime: totalTime,
             tokensPerSecond: tps > 0 ? tps : (compTok / totalTime)
         )
-        history.append(Message(role: .user, content: userLabel))
-        history.append(Message(role: .model, content: modelResponse))
+        history.append(contentsOf: inputTurns)
+        // Tool calls move out of the text into structured toolCalls.
+        let (text, calls) = Self.splitToolCalls(modelResponse)
+        history.append(Message(role: .model, content: text, toolCalls: calls.isEmpty ? nil : calls, toolName: nil))
     }
 }
 

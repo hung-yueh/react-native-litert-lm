@@ -84,4 +84,6 @@ export type {
 export { LITERT_LM_VERSION, compareVersions } from "./version";
 export { EmbeddingTask, cosineSimilarity, dotProduct, normalize, topK } from "./embeddings";
 export type { EmbeddingDocument, EmbeddingMatch } from "./embeddings";
+export { parseToolCalls, stripToolCalls, toolResultPart } from "./tools";
+export type { ToolCallRequest } from "./tools";
 export { setDeprecationWarningsEnabled } from "./deprecations";

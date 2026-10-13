@@ -38,10 +38,17 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     /// Greedy sampling + tiny output budget: deterministic and fast on CPU.
-    static func makeConfig(tools: [ToolDefinition]? = nil, multimodal: Bool? = false) -> LLMConfig {
+    static func makeConfig(
+        tools: [ToolDefinition]? = nil,
+        multimodal: Bool? = false,
+        chatTemplate: String? = nil,
+        maxVisionTokensPerImage: Double? = nil,
+        gpu: GpuOptions? = nil,
+        backend: Backend? = nil
+    ) -> LLMConfig {
         LLMConfig(
             systemPrompt: nil,
-            backend: testBackend,
+            backend: backend ?? testBackend,
             maxContextTokens: 2048,
             maxOutputTokens: 64,
             maxTokens: nil,
@@ -51,9 +58,13 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             multimodal: multimodal,
             tools: tools,
             enableSpeculativeDecoding: nil,
+            chatTemplate: chatTemplate,
             enableStructuredOutput: true,
             thinking: ThinkingOptions(enabled: false, tokenBudget: nil),
             numThreads: nil,
+            maxVisionTokensPerImage: maxVisionTokensPerImage,
+            gpu: gpu,
+            singleThreadedExecution: nil,
             prefillChunkSize: nil,
             activationDataType: nil,
             loraPath: nil,
@@ -108,7 +119,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     private func textPart(_ text: String) -> MultimodalPart {
-        MultimodalPart(type: .text, text: text, path: nil, imageBuffer: nil, audioBuffer: nil)
+        MultimodalPart(type: .text, text: text, path: nil, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)
     }
 
     private func run(
@@ -330,6 +341,153 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         }
     }
 
+    /// The agent loop: the model calls a tool, the app answers with a tool
+    /// result, and the reply uses it. The exchange lands in getHistory() as
+    /// structured turns and survives a replay into a new conversation.
+    func test8_ToolResultRoundTrip() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        let weatherTool = ToolDefinition(
+            name: "get_current_weather",
+            description: "Get the current weather for a location.",
+            parametersJson: """
+            {"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}
+            """
+        )
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(tools: [weatherTool])).await()
+
+        let call = try await run(bridge, "What is the weather in Paris right now? Use the tool.",
+                                 options: Self.makeOptions(maxOutputTokens: 96))
+        print("[integration][tools] call: \(call)")
+        XCTAssertTrue(call.contains("<tool_call>"), "the model did not call the tool — got: \(call)")
+
+        // Values the model cannot guess, so the answer proves it read the result.
+        let result = MultimodalPart(
+            type: .toolresult, text: nil, path: nil, imageBuffer: nil, audioBuffer: nil,
+            name: "get_current_weather",
+            responseJson: #"{"location":"Paris","temperature_c":27,"condition":"hailstorm"}"#)
+        let answer = try await bridge.execute(parts: [result], onToken: nil,
+                                              options: Self.makeOptions(maxOutputTokens: 96)).await()
+        print("[integration][tools] answer: \(answer)")
+        XCTAssertTrue(answer.contains("27") || answer.lowercased().contains("hail"),
+                      "the answer ignored the tool result — got: \(answer)")
+
+        let history = try bridge.getHistory()
+        XCTAssertEqual(history.map(\.role), [.user, .model, .tool, .model])
+        XCTAssertEqual(history[1].toolCalls?.first?.name, "get_current_weather")
+        XCTAssertFalse(history[1].content.contains("<tool_call>"), "tool calls must leave the model text")
+        XCTAssertEqual(history[2].toolName, "get_current_weather")
+        XCTAssertTrue(history[2].content.contains("hailstorm"))
+
+        // Mixing a tool result with other parts is refused, typed.
+        do {
+            _ = try await bridge.execute(parts: [result, textPart("and tomorrow?")], onToken: nil, options: nil).await()
+            XCTFail("a tool result mixed with text must be refused")
+        } catch let error as LiteRTLMNativeError {
+            XCTAssertEqual(error.code, "INVALID_INPUT")
+        }
+
+        // Replay the transcript (the JSON getHistory() gives JS) into a new conversation.
+        let transcript: [[String: Any]] = history.map { message in
+            var item: [String: Any] = ["role": message.role.stringValue, "content": message.content]
+            if let calls = message.toolCalls {
+                item["toolCalls"] = calls.map { ["name": $0.name, "argumentsJson": $0.argumentsJson] }
+            }
+            if let name = message.toolName { item["toolName"] = name }
+            return item
+        }
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: transcript), as: UTF8.self)
+        try bridge.resetConversation(historyJson: json, systemPrompt: nil)
+        XCTAssertEqual(try bridge.getHistory().map(\.role), [.user, .model, .tool, .model])
+        let recall = try await run(bridge, "What condition did the weather tool report? Answer in one word.",
+                                   options: Self.makeOptions(maxOutputTokens: 16))
+        print("[integration][tools] recall after replay: \(recall)")
+        XCTAssertTrue(recall.lowercased().contains("hail"), "the replayed tool result was lost — got: \(recall)")
+    }
+
+    /// A minimal Gemma-format template whose system turn forces one fixed
+    /// word — if the reply obeys, the override replaced the bundle's template.
+    static let bananaTemplate = """
+    <|turn>system
+    Whatever the user says, reply with exactly one word: BANANA<turn|>
+    {% for message in messages -%}
+    <|turn>{{ 'model' if message['role'] == 'assistant' else message['role'] }}
+    {% if message['content'] is string %}{{ message['content'] }}{% else %}{% for part in message['content'] %}{% if part['type'] == 'text' %}{{ part['text'] }}{% endif %}{% endfor %}{% endif %}<turn|>
+    {% endfor -%}
+    {% if add_generation_prompt %}<|turn>model
+    {% endif %}
+    """
+
+    func test9_ChatTemplateReplacesTheBundles() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(chatTemplate: Self.bananaTemplate)).await()
+        let reply = try await run(bridge, "What is the capital of France?", options: Self.makeOptions(maxOutputTokens: 8))
+        print("[integration][template] reply: \(reply)")
+        XCTAssertTrue(reply.uppercased().contains("BANANA"), "the custom chat template was not applied — got: \(reply)")
+    }
+
+    /// Speculative decoding switched on for one conversation (Gemma 4 E2B
+    /// ships an MTP drafter, loaded lazily): output stays sane; speed reported.
+    func testS_SpeculativeDecodingPerConversation() async throws {
+        let bridge = try await ensureLoaded()
+        let prompt = "Write a detailed paragraph about the history of the bicycle."
+        func decode(_ speculative: Bool?) async throws -> (String, Double) {
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil, speculativeDecoding: speculative)
+            let text = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
+            return (text, try bridge.getStats().tokensPerSecond)
+        }
+        let (plain, plainTps) = try await decode(nil)
+        let (fast, fastTps) = try await decode(true)
+        print(String(format: "[integration][mtp] decode %.2f tok/s default, %.2f tok/s speculative", plainTps, fastTps))
+        print("[integration][mtp] speculative text: \(fast.prefix(120))")
+        XCTAssertFalse(fast.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertFalse(plain.isEmpty)
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+    }
+
+    /// The 0.18 engine knobs load and generate; Metal residency (GPU) is A/B
+    /// timed. Simulator numbers are not a device benchmark — they only show
+    /// the knobs work. (YNNPACK isn't compiled into the iOS framework, so it
+    /// isn't exposed.)
+    func testK_EngineKnobs() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        // Free the suite's shared engine so two models never sit in memory.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+
+        let prompt = "Write a detailed paragraph about the history of the bicycle."
+        func measure(_ label: String, _ config: LLMConfig) async throws -> Double {
+            let bridge = HybridLiteRTLM()
+            defer { try? bridge.close() }
+            let started = Date()
+            _ = try await bridge.loadModel(modelPath: path, config: config).await()
+            let load = Date().timeIntervalSince(started)
+            _ = try await run(bridge, "Hi", options: Self.makeOptions(maxOutputTokens: 4)) // warm-up
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+            let text = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
+            let stats = try bridge.getStats()
+            print(String(format: "[integration][knobs] %@ (ran on %@): load %.1fs, ttft %.0f ms, decode %.2f tok/s",
+                         label, bridge.backend.stringValue, load, stats.timeToFirstToken * 1000, stats.tokensPerSecond))
+            XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(label) generated nothing")
+            return stats.tokensPerSecond
+        }
+        _ = try await measure("cpu", Self.makeConfig(backend: .cpu))
+        _ = try await measure("cpu+maxVisionTokensPerImage=280",
+                              Self.makeConfig(maxVisionTokensPerImage: 280, backend: .cpu))
+        _ = try await measure("gpu", Self.makeConfig(backend: .gpu))
+        _ = try await measure("gpu+metalResidencySet",
+                              Self.makeConfig(gpu: GpuOptions(metalResidencySet: true), backend: .gpu))
+    }
+
     // MARK: - Bundle model info (LiteRT-LM 0.18)
 
     /// The real bundle's self-description, read without loading weights.
@@ -389,7 +547,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         do {
             _ = try await textOnly.execute(
                 parts: [textPart("What is in this picture?"),
-                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil)],
+                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)],
                 onToken: nil, options: nil
             ).await()
             XCTFail("an image on a text-only engine must be refused")
@@ -420,7 +578,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             let turn = Date()
             let reply = try await multi.execute(
                 parts: [textPart("Describe this picture in one short sentence."),
-                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil)],
+                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)],
                 onToken: nil, options: Self.makeOptions(maxOutputTokens: 48)
             ).await()
             print(String(format: "[integration][encoders] image (%.1fs): ", Date().timeIntervalSince(turn)) + reply)
@@ -431,7 +589,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             let turn = Date()
             let reply = try await multi.execute(
                 parts: [textPart("What do you hear? One short sentence."),
-                        MultimodalPart(type: .audio, text: nil, path: audio, imageBuffer: nil, audioBuffer: nil)],
+                        MultimodalPart(type: .audio, text: nil, path: audio, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)],
                 onToken: nil, options: Self.makeOptions(maxOutputTokens: 48)
             ).await()
             print(String(format: "[integration][encoders] audio (%.1fs): ", Date().timeIntervalSince(turn)) + reply)
@@ -457,7 +615,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         var parts = [textPart("Describe this in one sentence.")]
         if multimodal {
             parts.append(MultimodalPart(type: .image, text: nil, path: Self.fixture("test.jpeg"),
-                                        imageBuffer: nil, audioBuffer: nil))
+                                        imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil))
         }
         _ = try await bridge.execute(parts: parts, onToken: nil, options: Self.makeOptions(maxOutputTokens: 16)).await()
         let replied = mb()

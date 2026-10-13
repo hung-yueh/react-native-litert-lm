@@ -30,8 +30,6 @@ import com.margelo.nitro.dev.litert.litertlm.Role
 import com.margelo.nitro.core.Promise
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
-import com.google.ai.edge.litertlm.ExperimentalApi
-import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.LoraConfig
 import com.google.ai.edge.litertlm.NoRepeatNgramConfig
 import com.google.ai.edge.litertlm.OpenApiTool
@@ -198,6 +196,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
+    private var chatTemplate: String? = null
+    private var numThreads: Int? = null
+    private var maxVisionTokensPerImage: Int? = null
     private var loraPath: String? = null
     private var audioLoraPath: String? = null
     private var activationDataType: ActivationDataType? = null
@@ -270,14 +271,18 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 cfg.systemPrompt?.let { systemPrompt = it }
                 tools = cfg.tools
                 enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                chatTemplate = cfg.chatTemplate
+                numThreads = cfg.numThreads?.toInt()
+                maxVisionTokensPerImage = cfg.maxVisionTokensPerImage?.toInt()
                 enableStructuredOutput = cfg.enableStructuredOutput ?: false
                 sessionThinking = cfg.thinking
                 loraPath = cfg.loraPath
                 audioLoraPath = cfg.audioLoraPath
                 // Exposed by the Kotlin SDK since LiteRT-LM 0.18.0.
                 activationDataType = cfg.activationDataType
-                // numThreads / prefillChunkSize / loraRank are iOS-only: the
-                // Kotlin SDK does not expose them (see LLMConfig docs).
+                // prefillChunkSize / loraRank / gpu.metalResidencySet /
+                // singleThreadedExecution are iOS-only: the Kotlin SDK does not
+                // expose them (see LLMConfig docs).
                 if (cfg.streamToolCalls == true) {
                     Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
                         "wired on Android yet. Completed tool calls ARE surfaced as typed " +
@@ -325,11 +330,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
                 Log.i(TAG, "Using cache directory: $cacheDirectory")
 
-                if (enableSpeculativeDecoding) {
-                    @OptIn(ExperimentalApi::class)
-                    ExperimentalFlags.enableSpeculativeDecoding = true
-                }
-
                 // The SDK's own reason for the most recent failed attempt.
                 var lastEngineError: Throwable? = null
 
@@ -350,7 +350,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             cacheDir = cacheDirectory,
                             activationDataType = activationDataType?.toSdk(),
                         )
-                        Engine(cfg).also { it.initialize() }
+                        // Process-wide SDK flags, set for this creation only.
+                        EngineFlags.forEngine(
+                            speculativeDecoding = if (enableSpeculativeDecoding) true else null,
+                            maxVisionTokensPerImage = maxVisionTokensPerImage,
+                        ) { Engine(cfg).also { it.initialize() } }
                     } catch (e: Exception) {
                         Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
                         lastEngineError = e
@@ -386,7 +390,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 var eng: Engine? = null
                 for ((index, attempt) in attempts.withIndex()) {
                     if (index == 1) Log.w(TAG, "${backend.name} engine failed — trying the CPU fallbacks")
-                    eng = tryCreateEngine(attempt.main.toSdk(), attempt.vision?.toSdk(), attempt.audio?.toSdk())
+                    eng = tryCreateEngine(attempt.main.toSdk(numThreads), attempt.vision?.toSdk(), attempt.audio?.toSdk())
                     if (eng != null) {
                         hasVisionEncoder = attempt.vision != null
                         hasAudioEncoder = attempt.audio != null
@@ -530,7 +534,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    override fun resetConversation(historyJson: String?, systemPrompt: String?) {
+    override fun resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Boolean?) {
         // Signal native inference to cancel and await the in-flight streaming
         // worker to settle before closing the conversation underneath it.
         cancelInFlightGeneration()
@@ -538,36 +542,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             history.clear()
             // Mirror the replayed transcript into the wrapper's own history so
             // getHistory() stays truthful for the restored conversation.
-            parseTranscript(historyJson).forEach { (role, content) ->
-                val nitroRole = when (role) {
-                    "model" -> Role.MODEL
-                    "system" -> Role.SYSTEM
-                    else -> Role.USER
-                }
-                history.add(Message(nitroRole, content))
-            }
+            history.addAll(parseTranscript(historyJson))
         }
         createNewConversation(
             initialMessagesJson = historyJson,
             systemPromptOverride = systemPrompt,
+            speculativeDecoding = speculativeDecoding,
         )
-    }
-
-    /** Parse a `[{role, content}]` transcript JSON into (role, content) pairs. */
-    private fun parseTranscript(historyJson: String?): List<Pair<String, String>> {
-        if (historyJson.isNullOrEmpty()) return emptyList()
-        return try {
-            val arr = org.json.JSONArray(historyJson)
-            (0 until arr.length()).mapNotNull { i ->
-                val obj = arr.optJSONObject(i) ?: return@mapNotNull null
-                val role = obj.optString("role", "user")
-                val content = obj.optString("content", "")
-                role to content
-            }
-        } catch (e: JSONException) {
-            Log.e(TAG, "resetConversation: unparseable historyJson — starting empty", e)
-            emptyList()
-        }
     }
 
     override fun isReady(): Boolean {
@@ -733,6 +714,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private fun createNewConversation(
         initialMessagesJson: String? = null,
         systemPromptOverride: String? = null,
+        speculativeDecoding: Boolean? = null,
     ) {
         ensureLoaded()
         // v0.10.2 enforces single-session: close existing conversation first
@@ -785,9 +767,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 ?.let { Contents.of(Content.Text(it)) },
             // Seed with a prior transcript (multi-conversation switching); the
             // engine re-prefills these on the next message.
-            initialMessages = parseTranscript(initialMessagesJson).map { (role, content) ->
-                if (role == "model") LiteRTMessage.model(content) else LiteRTMessage.user(content)
-            },
+            // Tool exchanges replay as model tool calls and 'tool' responses.
+            initialMessages = parseTranscript(initialMessagesJson).map { it.toSdkMessage() },
             tools = lmTools ?: emptyList(),
             // The SDK defaults to auto-running tool calls against OpenApiTool.execute()
             // (a stub here). Tool execution belongs to the JS side — surface the
@@ -804,6 +785,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             // responseFormat (structured output)
             enableResponseFormat = enableStructuredOutput,
             thinkingConfig = sessionThinking?.toSdkThinkingConfig(),
+            // Unset inherits the engine's setting; true loads the drafter lazily.
+            enableSpeculativeDecoding = speculativeDecoding,
+            chatTemplate = chatTemplate,
         )
         conversation = engine!!.createConversation(convConfig)
     }
@@ -834,7 +818,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         val type: PartType,
         val text: String?,
         val path: String?,
-        val bytes: ByteArray?
+        val bytes: ByteArray?,
+        val name: String? = null,
+        val responseJson: String? = null,
     )
 
     override fun execute(
@@ -842,10 +828,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         onToken: ((token: String, done: Boolean) -> Unit)?,
         options: ExecuteOptions?,
     ): Promise<String> {
-        // visualTokenBudget has no Kotlin SDK surface — session defaults apply.
-        if (options?.visualTokenBudget != null) {
-            Log.w(TAG, "per-message visualTokenBudget is not supported on Android — session config applies")
-        }
         // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
         val preprocessed = parts.map { part ->
             val bytes = when (part.type) {
@@ -867,11 +849,29 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 type = part.type,
                 text = part.text,
                 path = part.path,
-                bytes = bytes
+                bytes = bytes,
+                name = part.name,
+                responseJson = part.responseJson,
             )
         }
 
         return Promise.parallel {
+            // A tool-result message is a 'tool' turn: results only, each naming its tool.
+            val toolResults = preprocessed.filter { it.type == PartType.TOOLRESULT }
+            if (toolResults.isNotEmpty()) {
+                if (toolResults.size != preprocessed.size) {
+                    throw LiteRTLMNativeException(
+                        "execute", "INVALID_ARGUMENT", "INVALID_INPUT",
+                        "A message of tool results takes only toolResult parts; send any text in the next message.",
+                    )
+                }
+                if (toolResults.any { it.name.isNullOrEmpty() }) {
+                    throw LiteRTLMNativeException(
+                        "execute", "INVALID_ARGUMENT", "INVALID_INPUT",
+                        "A toolResult part needs the name of the tool it answers.",
+                    )
+                }
+            }
             ensureLoaded()
             preprocessed.firstOrNull { (it.type == PartType.IMAGE && !hasVisionEncoder) || (it.type == PartType.AUDIO && !hasAudioEncoder) }
                 ?.let { part ->
@@ -937,13 +937,22 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 userTextRepresentation += "[Audio] "
                             }
                         }
+                        PartType.TOOLRESULT -> Unit // sent as a 'tool' message below
                     }
                 }
 
                 userTextRepresentation = userTextRepresentation.trim()
-                history.add(Message(Role.USER, userTextRepresentation))
-
-                val userMsg = LiteRTMessage.user(Contents.of(contents))
+                val userMsg: LiteRTMessage
+                if (toolResults.isEmpty()) {
+                    history.add(Message(Role.USER, userTextRepresentation, null, null))
+                    userMsg = LiteRTMessage.user(Contents.of(contents))
+                } else {
+                    // One tool turn per result in getHistory()
+                    val results = toolResults.map { it.name!! to (it.responseJson ?: "null") }
+                    userMsg = toolResultMessage(results)
+                    results.forEach { (name, json) -> history.add(Message(Role.TOOL, json, null, name)) }
+                    userTextRepresentation = results.joinToString(" ") { it.second }
+                }
 
                 // v0.15: per-message constrained decoding. Schema takes precedence
                 // over regex, mirroring iOS.
@@ -984,6 +993,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 }
                 val perCallThinking = options?.thinking?.toSdkThinkingConfig()
                 val perCallMaxOutput = options?.maxOutputTokens?.toInt()
+                // The SDK's visual-token budget is process-wide: a message with
+                // images (or a budget) sends under the flag lock, so no other
+                // instance's budget applies to it.
+                val budget = options?.visualTokenBudget?.toInt()
+                val hasImages = preprocessed.any { it.type == PartType.IMAGE }
+                fun <T> withVisualBudget(send: () -> T): T =
+                    if (budget != null || hasImages) EngineFlags.forSend(budget, send) else send()
 
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
@@ -1006,16 +1022,18 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                     try {
                         try {
-                            conversation!!.sendMessageAsync(
-                                message = userMsg,
-                                callback = listener,
-                                repetitionPenaltyConfig = repetitionPenaltyConfig,
-                                noRepeatNgramConfig = noRepeatNgramConfig,
-                                suppressTokensConfig = suppressTokensConfig,
-                                maxOutputToken = perCallMaxOutput,
-                                thinkingConfig = perCallThinking,
-                                responseFormat = responseFormat,
-                            )
+                            withVisualBudget {
+                                conversation!!.sendMessageAsync(
+                                    message = userMsg,
+                                    callback = listener,
+                                    repetitionPenaltyConfig = repetitionPenaltyConfig,
+                                    noRepeatNgramConfig = noRepeatNgramConfig,
+                                    suppressTokensConfig = suppressTokensConfig,
+                                    maxOutputToken = perCallMaxOutput,
+                                    thinkingConfig = perCallThinking,
+                                    responseFormat = responseFormat,
+                                )
+                            }
                         } catch (e: Exception) {
                             Log.e(TAG, "execute streaming failed", e)
                             errorRef.set(e)
@@ -1036,15 +1054,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // ── Blocking path ─────────────────────────────────────────────────
                     val startTime = System.nanoTime()
                     val responseMsg = try {
-                        conversation!!.sendMessage(
-                            message = userMsg,
-                            repetitionPenaltyConfig = repetitionPenaltyConfig,
-                            noRepeatNgramConfig = noRepeatNgramConfig,
-                            suppressTokensConfig = suppressTokensConfig,
-                            maxOutputToken = perCallMaxOutput,
-                            thinkingConfig = perCallThinking,
-                            responseFormat = responseFormat,
-                        )
+                        withVisualBudget {
+                            conversation!!.sendMessage(
+                                message = userMsg,
+                                repetitionPenaltyConfig = repetitionPenaltyConfig,
+                                noRepeatNgramConfig = noRepeatNgramConfig,
+                                suppressTokensConfig = suppressTokensConfig,
+                                maxOutputToken = perCallMaxOutput,
+                                thinkingConfig = perCallThinking,
+                                responseFormat = responseFormat,
+                            )
+                        }
                     } catch (e: Exception) {
                         throw LiteRTLMNativeException.from("execute", "Inference failed", e)
                     }
@@ -1059,7 +1079,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // layer parses into typed events.
                     val response = textResponse + serializeToolCallMarkers(responseMsg.toolCalls)
 
-                    history.add(Message(Role.MODEL, textResponse))
+                    history.add(Message(Role.MODEL, textResponse, responseMsg.toolCalls.toNitroToolCalls(), null))
 
                     val promptTokens = userTextRepresentation.length / 4.0
                     val completionTokens = response.length / 4.0

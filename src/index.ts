@@ -22,6 +22,7 @@ export type {
   ActivationDataType,
   MemoryWarningLevel,
   ToolDefinition,
+  ToolCall,
 } from "./specs/LiteRTLM.nitro";
 
 
@@ -152,6 +153,8 @@ export const Models = {
   EMBEDDING_GEMMA_2_TEXT_270M: "embeddinggemma-2-text-270m-litert-lm",
   /** EmbeddingGemma 2 text + image + audio encoder (740M, 485 MB) — use with createEmbedder() */
   EMBEDDING_GEMMA_2_740M: "embeddinggemma-2-740m-litert-lm",
+  /** Liquid AI LFM2.5 1.2B Instruct (736 MB int4, CPU) — see {@link LFM2_5_1_2B_INSTRUCT} */
+  LFM2_5_1_2B_INSTRUCT: "LFM2.5-1.2B-Instruct",
 } as const;
 
 export type ModelId = (typeof Models)[keyof typeof Models];
@@ -303,3 +306,16 @@ export const EMBEDDING_GEMMA_2_TEXT_270M =
  */
 export const EMBEDDING_GEMMA_2_740M =
   "https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/main/embeddinggemma-2-740m.litertlm";
+
+/**
+ * Download URL for Liquid AI's LFM2.5 1.2B Instruct (736 MB, int4) — a small,
+ * fast chat model, verified on device (facts, multi-turn, system prompts,
+ * structured output). Runs on CPU: the Metal GPU engine fails for this model
+ * family on iOS; on Android, `resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct")`
+ * picks the GPU re-export where it helps. Its tool calls use LFM's own
+ * `<|tool_call_start|>` syntax, which `parseToolCalls()` doesn't read.
+ * License: LFM Open License v1.0 (not Apache) — check its commercial terms.
+ * Public — no Hugging Face account required.
+ */
+export const LFM2_5_1_2B_INSTRUCT =
+  "https://huggingface.co/litert-community/LFM2.5-1.2B-Instruct/resolve/main/LFM2.5-1.2B-Instruct_int4.litertlm";

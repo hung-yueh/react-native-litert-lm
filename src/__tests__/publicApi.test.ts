@@ -38,6 +38,10 @@ const FUNCTIONS = [
   // errors
   "isMemoryError",
   "toLiteRTLMError",
+  // tool calling
+  "parseToolCalls",
+  "stripToolCalls",
+  "toolResultPart",
   // streaming events
   "createStreamEventParser",
   // manifest resolution
@@ -82,6 +86,7 @@ describe("public API", () => {
     expect(api.GEMMA_3N_E2B_IT_INT4).toMatch(/^https:\/\//);
     expect(api.EMBEDDING_GEMMA_2_TEXT_270M).toMatch(/embeddinggemma-2-text-270m\.litertlm$/);
     expect(api.EMBEDDING_GEMMA_2_740M).toMatch(/embeddinggemma-2-740m\.litertlm$/);
+    expect(api.LFM2_5_1_2B_INSTRUCT).toMatch(/LFM2\.5-1\.2B-Instruct_int4\.litertlm$/);
     expect(api.EmbeddingTask.searchQuery("q")).toBe("task: search result | query: q");
     expect(api.EmbeddingTask.document("d")).toBe("title: none | text: d");
   });

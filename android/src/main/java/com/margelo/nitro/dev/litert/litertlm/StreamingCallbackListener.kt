@@ -47,7 +47,9 @@ internal class StreamingCallbackListener(
 
     override fun onDone() {
         val fullResponse = responseBuilder.toString()
-        history.add(Message(Role.MODEL, fullResponse))
+        // Tool calls move out of the text into structured toolCalls.
+        val (text, calls) = splitToolCallMarkers(fullResponse)
+        history.add(Message(Role.MODEL, text, calls.takeIf { it.isNotEmpty() }?.toTypedArray(), null))
 
         // Compute stats using heuristic token counts (~4 chars/token)
         val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0

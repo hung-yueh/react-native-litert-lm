@@ -202,6 +202,9 @@ private fun MultimodalPart.capture(): () -> InputData = when (type) {
     }
     PartType.IMAGE -> media(path, imageBuffer, "Image") { InputData.Image(it) }
     PartType.AUDIO -> media(path, audioBuffer, "Audio") { InputData.Audio(it) }
+    PartType.TOOLRESULT -> throw LiteRTLMNativeException(
+        "embed", "INVALID_ARGUMENT", "INVALID_INPUT", "Embeddings take text, image and audio parts only",
+    )
 }
 
 private fun media(path: String?, buffer: ArrayBuffer?, label: String, make: (ByteArray) -> InputData): () -> InputData {

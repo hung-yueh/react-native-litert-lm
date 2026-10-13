@@ -43,6 +43,12 @@ export type StreamEventCallback = (event: StreamEvent) => void;
 export interface ConversationOptions {
   /** Override the session-level `systemPrompt` for this conversation. */
   systemPrompt?: string;
+  /**
+   * Turn speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
+   * MTP) on or off for this conversation; unset follows
+   * `LLMConfig.enableSpeculativeDecoding`. `true` loads the drafter on first use.
+   */
+  speculativeDecoding?: boolean;
 }
 
 /**
@@ -389,13 +395,23 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   const savedTranscripts = new Map<string | null, Message[]>();
   let switchQueue: Promise<void> = Promise.resolve();
 
-  const switchTo = (id: string | null, systemPrompt?: string) => {
+  const switchTo = (id: string | null, options?: ConversationOptions) => {
     if (activeConversationId === id) return;
     savedTranscripts.set(activeConversationId, native.getHistory());
     const transcript = savedTranscripts.get(id) ?? [];
+    // Speculative decoding needs the bundle's drafter; without one, the engine
+    // would fail the conversation's first message.
+    let speculativeDecoding = options?.speculativeDecoding;
+    if (speculativeDecoding === true && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
+      console.warn(
+        "[react-native-litert-lm] speculativeDecoding: this bundle has no multi-token-prediction drafter — ignoring it.",
+      );
+      speculativeDecoding = undefined;
+    }
     native.resetConversation(
       transcript.length > 0 ? JSON.stringify(transcript) : undefined,
-      systemPrompt,
+      options?.systemPrompt,
+      speculativeDecoding,
     );
     activeConversationId = id;
   };
@@ -417,12 +433,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
    */
   const withConversation = <T>(
     id: string | null,
-    systemPrompt: string | undefined,
+    options: ConversationOptions | undefined,
     fn: () => Promise<T>,
   ): Promise<T> => {
     if (!conversationsInUse) return fn();
     return enqueue(() => {
-      switchTo(id, systemPrompt);
+      switchTo(id, options);
       return fn();
     });
   };
@@ -443,12 +459,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     return {
       id,
       execute: (parts, onToken, options_) =>
-        withConversation(id, options?.systemPrompt, () => {
+        withConversation(id, options, () => {
           guard();
           return runExecute(parts, onToken, options_);
         }),
       executeWithEvents: (parts, onEvent, options_) =>
-        withConversation(id, options?.systemPrompt, () => {
+        withConversation(id, options, () => {
           guard();
           return runExecuteWithEvents(parts, onEvent, options_);
         }),

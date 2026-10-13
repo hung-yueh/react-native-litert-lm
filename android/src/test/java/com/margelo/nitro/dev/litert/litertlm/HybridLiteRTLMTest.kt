@@ -192,9 +192,13 @@ class HybridLiteRTLMTest {
             multimodal = null,
             tools = null,
             enableSpeculativeDecoding = true,
+            chatTemplate = null,
             enableStructuredOutput = true,
             thinking = null,
             numThreads = null,
+            maxVisionTokensPerImage = null,
+            gpu = null,
+            singleThreadedExecution = null,
             prefillChunkSize = null,
             activationDataType = null,
             loraPath = "/lora/adapter.bin",
@@ -251,7 +255,7 @@ class HybridLiteRTLMTest {
                 repeat(20) {
                     try {
                         bridge.unload()
-                        bridge.resetConversation(null, null)
+                        bridge.resetConversation(null, null, null)
                     } catch (t: Throwable) {
                         if (t.message?.contains("No model loaded") != true) {
                             errors.add(t)

@@ -131,6 +131,10 @@ export function useModel(
   const loraRank = config?.loraRank;
   const forceLoad = config?.forceLoad;
   const thinking = config?.thinking;
+  const chatTemplate = config?.chatTemplate;
+  const maxVisionTokensPerImage = config?.maxVisionTokensPerImage;
+  const metalResidencySet = config?.gpu?.metalResidencySet;
+  const singleThreadedExecution = config?.singleThreadedExecution;
   const toolsKey = tools ? JSON.stringify(tools) : undefined;
   const thinkingKey = thinking ? JSON.stringify(thinking) : undefined;
 
@@ -161,6 +165,10 @@ export function useModel(
       ...(loraRank !== undefined && { loraRank }),
       ...(forceLoad !== undefined && { forceLoad }),
       ...(thinking !== undefined && { thinking }),
+      ...(chatTemplate !== undefined && { chatTemplate }),
+      ...(maxVisionTokensPerImage !== undefined && { maxVisionTokensPerImage }),
+      ...(metalResidencySet !== undefined && { gpu: { metalResidencySet } }),
+      ...(singleThreadedExecution !== undefined && { singleThreadedExecution }),
     }),
     // `tools`/`thinking` are tracked via their serialized keys so inline objects stay stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -187,6 +195,10 @@ export function useModel(
       loraRank,
       forceLoad,
       thinkingKey,
+      chatTemplate,
+      maxVisionTokensPerImage,
+      metalResidencySet,
+      singleThreadedExecution,
     ],
   );
 

@@ -19,6 +19,7 @@ import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.FixMethodOrder
@@ -70,6 +71,22 @@ class HybridLiteRTLMInstrumentedTest {
 
         private var bridge: HybridLiteRTLM? = null
         private var bridgeHasTools = false
+
+        /**
+         * A minimal Gemma-format template whose system turn forces one fixed
+         * word — if the reply obeys, the override replaced the bundle's
+         * template. Same as the iOS suite's.
+         */
+        val BANANA_TEMPLATE = """
+            <|turn>system
+            Whatever the user says, reply with exactly one word: BANANA<turn|>
+            {% for message in messages -%}
+            <|turn>{{ 'model' if message['role'] == 'assistant' else message['role'] }}
+            {% if message['content'] is string %}{{ message['content'] }}{% else %}{% for part in message['content'] %}{% if part['type'] == 'text' %}{{ part['text'] }}{% endif %}{% endfor %}{% endif %}<turn|>
+            {% endfor -%}
+            {% if add_generation_prompt %}<|turn>model
+            {% endif %}
+        """.trimIndent()
 
         /** `am instrument -e backend gpu` selects the GPU backend; default CPU. */
         fun testBackend(): Backend =
@@ -148,30 +165,7 @@ class HybridLiteRTLMInstrumentedTest {
         // Greedy sampling keeps generations deterministic and short on CPU.
         fresh.loadModel(
             model!!.absolutePath,
-            LLMConfig(
-                /* systemPrompt */ null,
-                /* backend */ testBackend(),
-                /* maxContextTokens */ 2048.0,
-                /* maxOutputTokens */ 64.0,
-                /* maxTokens */ null,
-                /* temperature */ 0.0,
-                /* topK */ 1.0,
-                /* topP */ 1.0,
-                /* multimodal */ false,
-                /* tools */ tools,
-                /* enableSpeculativeDecoding */ null,
-                /* enableStructuredOutput */ true,
-                /* thinking */ ThinkingOptions(false, null),
-                /* numThreads */ null,
-                /* prefillChunkSize */ null,
-                /* activationDataType */ null,
-                /* loraPath */ null,
-                /* audioLoraPath */ null,
-                /* loraRank */ null,
-                /* streamToolCalls */ null,
-                /* toolCallChannelName */ null,
-                /* forceLoad */ true,
-            ),
+            llmConfig(tools = tools, structuredOutput = true),
         )
 
         // loadModel resolves through a Promise; poll the plain isReady() flag so
@@ -190,10 +184,35 @@ class HybridLiteRTLMInstrumentedTest {
     }
 
     private fun textPart(text: String) =
-        MultimodalPart(PartType.TEXT, text, null, null, null)
+        MultimodalPart(PartType.TEXT, text, null, null, null, null, null)
+
+    /**
+     * Greedy, short-output config for these tests (named, so new LLMConfig
+     * fields don't shift it). Override what a test needs.
+     */
+    private fun llmConfig(
+        backend: Backend = testBackend(),
+        multimodal: Boolean? = false,
+        tools: Array<ToolDefinition>? = null,
+        structuredOutput: Boolean? = null,
+        activationDataType: ActivationDataType? = null,
+        chatTemplate: String? = null,
+        maxVisionTokensPerImage: Double? = null,
+        numThreads: Double? = null,
+    ) = LLMConfig(
+        systemPrompt = null, backend = backend, maxContextTokens = 2048.0, maxOutputTokens = 64.0,
+        maxTokens = null, temperature = 0.0, topK = 1.0, topP = 1.0, multimodal = multimodal,
+        tools = tools, enableSpeculativeDecoding = null, chatTemplate = chatTemplate,
+        enableStructuredOutput = structuredOutput, thinking = ThinkingOptions(false, null),
+        numThreads = numThreads, maxVisionTokensPerImage = maxVisionTokensPerImage, gpu = null,
+        singleThreadedExecution = null, prefillChunkSize = null,
+        activationDataType = activationDataType, loraPath = null, audioLoraPath = null, loraRank = null,
+        streamToolCalls = null, toolCallChannelName = null, forceLoad = true,
+    )
 
     private fun options(
         maxOutputTokens: Double? = null,
+        visualTokenBudget: Double? = null,
         responseSchema: String? = null,
         responseRegex: String? = null,
         repetitionPenalty: Double? = null,
@@ -201,7 +220,7 @@ class HybridLiteRTLMInstrumentedTest {
         suppressTokens: DoubleArray? = null,
         thinking: ThinkingOptions? = null,
     ) = ExecuteOptions(
-        maxOutputTokens, null, responseSchema, responseRegex,
+        maxOutputTokens, visualTokenBudget, responseSchema, responseRegex,
         repetitionPenalty, null, null, null,
         noRepeatNgramSize, null, suppressTokens, thinking,
     )
@@ -215,11 +234,18 @@ class HybridLiteRTLMInstrumentedTest {
         llm: HybridLiteRTLM,
         prompt: String,
         options: ExecuteOptions? = null,
+    ): Pair<String, List<String>> = generateParts(llm, arrayOf(textPart(prompt)), options)
+
+    /** [generate] for any parts (e.g. tool results). */
+    private fun generateParts(
+        llm: HybridLiteRTLM,
+        parts: Array<MultimodalPart>,
+        options: ExecuteOptions? = null,
     ): Pair<String, List<String>> {
         val tokens = mutableListOf<String>()
         val done = CountDownLatch(1)
         val sb = StringBuilder()
-        llm.execute(arrayOf(textPart(prompt)), { token, isDone ->
+        llm.execute(parts, { token, isDone ->
             tokens.add(token)
             sb.append(token)
             if (isDone) done.countDown()
@@ -251,7 +277,7 @@ class HybridLiteRTLMInstrumentedTest {
         val ttftsMs = mutableListOf<Double>()
         val rates = mutableListOf<Double>()
         for (run in 0 until 4) {
-            llm.resetConversation(null, null)
+            llm.resetConversation(null, null, null)
             var first = 0L
             var last = 0L
             var chunks = 0
@@ -285,7 +311,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test1_streamingDeliversTokensAndCompletes() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
 
         val (response, tokens) = generate(llm, "Reply with a short greeting.", options(maxOutputTokens = 32.0))
         println("[android-int] streaming response: $response")
@@ -296,7 +322,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test2_systemPromptIsHonored() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, "You must include the word AZURETURTLE in every reply.")
+        llm.resetConversation(null, "You must include the word AZURETURTLE in every reply.", null)
 
         val (response, _) = generate(llm, "Say hello.", options(maxOutputTokens = 48.0))
         println("[android-int] system-prompt response: $response")
@@ -310,7 +336,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test3_responseSchemaProducesValidJson() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
 
         val schema =
             """{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name","age"]}"""
@@ -328,7 +354,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test4_responseRegexIsEnforced() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
 
         val (response, _) = generate(
             llm,
@@ -352,7 +378,7 @@ class HybridLiteRTLMInstrumentedTest {
                 JSONObject(mapOf("role" to "model", "content" to "Understood — your lucky number is 47.")),
             )
         ).toString()
-        llm.resetConversation(transcript, null)
+        llm.resetConversation(transcript, null, null)
 
         // The wrapper's own history must mirror the replayed transcript.
         val history = llm.getHistory()
@@ -373,9 +399,9 @@ class HybridLiteRTLMInstrumentedTest {
     fun test6_perMessageMaxOutputTokensLimitsLength() {
         val llm = engine(withTools = false)
 
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
         val (long, _) = generate(llm, "Explain what the ocean is.", options(maxOutputTokens = 64.0))
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
         val (short, _) = generate(llm, "Explain what the ocean is.", options(maxOutputTokens = 8.0))
 
         println("[android-int] long (64 tok): $long")
@@ -395,7 +421,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test7_generationControlsSmoke() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
 
         val (response, _) = generate(
             llm,
@@ -429,7 +455,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test9_toolCallSurfacesAsMarker() {
         val llm = engine(withTools = true)
-        llm.resetConversation(null, null)
+        llm.resetConversation(null, null, null)
 
         val (response, tokens) = generate(
             llm,
@@ -454,6 +480,176 @@ class HybridLiteRTLMInstrumentedTest {
             "raw message JSON leaked into the token stream: $response",
             response.contains("\"tool_calls\""),
         )
+    }
+
+    /**
+     * The agent loop: the model calls a tool, the app answers with a tool
+     * result, and the reply uses it. The exchange lands in getHistory() as
+     * structured turns and survives a replay into a new conversation.
+     */
+    @Test
+    fun test9b_toolResultRoundTrip() {
+        val llm = engine(withTools = true)
+        llm.resetConversation(null, null, null)
+
+        val (call, _) = generate(
+            llm, "What is the weather in Paris right now? Use the tool.", options(maxOutputTokens = 96.0),
+        )
+        println("[android-int][tools] call: $call")
+        assertTrue("the model did not call the tool — got: $call", call.contains("<tool_call>"))
+
+        // Values the model cannot guess, so the answer proves it read the result.
+        val result = MultimodalPart(
+            PartType.TOOLRESULT, null, null, null, null, "get_current_weather",
+            """{"location":"Paris","temperature_c":27,"condition":"hailstorm"}""",
+        )
+        val (answer, _) = generateParts(llm, arrayOf(result), options(maxOutputTokens = 96.0))
+        println("[android-int][tools] answer: $answer")
+        assertTrue(
+            "the answer ignored the tool result — got: $answer",
+            answer.contains("27") || answer.lowercase().contains("hail"),
+        )
+
+        val history = llm.getHistory()
+        assertEquals(listOf(Role.USER, Role.MODEL, Role.TOOL, Role.MODEL), history.map { it.role })
+        assertEquals("get_current_weather", history[1].toolCalls?.firstOrNull()?.name)
+        assertFalse("tool calls must leave the model text", history[1].content.contains("<tool_call>"))
+        assertEquals("get_current_weather", history[2].toolName)
+        assertTrue(history[2].content.contains("hailstorm"))
+
+        // Mixing a tool result with other parts is refused, typed.
+        val refused = awaitResult(llm.execute(arrayOf(result, textPart("and tomorrow?")), null, null))
+            .exceptionOrNull()
+        assertEquals("INVALID_INPUT", (refused as LiteRTLMNativeException).code)
+
+        // Replay the transcript (the JSON getHistory() gives JS) into a new conversation.
+        val transcript = JSONArray()
+        history.forEach { message ->
+            val item = JSONObject().put("role", message.role.name.lowercase()).put("content", message.content)
+            message.toolCalls?.let { calls ->
+                item.put("toolCalls", JSONArray(calls.map { JSONObject().put("name", it.name).put("argumentsJson", it.argumentsJson) }))
+            }
+            message.toolName?.let { item.put("toolName", it) }
+            transcript.put(item)
+        }
+        llm.resetConversation(transcript.toString(), null, null)
+        assertEquals(listOf(Role.USER, Role.MODEL, Role.TOOL, Role.MODEL), llm.getHistory().map { it.role })
+        val (recall, _) = generate(
+            llm, "What condition did the weather tool report? Answer in one word.", options(maxOutputTokens = 16.0),
+        )
+        println("[android-int][tools] recall after replay: $recall")
+        assertTrue("the replayed tool result was lost — got: $recall", recall.lowercase().contains("hail"))
+    }
+
+    /** Frees the shared engine so a test's own engine never sits beside it. */
+    private fun releaseSharedEngine() {
+        bridge?.close()
+        bridge = null
+    }
+
+    @Test
+    fun test9c_chatTemplateReplacesTheBundles() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        val llm = HybridLiteRTLM()
+        try {
+            llm.loadModelBlocking(model!!.absolutePath, llmConfig(chatTemplate = BANANA_TEMPLATE))
+            val (reply, _) = generate(llm, "What is the capital of France?", options(maxOutputTokens = 8.0))
+            println("[android-int][template] reply: $reply")
+            assertTrue("the custom chat template was not applied — got: $reply", reply.uppercase().contains("BANANA"))
+        } finally {
+            llm.close()
+        }
+    }
+
+    /** numThreads reaches the CPU backend (LiteRT-LM 0.18's Backend.CPU(threadCount)); speed reported. */
+    @Test
+    fun testK_cpuThreadCount() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        fun decodeTps(threads: Double?): Double {
+            val llm = HybridLiteRTLM()
+            try {
+                llm.loadModelBlocking(model!!.absolutePath, llmConfig(backend = Backend.CPU, numThreads = threads))
+                generate(llm, "Hi", options(maxOutputTokens = 4.0)) // warm-up
+                llm.resetConversation(null, null, null)
+                val (text, _) = generate(
+                    llm, "Write a detailed paragraph about the history of the bicycle.", options(maxOutputTokens = 64.0),
+                )
+                assertTrue("generated nothing with numThreads=$threads", text.isNotBlank())
+                return llm.getStats().tokensPerSecond
+            } finally {
+                llm.close()
+            }
+        }
+        val one = decodeTps(1.0)
+        val default = decodeTps(null)
+        println("[android-int][threads] decode ${"%.2f".format(one)} tok/s on 1 thread, ${"%.2f".format(default)} tok/s default")
+    }
+
+    /** Speculative decoding on for one conversation (Gemma 4 E2B ships an MTP drafter); speed reported. */
+    @Test
+    fun testS_speculativeDecodingPerConversation() {
+        val llm = engine(withTools = false)
+        val prompt = "Write a detailed paragraph about the history of the bicycle."
+        llm.resetConversation(null, null, null)
+        val (plain, _) = generate(llm, prompt, options(maxOutputTokens = 64.0))
+        val plainTps = llm.getStats().tokensPerSecond
+        llm.resetConversation(null, null, true)
+        val (fast, _) = generate(llm, prompt, options(maxOutputTokens = 64.0))
+        val fastTps = llm.getStats().tokensPerSecond
+        println("[android-int][mtp] decode ${"%.2f".format(plainTps)} tok/s default, ${"%.2f".format(fastTps)} tok/s speculative")
+        println("[android-int][mtp] speculative text: ${fast.take(120)}")
+        assertTrue(plain.isNotBlank())
+        assertTrue(fast.isNotBlank())
+        llm.resetConversation(null, null, null)
+    }
+
+    /**
+     * Visual-token budgets: a per-image cap at load and a per-message budget,
+     * both through the SDK's process-wide flag, which must be restored after
+     * every use so no other engine or message inherits it.
+     */
+    @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+    @Test
+    fun testV_visualTokenBudgets() {
+        val model = modelFile()
+        val image = fixture("test.jpeg")
+        assumeTrue("model or test.jpeg not pushed — skipping", model != null && image != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        val llm = HybridLiteRTLM()
+        try {
+            llm.loadModelBlocking(
+                model!!.absolutePath,
+                llmConfig(backend = Backend.CPU, multimodal = true, maxVisionTokensPerImage = 280.0),
+            )
+            assertNull("the load must restore the global budget", com.google.ai.edge.litertlm.ExperimentalFlags.visualTokenBudget)
+            assumeTrue("this bundle has no vision encoder", llm.hasVisionEncoder)
+            fun describe(budget: Double?): Pair<String, Long> {
+                llm.resetConversation(null, null, null)
+                val start = System.nanoTime()
+                val (text, _) = generateParts(
+                    llm,
+                    arrayOf(textPart("Describe this picture in one sentence."), mediaPart(PartType.IMAGE, image!!)),
+                    options(maxOutputTokens = 48.0, visualTokenBudget = budget),
+                )
+                return text to (System.nanoTime() - start) / 1_000_000
+            }
+            val (small, smallMs) = describe(70.0)
+            val (capped, cappedMs) = describe(null)
+            println("[android-int][vision] budget 70: $smallMs ms — $small")
+            println("[android-int][vision] cap 280: $cappedMs ms — $capped")
+            assertTrue(small.isNotBlank())
+            assertTrue(capped.isNotBlank())
+            assertNull("a send must restore the global budget", com.google.ai.edge.litertlm.ExperimentalFlags.visualTokenBudget)
+        } finally {
+            llm.close()
+        }
     }
 
     // ── Typed failures from the real SDK (src/core/nativeError.ts decodes these) ──
@@ -517,11 +713,7 @@ class HybridLiteRTLMInstrumentedTest {
             try {
                 llm.loadModelBlocking(
                     model!!.absolutePath,
-                    LLMConfig(
-                        null, Backend.CPU, 2048.0, 64.0, null, 0.0, 1.0, 1.0, false, null, null, null,
-                        ThinkingOptions(false, null), null, null, /* activationDataType */ adt,
-                        null, null, null, null, null, true,
-                    ),
+                    llmConfig(backend = Backend.CPU, activationDataType = adt),
                 )
                 return generate(llm, "Write one sentence about rivers.", options(maxOutputTokens = 32.0)).first
             } finally {
@@ -548,7 +740,7 @@ class HybridLiteRTLMInstrumentedTest {
     }
 
     private fun mediaPart(type: PartType, file: File) =
-        MultimodalPart(type, null, file.absolutePath, null, null)
+        MultimodalPart(type, null, file.absolutePath, null, null, null, null)
 
     // ── Bundle model info + encoders (LiteRT-LM 0.18) ───────────────────────
 
@@ -592,10 +784,7 @@ class HybridLiteRTLMInstrumentedTest {
         val bundleVision = plan.vision != null
         val bundleAudio = plan.audio != null
         println("[android-int][encoders] bundle plan: vision=${plan.vision} audio=${plan.audio}")
-        fun config(multimodal: Boolean) = LLMConfig(
-            null, Backend.CPU, 2048.0, 64.0, null, 0.0, 1.0, 1.0, multimodal, null, null, null,
-            ThinkingOptions(false, null), null, null, null, null, null, null, null, null, true,
-        )
+        fun config(multimodal: Boolean) = llmConfig(backend = Backend.CPU, multimodal = multimodal)
 
         val textOnly = HybridLiteRTLM()
         try {
@@ -606,7 +795,7 @@ class HybridLiteRTLMInstrumentedTest {
             assertFalse(textOnly.hasAudioEncoder)
             val refused = awaitResult(
                 textOnly.execute(
-                    arrayOf(textPart("What is in this picture?"), MultimodalPart(PartType.IMAGE, null, "/x.jpg", null, null)),
+                    arrayOf(textPart("What is in this picture?"), MultimodalPart(PartType.IMAGE, null, "/x.jpg", null, null, null, null)),
                     null, null,
                 ),
             ).exceptionOrNull()
@@ -637,7 +826,7 @@ class HybridLiteRTLMInstrumentedTest {
             }
             val audio = fixture("test.wav")
             if (bundleAudio && audio != null) {
-                multi.resetConversation(null, null)
+                multi.resetConversation(null, null, null)
                 val turn = System.nanoTime()
                 val reply = awaitResult(
                     multi.execute(

@@ -231,6 +231,18 @@ describe("preflightLoad", () => {
     expect(() => preflightLoad(ok, undefined, { runtimeVersion: "0.18.0" })).not.toThrow();
   });
 
+  it("drops speculative decoding for a bundle without a drafter", () => {
+    const plain = normalizeModelInfo("/m/plain.litertlm", native({ hasSpeculativeDecoding: false }));
+    const pf = preflightLoad(plain, { backend: "cpu", enableSpeculativeDecoding: true });
+    expect(pf.config.enableSpeculativeDecoding).toBe(false);
+    expect(pf.notes[0]).toContain("no multi-token-prediction drafter");
+
+    const mtp = normalizeModelInfo("/m/mtp.litertlm", native({ hasSpeculativeDecoding: true }));
+    const kept = preflightLoad(mtp, { backend: "cpu", enableSpeculativeDecoding: true });
+    expect(kept.config.enableSpeculativeDecoding).toBe(true);
+    expect(kept.changed).toBe(false);
+  });
+
   it("fills the backend the bundle prefers, and only then", () => {
     const pf = preflightLoad(gemma, { temperature: 0.2 }, { device: ios });
     expect(pf.config).toEqual({ temperature: 0.2, backend: "gpu" });

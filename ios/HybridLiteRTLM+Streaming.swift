@@ -11,6 +11,7 @@ import CLiteRTLM
 
 class ExecuteStreamContext {
     let userLabel: String
+    let inputTurns: [Message]
     let startTime: Date
     let onToken: (_ token: String, _ done: Bool) -> Void
     let promise: Promise<String>
@@ -23,6 +24,7 @@ class ExecuteStreamContext {
 
     init(
         userLabel: String,
+        inputTurns: [Message],
         startTime: Date,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
@@ -30,6 +32,7 @@ class ExecuteStreamContext {
         cleanup: @escaping () -> Void
     ) {
         self.userLabel = userLabel
+        self.inputTurns = inputTurns
         self.startTime = startTime
         self.onToken = onToken
         self.promise = promise
@@ -44,6 +47,7 @@ extension HybridLiteRTLM {
         conversation: OpaquePointer,
         msgJson: String,
         userLabel: String,
+        inputTurns: [Message],
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
         cleanup: @escaping () -> Void,
@@ -59,7 +63,7 @@ extension HybridLiteRTLM {
             }
         }
         let ctx = ExecuteStreamContext(
-            userLabel: userLabel, startTime: Date(),
+            userLabel: userLabel, inputTurns: inputTurns, startTime: Date(),
             onToken: onToken, promise: promise, parent: self,
             cleanup: fullCleanup
         )
@@ -120,7 +124,7 @@ extension HybridLiteRTLM {
 
         queue.async {
             self.commitExecuteTurn(
-                userLabel: ctx.userLabel,
+                inputTurns: ctx.inputTurns,
                 modelResponse: ctx.fullResponse,
                 startTime: ctx.startTime,
                 conversation: self.conversation,

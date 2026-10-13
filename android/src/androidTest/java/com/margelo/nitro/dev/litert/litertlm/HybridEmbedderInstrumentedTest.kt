@@ -131,11 +131,11 @@ class HybridEmbedderInstrumentedTest {
             assertTrue(embedder.isReady())
 
             val missing = awaitResult(
-                embedder.embed(arrayOf(MultimodalPart(PartType.IMAGE, null, "/nope.jpg", null, null)), null),
+                embedder.embed(arrayOf(MultimodalPart(PartType.IMAGE, null, "/nope.jpg", null, null, null, null)), null),
             ).exceptionOrNull()
             assertEquals("INVALID_INPUT", (missing as LiteRTLMNativeException).code)
             val empty = awaitResult(
-                embedder.embed(arrayOf(MultimodalPart(PartType.AUDIO, null, null, null, null)), null),
+                embedder.embed(arrayOf(MultimodalPart(PartType.AUDIO, null, null, null, null, null, null)), null),
             ).exceptionOrNull()
             assertEquals("INVALID_INPUT", (empty as LiteRTLMNativeException).code)
         } finally {
@@ -143,7 +143,7 @@ class HybridEmbedderInstrumentedTest {
         }
     }
 
-    private fun textPart(text: String) = MultimodalPart(PartType.TEXT, text, null, null, null)
+    private fun textPart(text: String) = MultimodalPart(PartType.TEXT, text, null, null, null, null, null)
 
     /** Await a Nitro Promise from the test thread; returns its value or failure. */
     private fun <T> awaitResult(promise: com.margelo.nitro.core.Promise<T>): Result<T> {

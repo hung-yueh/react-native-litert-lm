@@ -349,6 +349,15 @@ export function preflightLoad(
   if (config?.multimodal === true && !info.modalities.vision && !info.modalities.audio) {
     notes.push("multimodal: true, but this bundle has no vision or audio encoder — loading text-only.");
   }
+  // Without a drafter there is nothing to speculate with: iOS skips the flag,
+  // but Android's SDK fails the whole load, so drop it up front on both.
+  if (config?.enableSpeculativeDecoding === true && info.llm && !info.llm.speculativeDecoding) {
+    resolved.enableSpeculativeDecoding = false;
+    changed = true;
+    notes.push(
+      "enableSpeculativeDecoding: this bundle has no multi-token-prediction drafter — loading without it.",
+    );
+  }
   return { config: resolved, changed, notes };
 }
 

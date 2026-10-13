@@ -13,9 +13,21 @@ import type { HybridObject } from "react-native-nitro-modules";
 export type Backend = "cpu" | "gpu" | "npu";
 
 /**
- * Message roles for conversation.
+ * Message roles for conversation. `'tool'` turns carry a tool's result back
+ * to the model (see `toolResultPart()`).
  */
-export type Role = "user" | "model" | "system";
+export type Role = "user" | "model" | "system" | "tool";
+
+/**
+ * A tool call the model made. `parseToolCalls()` turns these (or the
+ * `<tool_call>` markers in a response) into objects with parsed arguments.
+ */
+export interface ToolCall {
+  /** Name of the tool the model wants to run */
+  name: string;
+  /** The call's arguments as a JSON object; integers stay integers */
+  argumentsJson: string;
+}
 
 /**
  * Definition for a function/tool that the model can request to execute.
@@ -30,15 +42,16 @@ export interface ToolDefinition {
 }
 
 /**
- * The part type for a multimodal message content part.
+ * The part type for a multimodal message content part. A `'toolResult'`
+ * part answers a tool call; a message of tool results takes no other parts.
  */
-export type PartType = "text" | "image" | "audio";
+export type PartType = "text" | "image" | "audio" | "toolResult";
 
 /**
  * A part of a unified multimodal message payload.
  */
 export interface MultimodalPart {
-  /** The part type: 'text', 'image', or 'audio' */
+  /** The part type: 'text', 'image', 'audio' or 'toolResult' */
   type: PartType;
   /** The plain text content, if type is 'text' */
   text?: string;
@@ -51,6 +64,10 @@ export interface MultimodalPart {
   imageBuffer?: ArrayBuffer;
   /** Raw audio binary data, if type is 'audio' (zero-copy ArrayBuffer mapping) */
   audioBuffer?: ArrayBuffer;
+  /** The tool's name, if type is 'toolResult' (as the model called it) */
+  name?: string;
+  /** The tool's result as JSON, if type is 'toolResult' — build it with `toolResultPart()` */
+  responseJson?: string;
 }
 
 /**
@@ -134,15 +151,27 @@ export interface LLMConfig {
   multimodal?: boolean;
 
   /**
-   * List of tools/functions that the model can call.
+   * List of tools/functions that the model can call. Calls come back as
+   * `<tool_call>` markers in the response (`parseToolCalls()` reads them);
+   * your app runs the tool and answers with `toolResultPart()`.
    */
   tools?: ToolDefinition[];
 
   /**
    * Whether to enable speculative decoding (multi-token prediction) if supported by the model.
+   * The session default; a conversation can override it
+   * (`createConversation({ speculativeDecoding })`).
    * @default false
    */
   enableSpeculativeDecoding?: boolean;
+
+  /**
+   * A Jinja chat template that replaces the bundle's own — the fix for a
+   * community bundle whose template is missing or wrong. Start from upstream's
+   * `models/<family>/chat_template.jinja`; the engine adds the BOS token
+   * itself, so the template must not. An invalid template fails the load.
+   */
+  chatTemplate?: string;
 
   /**
    * Initialize the constraint provider (LLGuidance) so structured output can
@@ -162,10 +191,28 @@ export interface LLMConfig {
   /**
    * Number of CPU threads for text generation (CPU backend).
    * Lower values reduce peak memory bandwidth pressure at some speed cost.
-   *
-   * @remarks **iOS only** — the Android Kotlin SDK does not expose thread control.
+   * Both platforms (Android since LiteRT-LM 0.18's `Backend.CPU(threadCount)`).
    */
   numThreads?: number;
+
+  /**
+   * Cap on the visual tokens one image may use, set when the engine loads
+   * (Gemma 4: 70, 140, 280, 560 or 1120; `inspectModel()` lists a bundle's
+   * options). Lower caps cut image memory and latency;
+   * `ExecuteOptions.visualTokenBudget` picks a budget per message, up to this cap.
+   */
+  maxVisionTokensPerImage?: number;
+
+  /** GPU-backend options. */
+  gpu?: GpuOptions;
+
+  /**
+   * Run the engine on a single thread — for debugging and reproducibility,
+   * not speed.
+   *
+   * @remarks **iOS only** — the Android Kotlin SDK does not expose it.
+   */
+  singleThreadedExecution?: boolean;
 
   /**
    * Prefill chunk size (CPU backend only). Smaller chunks reduce peak
@@ -230,6 +277,19 @@ export interface LLMConfig {
  */
 export type ActivationDataType = "f32" | "f16" | "i16" | "i8";
 
+/** GPU-backend options (`LLMConfig.gpu`). */
+export interface GpuOptions {
+  /**
+   * Keep model weights resident in GPU memory with a Metal residency set
+   * (iOS 18+), so they aren't paged between calls. Ignored on older iOS and
+   * by non-GPU backends.
+   *
+   * @remarks **iOS only.**
+   * @default false
+   */
+  metalResidencySet?: boolean;
+}
+
 /**
  * Thinking/reasoning generation controls (Gemma 4 models, LiteRT-LM 0.15+).
  * Set in `LLMConfig.thinking` as the session default, or per message via
@@ -262,10 +322,10 @@ export interface ExecuteOptions {
   maxOutputTokens?: number;
 
   /**
-   * Visual token budget for this message (multimodal models).
-   * Lower values reduce memory spent encoding images.
-   *
-   * @remarks **iOS only.**
+   * Visual token budget for images in this message (Gemma 4: 70, 140, 280,
+   * 560 or 1120), up to `LLMConfig.maxVisionTokensPerImage`. Lower values
+   * reduce memory and time spent encoding images. Both platforms; on Android
+   * the SDK's budget is process-wide, so messages that set it run one at a time.
    */
   visualTokenBudget?: number;
 
@@ -354,14 +414,21 @@ export interface ExecuteOptions {
 export type MemoryWarningLevel = "moderate" | "critical";
 
 /**
- * A simple message in the conversation.
- * For multimodal, use sendMessageWithImage/sendMessageWithAudio instead.
+ * One turn of the conversation transcript (`getHistory()`). Images and audio
+ * appear as `[Image]` / `[Audio]` placeholders in `content`.
  */
 export interface Message {
   /** Role of the message sender */
   role: Role;
-  /** Text content of the message */
+  /**
+   * Text content of the message. For a `'tool'` turn, the tool's result as
+   * JSON; for a `'model'` turn that called tools, any text around the calls.
+   */
   content: string;
+  /** Tool calls the model made in this turn (`'model'` turns only) */
+  toolCalls?: ToolCall[];
+  /** The tool whose result this turn carries (`'tool'` turns only) */
+  toolName?: string;
 }
 
 /**
@@ -522,13 +589,17 @@ export interface LiteRTLM extends HybridObject<{
    * the session `systemPrompt` — the native primitive behind
    * `createConversation()` multi-conversation switching.
    *
-   * @param historyJson JSON array of `{role: 'user'|'model', content: string}`
-   *   turns to seed the new conversation with. The seeded transcript is
+   * @param historyJson JSON array of `Message` turns (the shape `getHistory()`
+   *   returns) to seed the new conversation with. Tool exchanges replay as
+   *   the model's tool calls and `'tool'` results. The seeded transcript is
    *   re-prefilled by the engine on the next message.
    * @param systemPrompt Override the session-level system prompt for the new
    *   conversation (undefined = keep the session default).
+   * @param speculativeDecoding Turn speculative decoding on or off for the new
+   *   conversation (undefined = the session default). `true` loads the
+   *   bundle's drafter on first use if the engine started without it.
    */
-  resetConversation(historyJson?: string, systemPrompt?: string): void;
+  resetConversation(historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean): void;
 
   /**
    * Check if a model is loaded and ready for inference.

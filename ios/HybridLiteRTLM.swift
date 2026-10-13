@@ -56,7 +56,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
     private var enableSpeculativeDecoding: Bool = false
+    private var chatTemplate: String?
     private var numThreads: Int?
+    private var maxVisionTokensPerImage: Int?
+    private var metalResidencySet: Bool?
+    private var singleThreadedExecution: Bool?
     private var prefillChunkSize: Int?
     private var activationDataType: ActivationDataType?
     private var loraPath: String?
@@ -101,21 +105,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return queue.sync { history }
     }
     
-    public func resetConversation(historyJson: String?, systemPrompt: String?) throws {
+    public func resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Bool? = nil) throws {
         let failure: LiteRTLMNativeError? = queue.sync {
-            history.removeAll()
             // Mirror the replayed transcript into the wrapper's own history so
             // getHistory() stays truthful for the restored conversation.
-            if let historyJson = historyJson,
-               let data = historyJson.data(using: .utf8),
-               let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                for item in items {
-                    guard let roleStr = item["role"] as? String,
-                          let content = item["content"] as? String else { continue }
-                    let role: Role = roleStr == "model" ? .model : (roleStr == "system" ? .system : .user)
-                    history.append(Message(role: role, content: content))
-                }
-            }
+            history = Self.parseTranscript(historyJson)
             lastStats = GenerationStats(
                 promptTokens: 0.0,
                 completionTokens: 0.0,
@@ -125,9 +119,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 tokensPerSecond: 0.0
             )
             guard isLoaded && engine != nil else { return nil }
+            // Replay in the engine's own message format, tool exchanges included.
             return createNewConversation(
-                initialMessagesJson: historyJson,
-                systemPromptOverride: systemPrompt
+                initialMessagesJson: Self.engineMessagesJson(history),
+                systemPromptOverride: systemPrompt,
+                speculativeDecoding: speculativeDecoding
             )
         }
         if let failure = failure { throw failure }
@@ -292,7 +288,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
                 self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
+                self.chatTemplate = config.chatTemplate
                 self.numThreads = config.numThreads.map { Int($0) }
+                self.maxVisionTokensPerImage = config.maxVisionTokensPerImage.map { Int($0) }
+                self.metalResidencySet = config.gpu?.metalResidencySet
+                self.singleThreadedExecution = config.singleThreadedExecution
                 self.prefillChunkSize = config.prefillChunkSize.map { Int($0) }
                 self.activationDataType = config.activationDataType
                 self.loraPath = config.loraPath
@@ -305,7 +305,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
+                self.chatTemplate = nil
                 self.numThreads = nil
+                self.maxVisionTokensPerImage = nil
+                self.metalResidencySet = nil
+                self.singleThreadedExecution = nil
                 self.prefillChunkSize = nil
                 self.activationDataType = nil
                 self.loraPath = nil
@@ -374,6 +378,16 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 }
                 if let chunk = self.prefillChunkSize {
                     litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk))
+                }
+                // LiteRT-LM 0.18 engine knobs; unset leaves the engine default.
+                if let tokens = self.maxVisionTokensPerImage {
+                    litert_lm_engine_settings_set_max_vision_tokens_per_image(s, Int32(tokens))
+                }
+                if let residency = self.metalResidencySet {
+                    litert_lm_engine_settings_set_gpu_enable_metal_residency_set(s, residency)
+                }
+                if let single = self.singleThreadedExecution {
+                    litert_lm_engine_settings_set_single_threaded_execution(s, single)
                 }
                 if let adt = self.activationDataType {
                     litert_lm_engine_settings_set_activation_data_type(s, adt.cValue)
@@ -556,7 +570,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     @discardableResult
     private func createNewConversation(
         initialMessagesJson: String? = nil,
-        systemPromptOverride: String? = nil
+        systemPromptOverride: String? = nil,
+        speculativeDecoding: Bool? = nil
     ) -> LiteRTLMNativeError? {
         guard let engine = self.engine else {
             return LiteRTLMNativeError(.load, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED",
@@ -603,7 +618,17 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
         }
 
+        // Per conversation: unset inherits the engine's setting; true loads the
+        // bundle's drafter lazily on first use.
+        if let speculative = speculativeDecoding {
+            litert_lm_session_config_set_enable_speculative_decoding(sessionConfig, speculative)
+        }
+
         litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
+
+        if let template = self.chatTemplate {
+            template.withCString { litert_lm_conversation_config_set_prompt_template(convConfig, $0) }
+        }
 
         if self.streamToolCalls {
             self.toolCallChannelName.withCString { channelC in

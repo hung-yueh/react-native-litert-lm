@@ -143,7 +143,9 @@ class HybridLiteRTLMTests: XCTestCase {
             text: nil,
             path: "/nonexistent/precedence_test_image.jpg",
             imageBuffer: nil,
-            audioBuffer: nil
+            audioBuffer: nil,
+            name: nil,
+            responseJson: nil
         )
         
         do {
@@ -165,7 +167,9 @@ class HybridLiteRTLMTests: XCTestCase {
             text: nil,
             path: nil,
             imageBuffer: buffer,
-            audioBuffer: nil
+            audioBuffer: nil,
+            name: nil,
+            responseJson: nil
         )
         
         let invalidPathPart = MultimodalPart(
@@ -173,7 +177,9 @@ class HybridLiteRTLMTests: XCTestCase {
             text: nil,
             path: "/nonexistent/invalid_file_cleanup_test.jpg",
             imageBuffer: nil,
-            audioBuffer: nil
+            audioBuffer: nil,
+            name: nil,
+            responseJson: nil
         )
         
         do {
@@ -268,7 +274,7 @@ class HybridLiteRTLMTests: XCTestCase {
             group.addTask {
                 for _ in 0..<20 {
                     if let promise = try? self.bridge.execute(
-                        parts: [MultimodalPart(type: .text, text: "hi", path: nil, imageBuffer: nil, audioBuffer: nil)],
+                        parts: [MultimodalPart(type: .text, text: "hi", path: nil, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)],
                         onToken: nil,
                         options: nil
                     ) {
@@ -304,7 +310,7 @@ class HybridLiteRTLMTests: XCTestCase {
 
         var streamed = ""
         let promise = try bridge.execute(
-            parts: [MultimodalPart(type: .text, text: "Reply with one short sentence.", path: nil, imageBuffer: nil, audioBuffer: nil)],
+            parts: [MultimodalPart(type: .text, text: "Reply with one short sentence.", path: nil, imageBuffer: nil, audioBuffer: nil, name: nil, responseJson: nil)],
             onToken: { token, _ in streamed += token },
             options: nil
         )
