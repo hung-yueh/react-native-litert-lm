@@ -68,10 +68,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         private const val TAG = "HybridLiteRTLM"
         private val initLock = Any()
 
-        /** Cached result of OpenCL availability probe (null = not yet checked). */
-        @Volatile
-        private var openCLAvailable: Boolean? = null
-        
         /**
          * Map a [ComponentCallbacks2] trim level to a JS-facing warning, or
          * null for events that carry no memory-pressure signal. Trim levels
@@ -86,6 +82,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
             ComponentCallbacks2.TRIM_MEMORY_MODERATE -> MemoryWarningLevel.MODERATE
             else -> null
+        }
+
+        /**
+         * 0.7's default for `multimodal` when unset (on for Gemma 3n / Gemma 3
+         * file names), now only for bundles whose metadata can't be read.
+         * Deprecated — the JS layer warns; removed in 1.0.
+         */
+        internal fun legacyMultimodalHint(modelPath: String): Boolean {
+            val name = modelPath.substringAfterLast("/").lowercase()
+            return name.contains("3n") || name.contains("gemma3")
         }
 
         /**
@@ -151,6 +157,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var loraPath: String? = null
     private var audioLoraPath: String? = null
     private var activationDataType: ActivationDataType? = null
+
+    /**
+     * Encoders the live engine was created with; execute() rejects media parts
+     * for a missing one with a typed error instead of an engine failure.
+     */
+    @Volatile
+    internal var hasVisionEncoder = false
+        private set
+    @Volatile
+    internal var hasAudioEncoder = false
+        private set
 
     /** Size of the loaded model file in bytes (0 when unloaded). */
     @Volatile
@@ -234,48 +251,31 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             }
 
             try {
-                // Early GPU hardware check: probe for OpenCL library.
-                // LiteRT-LM's GPU delegate requires OpenCL, which is absent on
-                // most Samsung/Qualcomm devices. Log a warning — fallback will
-                // handle it gracefully below.
+                // Early GPU hardware check: LiteRT-LM's GPU delegate needs an
+                // OpenCL driver, which most Samsung/Qualcomm devices lack. Only a
+                // warning — the fallback chain below handles it.
                 if (backend == Backend.GPU) {
-                    val hasOpenCL = openCLAvailable ?: run {
-                        val result = try {
-                            System.loadLibrary("OpenCL")
-                            true
-                        } catch (_: UnsatisfiedLinkError) {
-                            val paths = arrayOf(
-                                "/vendor/lib64/libOpenCL.so",
-                                "/system/vendor/lib64/libOpenCL.so",
-                                "/vendor/lib/libOpenCL.so",
-                                "/system/lib64/libOpenCL.so"
-                            )
-                            var loaded = false
-                            for (path in paths) {
-                                try {
-                                    System.load(path)
-                                    loaded = true
-                                    break
-                                } catch (_: UnsatisfiedLinkError) {}
-                            }
-                            loaded
-                        }
-                        openCLAvailable = result
-                        result
-                    }
-                    if (!hasOpenCL) {
+                    if (!GpuProbe.openCLAvailable()) {
                         Log.w(TAG, "OpenCL library not found — GPU backend will likely fail, fallback chain will attempt CPU")
                     } else {
                         Log.i(TAG, "OpenCL library found — GPU backend is available")
                     }
                 }
 
-                // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
-                // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
-                // Passing vision/audio backends to a text-only model causes
-                // vision_litert_compiled_model_executor init failures.
-                val modelFileName = modelPath.substringAfterLast("/").lowercase()
-                val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
+                // Encoders come from the bundle's own metadata (LiteRT-LM 0.18
+                // ModelInfo): with `multimodal` unset, every encoder the bundle has
+                // loads, each on the backend the bundle declares (Gemma 4 E2B: CPU
+                // for both). `multimodal: false` keeps the engine text-only. Only
+                // when the metadata is unreadable does 0.7's file-name default
+                // apply; that fallback is deprecated and goes in 1.0.
+                val plan = ModelBundle.encoderPlan(modelPath)
+                val wantEncoders = config?.multimodal ?: (plan != null || legacyMultimodalHint(modelPath))
+                // Unreadable metadata (older bundles): 0.7's choice — GPU vision, CPU audio.
+                val visionBackend = if (!wantEncoders) null else if (plan == null) Backend.GPU else plan.vision
+                val audioBackend = if (!wantEncoders) null else if (plan == null) Backend.CPU else plan.audio
+                if (config?.multimodal == true && plan != null && plan.vision == null && plan.audio == null) {
+                    Log.w(TAG, "multimodal: true, but this bundle has no vision or audio encoder — loading text-only")
+                }
 
                 // Get cache directory from application context
                 val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
@@ -296,25 +296,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     audioBackend: com.google.ai.edge.litertlm.Backend?
                 ): Engine? {
                     return try {
-                        val cfg = if (visionBackend != null && audioBackend != null) {
-                            EngineConfig(
-                                modelPath = modelPath,
-                                backend = mainBackend,
-                                visionBackend = visionBackend,
-                                audioBackend = audioBackend,
-                                maxNumTokens = maxContextTokens,
-                                cacheDir = cacheDirectory,
-                                activationDataType = activationDataType?.toSdk(),
-                            )
-                        } else {
-                            EngineConfig(
-                                modelPath = modelPath,
-                                backend = mainBackend,
-                                maxNumTokens = maxContextTokens,
-                                cacheDir = cacheDirectory,
-                                activationDataType = activationDataType?.toSdk(),
-                            )
-                        }
+                        // Each encoder independently: a vision-only bundle keeps vision.
+                        val cfg = EngineConfig(
+                            modelPath = modelPath,
+                            backend = mainBackend,
+                            visionBackend = visionBackend,
+                            audioBackend = audioBackend,
+                            maxNumTokens = maxContextTokens,
+                            cacheDir = cacheDirectory,
+                            activationDataType = activationDataType?.toSdk(),
+                        )
                         Engine(cfg).also { it.initialize() }
                     } catch (e: Exception) {
                         Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
@@ -333,49 +324,33 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     else -> com.google.ai.edge.litertlm.Backend.CPU()
                 }
 
-                val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
-                val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-
-                Log.i(TAG, "Backend config: main=$lmBackend, vision=$lmVisionBackend, audio=$lmAudioBackend, multimodal=$isMultimodal")
+                Log.i(TAG, "Backend config: main=$lmBackend, vision=${visionBackend ?: "none"}, audio=${audioBackend ?: "none"}")
 
                 if (isClosed) return@synchronized
 
-                // Attempt primary backend
-                var eng = tryCreateEngine(lmBackend, lmVisionBackend, lmAudioBackend)
+                // The requested configuration first, then progressively more
+                // conservative CPU ones — each distinct attempt tried once, and
+                // never with an encoder the caller didn't ask for or the bundle lacks.
+                val requested = Attempt(backend, visionBackend, audioBackend)
+                val attempts = listOf(
+                    requested,
+                    Attempt(Backend.CPU, visionBackend, audioBackend), // keep the encoders' backends
+                    Attempt(Backend.CPU, visionBackend?.let { Backend.CPU }, audioBackend?.let { Backend.CPU }), // all CPU
+                    Attempt(Backend.CPU, null, null), // text only
+                ).distinct()
 
-                // Fallback sequence if GPU/NPU fails to initialize (mirrors iOS behavior)
-                if (eng == null && backend != Backend.CPU) {
-                    val requestedName = if (backend == Backend.GPU) "GPU" else "NPU"
-                    Log.w(TAG, "$requestedName backend failed — trying fallback chain...")
-
-                    // Fallback 1: CPU main + GPU vision + CPU audio
-                    eng = tryCreateEngine(
-                        com.google.ai.edge.litertlm.Backend.CPU(),
-                        if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
-                        if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-                    )
-
-                    // Fallback 2: Full CPU for all modalities
-                    if (eng == null) {
-                        eng = tryCreateEngine(
-                            com.google.ai.edge.litertlm.Backend.CPU(),
-                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
-                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-                        )
-                    }
-
-                    // Fallback 3: Text-only CPU (no vision/audio executors)
-                    if (eng == null) {
-                        eng = tryCreateEngine(
-                            com.google.ai.edge.litertlm.Backend.CPU(),
-                            null,
-                            null
-                        )
-                    }
-
+                var eng: Engine? = null
+                for ((index, attempt) in attempts.withIndex()) {
+                    if (index == 1) Log.w(TAG, "${backend.name} engine failed — trying the CPU fallbacks")
+                    eng = tryCreateEngine(attempt.main.toSdk(), attempt.vision?.toSdk(), attempt.audio?.toSdk())
                     if (eng != null) {
-                        Log.w(TAG, "$requestedName backend unavailable — fell back to CPU successfully")
-                        backend = Backend.CPU
+                        hasVisionEncoder = attempt.vision != null
+                        hasAudioEncoder = attempt.audio != null
+                        if (index > 0) {
+                            Log.w(TAG, "Loaded with the fallback: $attempt")
+                            backend = Backend.CPU
+                        }
+                        break
                     }
                 }
 
@@ -726,6 +701,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 conversation = null
                 engine?.close()        // Direct call
                 engine = null
+                hasVisionEncoder = false
+                hasAudioEncoder = false
                 loadedModelPath = null
                 loadedModelSizeBytes = 0L
             } catch (e: Exception) {
@@ -893,6 +870,15 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
         return Promise.parallel {
             ensureLoaded()
+            preprocessed.firstOrNull { (it.type == PartType.IMAGE && !hasVisionEncoder) || (it.type == PartType.AUDIO && !hasAudioEncoder) }
+                ?.let { part ->
+                    val missing = if (part.type == PartType.IMAGE) "vision" else "audio"
+                    throw LiteRTLMNativeException(
+                        "execute", "FAILED_PRECONDITION", "UNSUPPORTED",
+                        "This model was loaded without its $missing encoder. Pass multimodal: true to " +
+                            "loadModel() (inspectModel() shows whether the bundle has one).",
+                    )
+                }
 
             val tempFiles = mutableListOf<java.io.File>()
 
@@ -1128,3 +1114,13 @@ internal fun serializeToolCallMarkers(
             .put("arguments", JSONObject(call.arguments))
         "<tool_call>$json</tool_call>"
     }
+
+/** One engine-creation attempt in loadModel()'s fallback chain. */
+private data class Attempt(val main: Backend, val vision: Backend?, val audio: Backend?)
+
+/** Map the Nitro Backend to a fresh LiteRT-LM SDK backend. */
+private fun Backend.toSdk(): com.google.ai.edge.litertlm.Backend = when (this) {
+    Backend.GPU -> com.google.ai.edge.litertlm.Backend.GPU()
+    Backend.NPU -> com.google.ai.edge.litertlm.Backend.NPU()
+    Backend.CPU -> com.google.ai.edge.litertlm.Backend.CPU()
+}

@@ -26,6 +26,9 @@ import {
 } from "./core/memoryEstimator";
 import { LiteRTLMError, MemoryError } from "./core/errors";
 import { toLiteRTLMError, type NativePhase } from "./core/nativeError";
+import { legacyMultimodalHint, preflightLoad, type ModelInfo } from "./core/modelInfo";
+import { warnDeprecated } from "./core/deprecations";
+import { inspectModel, tryGetDeviceInfo } from "./modelInspector";
 import {
   createStreamEventParser,
   DEFAULT_CHANNELS,
@@ -105,6 +108,12 @@ export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
     options?: ExecuteOptions,
   ) => Promise<string>;
   /**
+   * What the loaded bundle declares about itself (type, modalities, context,
+   * backends, sampler defaults…), read during `loadModel()`. Null before a
+   * load, or when the bundle's metadata could not be read.
+   */
+  getModelInfo: () => ModelInfo | null;
+  /**
    * Create a logical conversation sharing the loaded engine. Multiple
    * conversations coexist without loading the model twice; switching between
    * them replays the target's transcript (re-prefill cost on the next
@@ -153,6 +162,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   let loadedModelPath: string | undefined;
   let loadedModelFileSize = -1;
   let loadedConfig: LLMConfig | undefined;
+  let loadedModelInfo: ModelInfo | null = null;
   let lastBudgetLevel: BudgetLevel = "ok";
 
   const checkBudget = (residentBytes: number, availableBytes: number) => {
@@ -230,19 +240,53 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     config?: LLMConfig,
     onDownloadProgress?: (progress: number) => void,
   ) => {
+    if (config?.maxTokens !== undefined) {
+      warnDeprecated("LLMConfig.maxTokens", "maxContextTokens and maxOutputTokens");
+    }
     const modelPath = await ModelRegistry.resolveModel(pathOrUrl, {
       onProgress: onDownloadProgress,
     });
 
+    // Bundle pre-flight (LiteRT-LM 0.18 model info, header only): refuse the
+    // wrong model type or a bundle needing a newer runtime, pick the backend
+    // the bundle prefers when none was given, clamp the context to the
+    // bundle's maximum. A missing file fails here; unreadable metadata (older
+    // bundles) only skips this step — the engine still gets the final say.
+    let info: ModelInfo | null = null;
+    try {
+      info = await inspectModel(modelPath);
+    } catch (e) {
+      if (e instanceof LiteRTLMError && e.code === "MODEL_NOT_FOUND") throw e;
+      console.warn(
+        `[react-native-litert-lm] Could not read the metadata of ${modelPath} ` +
+          `(${e instanceof Error ? e.message : String(e)}); loading without the bundle pre-flight.`,
+      );
+    }
+    // With `multimodal` unset, native code loads the encoders the bundle
+    // declares — or, for a bundle whose metadata can't be read, falls back to
+    // 0.7's file-name default. Only that fallback is deprecated.
+    if (config?.multimodal === undefined && !info && legacyMultimodalHint(modelPath)) {
+      warnDeprecated(
+        "Enabling vision/audio from the model's file name",
+        "multimodal: true in the loadModel() config",
+      );
+    }
+    let effectiveConfig = config;
+    if (info) {
+      const preflight = preflightLoad(info, config, { device: tryGetDeviceInfo() });
+      if (preflight.changed) effectiveConfig = preflight.config;
+      for (const note of preflight.notes) console.warn(`[react-native-litert-lm] ${note}`);
+    }
+
     // Pre-flight memory check: refuse loads that would likely OOM-kill the
     // app. `forceLoad: true` opts out.
     const fileSize = ModelRegistry.getFileSizeBytes(modelPath);
-    if (fileSize >= 0 && !config?.forceLoad) {
+    if (fileSize >= 0 && !effectiveConfig?.forceLoad) {
       const usage = native.getMemoryUsage();
       const estimate = estimateMemory({
         modelFileSizeBytes: fileSize,
         availableMemoryBytes: usage.availableMemoryBytes,
-        config,
+        config: effectiveConfig,
       });
       if (estimate.verdict === "critical") {
         throw new MemoryError(
@@ -254,13 +298,14 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
     }
 
-    const result = await native.loadModel(modelPath, config).catch((e: unknown) => {
-      throw toTypedError(e, "load", { modelPath, config });
+    const result = await native.loadModel(modelPath, effectiveConfig).catch((e: unknown) => {
+      throw toTypedError(e, "load", { modelPath, config: effectiveConfig });
     });
 
     loadedModelPath = modelPath;
     loadedModelFileSize = fileSize;
-    loadedConfig = config;
+    loadedConfig = effectiveConfig;
+    loadedModelInfo = info;
     resetConversationManagerState();
 
     if (tracker) {
@@ -437,6 +482,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     loadedModelPath = undefined;
     loadedModelFileSize = -1;
     loadedConfig = undefined;
+    loadedModelInfo = null;
     resetConversationManagerState();
     recordMemorySnapshot();
   };
@@ -458,6 +504,9 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
       if (prop === "getMemoryForecast") {
         return getForecast;
+      }
+      if (prop === "getModelInfo") {
+        return () => loadedModelInfo;
       }
       if (prop === "executeWithEvents") {
         return (
@@ -504,6 +553,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
 
       if (isLegacyInferenceMethod(prop)) {
         return (...args: unknown[]) => {
+          warnDeprecated(`llm.${prop}()`, "llm.execute()");
           const route = routeLegacyInference(prop, args)!;
           const promise = withConversation(null, undefined, () =>
             runExecute(route.parts, route.onToken),

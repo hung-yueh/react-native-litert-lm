@@ -65,3 +65,20 @@ export type {
 } from "./manifestResolver";
 
 export { extractFileName, resolveModelFileName } from "./modelPath";
+
+export { recommendBackend, preflightLoad } from "./modelInfo";
+export type {
+  ModelInfo,
+  DeviceInfo,
+  NpuTarget,
+  SamplerType,
+  BackendRecommendation,
+  RecommendBackendOptions,
+  PreflightResult,
+  PreflightOptions,
+  Modality,
+  ModelType,
+  NpuBrand,
+} from "./modelInfo";
+export { LITERT_LM_VERSION, compareVersions } from "./version";
+export { setDeprecationWarningsEnabled } from "./deprecations";

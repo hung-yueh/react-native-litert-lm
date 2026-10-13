@@ -38,7 +38,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     /// Greedy sampling + tiny output budget: deterministic and fast on CPU.
-    static func makeConfig(tools: [ToolDefinition]? = nil) -> LLMConfig {
+    static func makeConfig(tools: [ToolDefinition]? = nil, multimodal: Bool? = false) -> LLMConfig {
         LLMConfig(
             systemPrompt: nil,
             backend: testBackend,
@@ -48,7 +48,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             temperature: 0.0,
             topK: 1,
             topP: 1.0,
-            multimodal: false,
+            multimodal: multimodal,
             tools: tools,
             enableSpeculativeDecoding: nil,
             enableStructuredOutput: true,
@@ -328,6 +328,141 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         } else {
             XCTFail("no complete <tool_call>…</tool_call> pair in response: \(response)")
         }
+    }
+
+    // MARK: - Bundle model info (LiteRT-LM 0.18)
+
+    /// The real bundle's self-description, read without loading weights.
+    func testA_InspectRealBundle() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        let start = Date()
+        let info = try await HybridModelInspector().inspect(modelPath: path).await()
+        let ms = Date().timeIntervalSince(start) * 1000
+        let modalities = info.modalities.map {
+            "\($0.modality.stringValue)=\($0.supported) backends=\($0.backends.map(\.stringValue)) npu=\($0.npuBrand.stringValue) soc=\($0.socName ?? "-")"
+        }
+        print("[integration][info] inspected in \(Int(ms)) ms: type=\(info.modelType.stringValue) " +
+              "ctx=\(Int(info.maxContextTokens)) dynamic=\(info.isDynamicContext) " +
+              "minRuntime=\(info.minRuntimeVersion ?? "-") thinking=\(info.supportsThinking) " +
+              "tools=\(info.supportsFunctionCalling) mtp=\(info.hasSpeculativeDecoding) " +
+              "sampler=\(Int(info.samplerType))/t\(info.samplerTemperature)/k\(Int(info.samplerTopK))/p\(info.samplerTopP) " +
+              "vision=\(Int(info.maxVisionTokenBudget)) \(info.visionSignatureSelection.map { Int($0) })")
+        modalities.forEach { print("[integration][info]   \($0)") }
+        XCTAssertEqual(info.modelType, .llm)
+        XCTAssertTrue(info.modalities.first { $0.modality == .text }?.supported ?? false)
+        XCTAssertGreaterThan(info.fileSizeBytes, 0)
+        XCTAssertLessThan(ms, 2000, "header-only inspection should be fast")
+    }
+
+    /// Repo fixtures: example/test.jpeg and example/test.wav (the simulator can
+    /// read host paths, so locate them from this source file).
+    static func fixture(_ name: String) -> String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("example").appendingPathComponent(name).path
+    }
+
+    /// Encoders are opt-in and follow the bundle: a text-only engine refuses
+    /// media with a typed error; a multimodal one wires exactly the encoders
+    /// the bundle has and answers about a real image and audio clip. Also
+    /// prints what the encoders cost (the reason they are opt-in).
+    func testM_MultimodalEncodersFollowTheBundle() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        let info = try await HybridModelInspector().inspect(modelPath: path).await()
+        let bundleVision = info.modalities.first { $0.modality == .vision }?.supported ?? false
+        let bundleAudio = info.modalities.first { $0.modality == .audio }?.supported ?? false
+        let image = Self.fixture("test.jpeg"), audio = Self.fixture("test.wav")
+
+        // Text-only engine (multimodal: false): media is refused up front.
+        let textOnly = HybridLiteRTLM()
+        var t0 = Date()
+        _ = try await textOnly.loadModel(modelPath: path, config: Self.makeConfig(multimodal: false)).await()
+        let textLoad = Date().timeIntervalSince(t0)
+        XCTAssertFalse(textOnly.hasVisionEncoder)
+        XCTAssertFalse(textOnly.hasAudioEncoder)
+        do {
+            _ = try await textOnly.execute(
+                parts: [textPart("What is in this picture?"),
+                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil)],
+                onToken: nil, options: nil
+            ).await()
+            XCTFail("an image on a text-only engine must be refused")
+        } catch let e as LiteRTLMNativeError {
+            XCTAssertEqual(e.code, "UNSUPPORTED")
+            XCTAssertTrue(e.message.contains("vision encoder"), "\(e)")
+        }
+        try textOnly.close()
+
+        // `multimodal` unset: the bundle decides (no file-name guessing).
+        let auto = HybridLiteRTLM()
+        _ = try await auto.loadModel(modelPath: path, config: Self.makeConfig(multimodal: nil)).await()
+        XCTAssertEqual(auto.hasVisionEncoder, bundleVision, "unset multimodal must follow the bundle")
+        XCTAssertEqual(auto.hasAudioEncoder, bundleAudio, "unset multimodal must follow the bundle")
+        try auto.close()
+
+        // Multimodal engine: exactly the bundle's encoders.
+        let multi = HybridLiteRTLM()
+        defer { try? multi.close() }
+        t0 = Date()
+        _ = try await multi.loadModel(modelPath: path, config: Self.makeConfig(multimodal: true)).await()
+        let multiLoad = Date().timeIntervalSince(t0)
+        XCTAssertEqual(multi.hasVisionEncoder, bundleVision)
+        XCTAssertEqual(multi.hasAudioEncoder, bundleAudio)
+        print(String(format: "[integration][encoders] load: text-only %.1fs, multimodal %.1fs", textLoad, multiLoad))
+
+        if bundleVision {
+            let turn = Date()
+            let reply = try await multi.execute(
+                parts: [textPart("Describe this picture in one short sentence."),
+                        MultimodalPart(type: .image, text: nil, path: image, imageBuffer: nil, audioBuffer: nil)],
+                onToken: nil, options: Self.makeOptions(maxOutputTokens: 48)
+            ).await()
+            print(String(format: "[integration][encoders] image (%.1fs): ", Date().timeIntervalSince(turn)) + reply)
+            XCTAssertFalse(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        if bundleAudio {
+            try multi.resetConversation(historyJson: nil, systemPrompt: nil)
+            let turn = Date()
+            let reply = try await multi.execute(
+                parts: [textPart("What do you hear? One short sentence."),
+                        MultimodalPart(type: .audio, text: nil, path: audio, imageBuffer: nil, audioBuffer: nil)],
+                onToken: nil, options: Self.makeOptions(maxOutputTokens: 48)
+            ).await()
+            print(String(format: "[integration][encoders] audio (%.1fs): ", Date().timeIntervalSince(turn)) + reply)
+            XCTAssertFalse(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    /// Resident memory of one load + one reply, for docs. Meaningful only as the
+    /// sole test in a fresh process (run once with LITERTLM_TEST_MULTIMODAL=1,
+    /// once without, via -only-testing); skipped otherwise.
+    func testR_ResidentMemoryOfOneLoad() async throws {
+        guard let path = Self.modelPath,
+              let mode = ProcessInfo.processInfo.environment["LITERTLM_TEST_RSS"] else {
+            throw XCTSkip("Set TEST_RUNNER_LITERTLM_TEST_RSS=text|multimodal and run this test alone")
+        }
+        let multimodal = mode == "multimodal"
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        let mb = { (try? bridge.getMemoryUsage().residentBytes).map { $0 / 1_048_576 } ?? -1 }
+        let before = mb()
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(multimodal: multimodal)).await()
+        let loaded = mb()
+        var parts = [textPart("Describe this in one sentence.")]
+        if multimodal {
+            parts.append(MultimodalPart(type: .image, text: nil, path: Self.fixture("test.jpeg"),
+                                        imageBuffer: nil, audioBuffer: nil))
+        }
+        _ = try await bridge.execute(parts: parts, onToken: nil, options: Self.makeOptions(maxOutputTokens: 16)).await()
+        let replied = mb()
+        print(String(format: "[integration][rss] %@: baseline %.0f MB, after load %.0f MB, after a reply %.0f MB",
+                     mode, before, loaded, replied))
     }
 
     // MARK: - Two LIVE conversations on one engine (upstream #2807)

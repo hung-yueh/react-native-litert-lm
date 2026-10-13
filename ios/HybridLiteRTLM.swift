@@ -67,6 +67,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var thinkingOptions: ThinkingOptions?
     private var toolCallChannelName: String = "tool_call"
 
+    /// Encoders the live engine was created with; execute() rejects media
+    /// parts for a missing one with a typed error instead of an engine failure.
+    private(set) var hasVisionEncoder = false
+    private(set) var hasAudioEncoder = false
+
     /// Size of the loaded model file in bytes (0 when unloaded).
     /// Read lock-free from `memorySize` (GC may query mid-load; a stale read
     /// is harmless, blocking the JS thread behind a model load is not).
@@ -310,10 +315,21 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             // Map main backend string
             let mainBackendStr = self.backend == .gpu ? "gpu" : (self.backend == .npu ? "gpu" : "cpu")
             
-            //Sniff multimodal support
-            let isMultimodal = config?.multimodal ?? (modelPath.lowercased().contains("3n") || modelPath.lowercased().contains("gemma3"))
-            let visionBackend = isMultimodal ? "gpu" : nil
-            let audioBackend = isMultimodal ? "cpu" : nil
+            // Encoders come from the bundle's own metadata (LiteRT-LM 0.18 model
+            // info): with `multimodal` unset, every encoder the bundle has loads,
+            // each on the backend the bundle declares (Gemma 4 E2B: CPU for
+            // both — ~45 MB and ~0.3 s at load; images add their memory only
+            // when sent). `multimodal: false` keeps the engine text-only. Only
+            // when the metadata is unreadable does 0.7's file-name default
+            // apply; that fallback is deprecated and goes in 1.0.
+            let plan = ModelBundle.encoderPlan(modelPath)
+            let wantEncoders = config?.multimodal ?? (plan != nil || Self.legacyMultimodalHint(modelPath))
+            // Unreadable metadata (older bundles): 0.7's choice — GPU vision, CPU audio.
+            let visionBackend = wantEncoders ? (plan == nil ? "gpu" : plan?.vision) : nil
+            let audioBackend = wantEncoders ? (plan == nil ? "cpu" : plan?.audio) : nil
+            if config?.multimodal == true, let p = plan, p.vision == nil && p.audio == nil {
+                NSLog("[LiteRTLM] multimodal: true, but this bundle has no vision or audio encoder — loading text-only")
+            }
             
             var rawEngine: OpaquePointer? = nil
             /// The engine's own reason for the most recent failed attempt.
@@ -401,30 +417,32 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 return created
             }
             
-            // Attempt primary backend configuration
-            rawEngine = createEngine(mainBackendStr, visionBackend, audioBackend)
-            
-            // Fallback sequence if GPU/NPU fails to initialize
-            if rawEngine == nil {
-                if mainBackendStr != "cpu" {
-                    NSLog("[LiteRTLM] %@ backend failed — trying fallback chain...", mainBackendStr.uppercased())
+            // The requested configuration first, then progressively more
+            // conservative CPU ones — each distinct attempt tried once, and never
+            // with an encoder the caller didn't ask for or the bundle lacks.
+            let vision = visionBackend, audio = audioBackend
+            var attempts: [(main: String, vision: String?, audio: String?)] = [(mainBackendStr, vision, audio)]
+            for fallback in [
+                ("cpu", vision, audio),                                  // keep the encoders' backends
+                ("cpu", vision == nil ? nil : "cpu", audio == nil ? nil : "cpu"), // everything on CPU
+                ("cpu", nil as String?, nil as String?),                 // text only
+            ] where !attempts.contains(where: { $0.main == fallback.0 && $0.vision == fallback.1 && $0.audio == fallback.2 }) {
+                attempts.append(fallback)
+            }
+            for (index, attempt) in attempts.enumerated() {
+                if index == 1 {
+                    NSLog("[LiteRTLM] %@ engine failed — trying the CPU fallbacks", mainBackendStr.uppercased())
                 }
-                // Fallback 1: CPU execution with GPU acceleration for heavy Vision parameters
-                rawEngine = createEngine("cpu", "gpu", "cpu")
-                
-                if rawEngine == nil {
-                    // Fallback 2: Full CPU execution for all modalities
-                    rawEngine = createEngine("cpu", "cpu", "cpu")
-                }
-                
-                if rawEngine == nil {
-                    // Fallback 3: Text-only CPU execution (skip vision executor mapping)
-                    rawEngine = createEngine("cpu", nil, nil)
-                }
-                
+                rawEngine = createEngine(attempt.main, attempt.vision, attempt.audio)
                 if rawEngine != nil {
-                    NSLog("[LiteRTLM] %@ backend unavailable — fell back to CPU successfully", mainBackendStr.uppercased())
-                    self.backend = .cpu
+                    self.hasVisionEncoder = attempt.vision != nil
+                    self.hasAudioEncoder = attempt.audio != nil
+                    if index > 0 {
+                        NSLog("[LiteRTLM] Loaded with the fallback (main %@, vision %@, audio %@)",
+                              attempt.main, attempt.vision ?? "none", attempt.audio ?? "none")
+                        self.backend = .cpu
+                    }
+                    break
                 }
             }
             
@@ -672,6 +690,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     private func closeInternal() {
         isLoaded = false
+        hasVisionEncoder = false
+        hasAudioEncoder = false
         history.removeAll()
         loadedModelPath = nil
         loadedModelSizeBytes = 0
@@ -695,6 +715,14 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
+    /// 0.7's default for `multimodal` when unset (on for Gemma 3n / Gemma 3
+    /// file names), now only for bundles whose metadata can't be read.
+    /// Deprecated — the JS layer warns; removed in 1.0.
+    static func legacyMultimodalHint(_ modelPath: String) -> Bool {
+        let name = (modelPath as NSString).lastPathComponent.lowercased()
+        return name.contains("3n") || name.contains("gemma3")
+    }
+
     // MARK: - Internal Preprocessing Helpers (for extension files)
     
     private let kControlTokens = [

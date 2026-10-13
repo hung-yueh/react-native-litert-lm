@@ -82,6 +82,12 @@ class HybridLiteRTLMInstrumentedTest {
             return dir.listFiles()?.firstOrNull { it.name.endsWith(".litertlm") }
         }
 
+        /** example/test.jpeg / test.wav, pushed next to the model; null if absent. */
+        fun fixture(name: String): File? {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            return context.getExternalFilesDir(null)?.let { File(it, name) }?.takeIf { it.exists() }
+        }
+
         @AfterClass
         @JvmStatic
         fun tearDownClass() {
@@ -525,6 +531,123 @@ class HybridLiteRTLMInstrumentedTest {
         println("[android-int][adt] i8:  $i8")
         assertFalse("FLOAT32 generation was empty", f32.isBlank())
         assumeTrue("identical output under F32 and I8 — cannot tell whether the type was applied", f32 != i8)
+    }
+
+    /** Await a Nitro Promise from a test thread; returns its value or failure. */
+    private fun <T> awaitResult(promise: com.margelo.nitro.core.Promise<T>): Result<T> {
+        val latch = CountDownLatch(1)
+        var result: Result<T>? = null
+        promise
+            .then { result = Result.success(it); latch.countDown() }
+            .catch { result = Result.failure(it); latch.countDown() }
+        assertTrue("promise did not settle", latch.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+        return result!!
+    }
+
+    private fun mediaPart(type: PartType, file: File) =
+        MultimodalPart(type, null, file.absolutePath, null, null)
+
+    // ── Bundle model info + encoders (LiteRT-LM 0.18) ───────────────────────
+
+    @Test
+    fun testI_inspectRealBundle() {
+        val model = modelFile()
+        assumeTrue("No .litertlm — skipping", model != null)
+        ensureNativeInit()
+        val start = System.nanoTime()
+        val info = ModelBundle.read(model!!.absolutePath)
+        val ms = (System.nanoTime() - start) / 1e6
+        println(
+            "[android-int][info] inspected in ${ms.toInt()} ms: type=${info.modelType} ctx=${info.maxContextTokens.toInt()} " +
+                "dynamic=${info.isDynamicContext} mtp=${info.hasSpeculativeDecoding} " +
+                "vision=${info.maxVisionTokenBudget.toInt()} ${info.visionSignatureSelection.map { it.toInt() }}",
+        )
+        info.modalities.forEach {
+            println("[android-int][info]   ${it.modality}=${it.supported} backends=${it.backends.toList()} npu=${it.npuBrand}")
+        }
+        assertEquals(ModelType.LLM, info.modelType)
+        assertTrue(info.modalities.first { it.modality == Modality.TEXT }.supported)
+        val device = DeviceFacts.current()
+        println("[android-int][info] device: ${device.model} Android ${device.osVersion} soc=${device.socModel} gpu=${device.gpuAvailable} emulator=${device.isEmulator}")
+    }
+
+    /**
+     * Encoders are opt-in and follow the bundle: a text-only engine refuses
+     * media with a typed error; a multimodal one wires exactly the bundle's
+     * encoders and answers about a real image and audio clip. Frees the
+     * suite's shared engine first.
+     */
+    @Test
+    fun testM_multimodalEncodersFollowTheBundle() {
+        val model = modelFile()
+        assumeTrue("No .litertlm — skipping", model != null)
+        bridge?.close()
+        bridge = null
+        ensureNativeInit()
+        val path = model!!.absolutePath
+        val plan = ModelBundle.encoderPlan(path)!!
+        val bundleVision = plan.vision != null
+        val bundleAudio = plan.audio != null
+        println("[android-int][encoders] bundle plan: vision=${plan.vision} audio=${plan.audio}")
+        fun config(multimodal: Boolean) = LLMConfig(
+            null, Backend.CPU, 2048.0, 64.0, null, 0.0, 1.0, 1.0, multimodal, null, null, null,
+            ThinkingOptions(false, null), null, null, null, null, null, null, null, null, true,
+        )
+
+        val textOnly = HybridLiteRTLM()
+        try {
+            var t0 = System.nanoTime()
+            textOnly.loadModelBlocking(path, config(multimodal = false))
+            println("[android-int][encoders] text-only load ${"%.1f".format((System.nanoTime() - t0) / 1e9)}s")
+            assertFalse(textOnly.hasVisionEncoder)
+            assertFalse(textOnly.hasAudioEncoder)
+            val refused = awaitResult(
+                textOnly.execute(
+                    arrayOf(textPart("What is in this picture?"), MultimodalPart(PartType.IMAGE, null, "/x.jpg", null, null)),
+                    null, null,
+                ),
+            ).exceptionOrNull()
+            assertTrue("expected a typed refusal, got $refused", refused is LiteRTLMNativeException)
+            assertEquals("UNSUPPORTED", (refused as LiteRTLMNativeException).code)
+        } finally {
+            textOnly.close()
+        }
+
+        val multi = HybridLiteRTLM()
+        try {
+            val t0 = System.nanoTime()
+            multi.loadModelBlocking(path, config(multimodal = true))
+            println("[android-int][encoders] multimodal load ${"%.1f".format((System.nanoTime() - t0) / 1e9)}s")
+            assertEquals(bundleVision, multi.hasVisionEncoder)
+            assertEquals(bundleAudio, multi.hasAudioEncoder)
+            val image = fixture("test.jpeg")
+            if (bundleVision && image != null) {
+                val turn = System.nanoTime()
+                val reply = awaitResult(
+                    multi.execute(
+                        arrayOf(textPart("Describe this picture in one short sentence."), mediaPart(PartType.IMAGE, image)),
+                        null, options(maxOutputTokens = 48.0),
+                    ),
+                ).getOrThrow()
+                println("[android-int][encoders] image (${"%.1f".format((System.nanoTime() - turn) / 1e9)}s): $reply")
+                assertFalse(reply.isBlank())
+            }
+            val audio = fixture("test.wav")
+            if (bundleAudio && audio != null) {
+                multi.resetConversation(null, null)
+                val turn = System.nanoTime()
+                val reply = awaitResult(
+                    multi.execute(
+                        arrayOf(textPart("What do you hear? One short sentence."), mediaPart(PartType.AUDIO, audio)),
+                        null, options(maxOutputTokens = 48.0),
+                    ),
+                ).getOrThrow()
+                println("[android-int][encoders] audio (${"%.1f".format((System.nanoTime() - turn) / 1e9)}s): $reply")
+                assertFalse(reply.isBlank())
+            }
+        } finally {
+            multi.close()
+        }
     }
 
     // ── Two LIVE conversations on one engine (upstream #2807) ────────────────

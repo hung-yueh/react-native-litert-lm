@@ -123,6 +123,47 @@ export const mockModelStore = {
   ),
 };
 
+/** A bundle that declares nothing: an LLM with no backend or context constraints. */
+export const mockNativeModelInfo = () => ({
+  modelType: "llm" as const,
+  fileSizeBytes: 1024,
+  maxContextTokens: 0,
+  isDynamicContext: false,
+  minRuntimeVersion: undefined as string | undefined,
+  modalities: (["text", "vision", "audio", "video"] as const).map((modality) => ({
+    modality,
+    supported: modality === "text",
+    backends: [] as ("cpu" | "gpu" | "npu")[],
+    npuBrand: "unknown" as const,
+    socName: undefined as string | undefined,
+  })),
+  supportsThinking: false,
+  supportsFunctionCalling: false,
+  hasSpeculativeDecoding: false,
+  samplerType: 0,
+  samplerTemperature: 0,
+  samplerTopK: 0,
+  samplerTopP: 0,
+  maxVisionTokenBudget: -1,
+  visionSignatureSelection: [] as number[],
+  embeddingDimension: -1,
+  embeddingSignatureSelection: [] as number[],
+});
+
+export const mockModelInspector = {
+  inspect: jest.fn(async (_modelPath: string) => mockNativeModelInfo()),
+  getDeviceInfo: jest.fn(() => ({
+    platform: "ios",
+    osVersion: "26.1",
+    model: "iPhone18,1",
+    socModel: undefined as string | undefined,
+    socManufacturer: undefined as string | undefined,
+    totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+    gpuAvailable: true,
+    isEmulator: false,
+  })),
+};
+
 export const NitroModules = {
   createHybridObject: jest.fn((name: string) => {
     if (name === "LiteRTLM") {
@@ -130,6 +171,9 @@ export const NitroModules = {
     }
     if (name === "ModelStore") {
       return mockModelStore;
+    }
+    if (name === "ModelInspector") {
+      return mockModelInspector;
     }
     throw new Error(`Mock not implemented for hybrid object: ${name}`);
   }),

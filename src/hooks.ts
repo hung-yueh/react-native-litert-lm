@@ -6,6 +6,8 @@ import type { MemoryTracker, MemoryTrackerSummary } from "./memoryTracker";
 import type { MemoryEstimate, MemoryForecast } from "./core/memoryEstimator";
 import { ModelRegistry } from "./modelRegistry";
 import { extractFileName } from "./core/modelPath";
+import type { ModelInfo } from "./core/modelInfo";
+import { LiteRTLMError, type LiteRTLMErrorCode } from "./core/errors";
 
 export interface UseModelConfig extends LLMConfig {
   autoLoad?: boolean;
@@ -30,6 +32,16 @@ export interface UseModelResult {
   isGenerating: boolean;
   downloadProgress: number;
   error: string | null;
+  /**
+   * Typed code of the last load/generate failure (null if none or untyped),
+   * e.g. `'MEMORY_ESTIMATE_EXCEEDED'`, `'MODEL_TYPE_MISMATCH'`, `'INVALID_INPUT'`.
+   */
+  errorCode: LiteRTLMErrorCode | null;
+  /**
+   * What the loaded bundle declares about itself — modalities, context limit,
+   * backends, thinking/tool support, sampler defaults (null until loaded).
+   */
+  modelInfo: ModelInfo | null;
   generate: (prompt: string) => Promise<string>;
   reset: () => void;
   /**
@@ -76,6 +88,8 @@ export function useModel(
   const [isGenerating, setIsGenerating] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<LiteRTLMErrorCode | null>(null);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [memorySummary, setMemorySummary] =
     useState<MemoryTrackerSummary | null>(null);
   const [memoryEstimate, setMemoryEstimate] = useState<MemoryEstimate | null>(
@@ -208,6 +222,7 @@ export function useModel(
   const load = useCallback(async () => {
     setIsReady(false);
     setError(null);
+    setErrorCode(null);
     setDownloadProgress(0);
 
     try {
@@ -222,7 +237,8 @@ export function useModel(
             setDownloadProgress(progress);
           },
         );
-        // Surface memory intel and subscribe to OS pressure warnings
+        // Surface bundle + memory intel and subscribe to OS pressure warnings
+        setModelInfo(modelRef.current.getModelInfo());
         setMemoryWarning(null);
         setMemoryEstimate(modelRef.current.estimateMemory());
         setMemoryForecast(modelRef.current.getMemoryForecast());
@@ -237,6 +253,7 @@ export function useModel(
       }
     } catch (e: any) {
       setError(e.message || "Failed to load model");
+      setErrorCode(e instanceof LiteRTLMError ? e.code : null);
       console.error(e);
     }
   }, [pathOrUrl, nativeConfig]);
@@ -264,6 +281,7 @@ export function useModel(
         return response;
       } catch (e: any) {
         setError(e.message || "Generation failed");
+        setErrorCode(e instanceof LiteRTLMError ? e.code : null);
         throw e;
       } finally {
         setIsGenerating(false);
@@ -294,6 +312,8 @@ export function useModel(
     isGenerating,
     downloadProgress,
     error,
+    errorCode,
+    modelInfo,
     generate,
     reset,
     deleteModel,

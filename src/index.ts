@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import type { Backend } from "./specs/LiteRTLM.nitro";
+import { warnDeprecated } from "./core/deprecations";
 import {
   manifestPlatformFor,
   resolveFromManifest as resolveFromManifestCore,
@@ -32,66 +33,12 @@ export type {
 } from "./memoryTracker";
 export { createMemoryTracker, createNativeBuffer } from "./memoryTracker";
 
-// Memory controls: pre-flight estimation, forecasting, and budgets
-export {
-  estimateMemory,
-  estimateKvCacheBytesPerToken,
-  forecastMemory,
-  evaluateBudget,
-  ESTIMATOR_CONSTANTS,
-} from "./core/memoryEstimator";
-export type {
-  MemoryEstimate,
-  MemoryEstimateInputs,
-  MemoryForecast,
-  MemoryForecastInputs,
-  MemoryBudget,
-  MemoryVerdict,
-  BudgetLevel,
-} from "./core/memoryEstimator";
-
-// Typed errors — branch on `error.code` instead of parsing messages
-export { LiteRTLMError, MemoryError, isMemoryError } from "./core/errors";
-export type { LiteRTLMErrorCode, LiteRTLMErrorOptions, MemoryErrorCode } from "./core/errors";
-export { toLiteRTLMError } from "./core/nativeError";
-export type { NativeStatus, NativeStatusName, NativePhase } from "./core/nativeError";
-
-// Typed streaming events (tool calls / thinking channels, LiteRT-LM v0.14+)
-export { createStreamEventParser, DEFAULT_CHANNELS } from "./core/streamEvents";
-export type {
-  StreamEvent,
-  StreamEventType,
-  StreamChannel,
-  StreamEventParser,
-} from "./core/streamEvents";
-
-// Manifest-driven variant/backend/channel selection from a model repo's
-// litertlm_manifest.json (issue #23). Core is react-native-free; this wrapper
-// defaults `platform` to the device OS.
-export {
-  resolutionFor,
-  resolveVariant,
-  mergeStreamChannels,
-  parseManifest,
-  fetchManifest,
-  manifestFetchStatus,
-  thinkingMarkers,
-  declaredChannels,
-} from "./core/manifestResolver";
-export type {
-  Manifest,
-  ManifestFetchError,
-  ManifestVariant,
-  ManifestCapabilities,
-  ManifestRecommendation,
-  ManifestPlatform,
-  ManifestResolution,
-  ResolveFromManifestOptions,
-  ResolveVariantOptions,
-  VariantResolution,
-  DeclaredChannel,
-  ThinkingChannel,
-} from "./core/manifestResolver";
+// Everything react-native-free — memory estimation and forecasting, typed
+// errors, stream-event parsing, manifest resolution, bundle model info,
+// versions — also importable on its own as `react-native-litert-lm/core`.
+// The two functions below that need the device (resolveFromManifest,
+// recommendBackend) shadow their core versions with device-aware defaults.
+export * from "./core";
 
 /**
  * Fetch `<repo>`'s litertlm_manifest.json from the Hugging Face Hub and pick
@@ -121,6 +68,10 @@ export function resolveFromManifest(
     platform: options.platform ?? manifestPlatformFor(Platform.OS),
   });
 }
+
+// Bundle introspection (LiteRT-LM 0.18 model info): know what a .litertlm
+// file is, what it accepts and where it runs — before loading any weights.
+export { inspectModel, recommendBackend, getDeviceInfo } from "./modelInspector";
 
 export type {
   LiteRTLMInstance,
@@ -201,6 +152,9 @@ export type ModelId = (typeof Models)[keyof typeof Models];
  * Returns 'cpu' as the safe default. GPU (Metal on iOS, GPU delegate on Android)
  * is faster but may not be available on all devices or model configurations.
  *
+ * @deprecated Use `recommendBackend(await inspectModel(path))`, which knows
+ * what the bundle supports and what this device can run. `loadModel()` already
+ * does this when `backend` is omitted.
  * @returns The recommended backend ('cpu')
  *
  * @example
@@ -210,6 +164,7 @@ export type ModelId = (typeof Models)[keyof typeof Models];
  * ```
  */
 export function getRecommendedBackend(): Backend {
+  warnDeprecated("getRecommendedBackend()", "recommendBackend(await inspectModel(path))");
   // CPU is the safe default — always available, broadly compatible.
   // GPU is faster but may fail on some models/devices.
   return "cpu";
@@ -218,6 +173,9 @@ export function getRecommendedBackend(): Backend {
 /**
  * Check if a backend configuration is supported on the current platform.
  * Returns a warning message if the configuration may have issues.
+ *
+ * @deprecated Use `recommendBackend(info)` — its `candidates`, `compatible`
+ * and `reason` account for the bundle and this device's GPU driver and SoC.
  *
  * @param backend The backend to check
  * @returns Warning message if there may be issues, undefined if OK
@@ -231,6 +189,7 @@ export function getRecommendedBackend(): Backend {
  * ```
  */
 export function checkBackendSupport(backend: Backend): string | undefined {
+  warnDeprecated("checkBackendSupport()", "recommendBackend(info).candidates");
   if (backend === "gpu") {
     if (Platform.OS === "android") {
       // LiteRT-LM GPU delegate requires OpenCL, which is unavailable
@@ -257,6 +216,9 @@ export function checkBackendSupport(backend: Backend): string | undefined {
  * Check if multimodal features (image/audio) are supported on the current platform.
  * Returns an error message if not supported, undefined if OK.
  *
+ * @deprecated Always returned undefined. Use `(await inspectModel(path)).modalities`,
+ * which reports what the bundle actually accepts.
+ *
  * Both iOS (v0.12.0 CLiteRTLM xcframework) and Android (LiteRT-LM SDK) ship the
  * vision/audio executor ops, so there is no platform-level block. Whether a
  * given call succeeds depends on the **loaded model**: only multimodal models
@@ -277,6 +239,7 @@ export function checkBackendSupport(backend: Backend): string | undefined {
  * ```
  */
 export function checkMultimodalSupport(): string | undefined {
+  warnDeprecated("checkMultimodalSupport()", "(await inspectModel(path)).modalities");
   // Supported on both platforms with a multimodal model loaded.
   return undefined;
 }

@@ -105,6 +105,15 @@ extension HybridLiteRTLM {
                 return
             }
 
+            if let missing = self.missingEncoder(for: preprocessed) {
+                cleanup()
+                promise.reject(withError: LiteRTLMNativeError(
+                    .execute, status: "FAILED_PRECONDITION", code: "UNSUPPORTED",
+                    "This model was loaded without its \(missing) encoder. Pass multimodal: true to " +
+                    "loadModel() (inspectModel() shows whether the bundle has one)."))
+                return
+            }
+
             if let onToken = onToken {
                 self.runExecuteStreaming(
                     conversation: conversation,
@@ -131,6 +140,18 @@ extension HybridLiteRTLM {
     }
 
     // MARK: - Payload / media
+
+    /// The encoder a media part needs that the live engine lacks, if any.
+    private func missingEncoder(for parts: [PreprocessedPart]) -> String? {
+        for part in parts {
+            switch part.kind {
+            case .imagePath, .imageData: if !hasVisionEncoder { return "vision" }
+            case .audioPath, .audioData: if !hasAudioEncoder { return "audio" }
+            case .text: continue
+            }
+        }
+        return nil
+    }
 
     private func validateMediaPath(_ path: String, label: String) throws {
         if !FileManager.default.fileExists(atPath: path) {

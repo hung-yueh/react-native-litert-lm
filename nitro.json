@@ -18,6 +18,10 @@
     "ModelStore": {
       "ios": { "language": "swift", "implementationClassName": "HybridModelStore" },
       "android": { "language": "kotlin", "implementationClassName": "HybridModelStore" }
+    },
+    "ModelInspector": {
+      "ios": { "language": "swift", "implementationClassName": "HybridModelInspector" },
+      "android": { "language": "kotlin", "implementationClassName": "HybridModelInspector" }
     }
   },
   "ignorePaths": ["**/node_modules"]

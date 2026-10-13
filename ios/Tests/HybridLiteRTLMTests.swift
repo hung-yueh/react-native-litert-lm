@@ -378,6 +378,47 @@ class HybridLiteRTLMTests: XCTestCase {
         }
     }
 
+    // MARK: - Bundle model info / device facts (LiteRT-LM 0.18)
+
+    func testInspectorRejectsAMissingFileAsModelNotFound() async throws {
+        do {
+            _ = try await HybridModelInspector().inspect(modelPath: "/nonexistent/x.litertlm").await()
+            XCTFail("inspecting a missing file should fail")
+        } catch {
+            assertNativeError(error, phase: .inspect, status: "NOT_FOUND", code: "MODEL_NOT_FOUND")
+        }
+    }
+
+    func testInspectorReportsTheEnginesReasonForAJunkFile() async throws {
+        let junk = NSTemporaryDirectory() + "junk_inspect.litertlm"
+        FileManager.default.createFile(atPath: junk, contents: Data(repeating: 0x42, count: 4096))
+        defer { try? FileManager.default.removeItem(atPath: junk) }
+        do {
+            _ = try await HybridModelInspector().inspect(modelPath: junk).await()
+            XCTFail("inspecting a non-bundle should fail")
+        } catch let e as LiteRTLMNativeError {
+            XCTAssertEqual(e.phase, .inspect)
+            XCTAssertNotEqual(e.status, "UNKNOWN", "engine status was not captured: \(e)")
+        }
+    }
+
+    func testDeviceInfoDescribesTheSimulator() throws {
+        let device = try HybridModelInspector().getDeviceInfo()
+        XCTAssertEqual(device.platform, "ios")
+        XCTAssertTrue(device.isEmulator)
+        XCTAssertGreaterThan(device.totalMemoryBytes, 0)
+        XCTAssertFalse(device.model.isEmpty)
+        XCTAssertNil(device.socModel)
+        print("[unit] device: \(device.model) iOS \(device.osVersion) gpu=\(device.gpuAvailable)")
+    }
+
+    func testLegacyMultimodalHintMatchesOnlyGemma3FileNames() {
+        XCTAssertTrue(HybridLiteRTLM.legacyMultimodalHint("/c/gemma-3n-E2B-it-int4.litertlm"))
+        XCTAssertTrue(HybridLiteRTLM.legacyMultimodalHint("/c/Gemma3-1B-IT.litertlm"))
+        XCTAssertFalse(HybridLiteRTLM.legacyMultimodalHint("/c/gemma-4-E2B-it.litertlm"))
+        XCTAssertFalse(HybridLiteRTLM.legacyMultimodalHint("/3n-dir/qwen.litertlm"))
+    }
+
     private func assertNativeError(
         _ error: Error, phase: NativePhase, status: String, code: String?,
         file: StaticString = #filePath, line: UInt = #line
