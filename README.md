@@ -571,8 +571,8 @@ React Native (TypeScript)
    CLiteRTLM.xcframework       litertlm-android AAR
 ```
 
-- **iOS** — native Swift calling the C FFI directly; inference, load, and unload are dispatched on a serial `dev.litert.engine` queue so generation never blocks the JSI thread (lightweight accessors like `getStats()` use a synchronous hop onto that queue). Raw pointers are freed deterministically in `deinit`/`close()`/`unload()` for zero leaks. RSS read via `mach_task_basic_info`.
-- **Android** — stateless Kotlin conforming to `HybridLiteRTLMSpec`, with Proguard keep rules and optional `libOpenCL.so` probing for the GPU delegate (with a CPU fallback chain when engine creation fails).
+- **iOS** — native Swift calling the C FFI directly; load, inference and teardown run on a serial `dev.litert.engine` queue, and nothing the JS thread calls waits on it: accessors like `getStats()` read a lock-protected snapshot, and `close()`, `unload()` and `resetConversation()` cancel a running message instead of waiting it out. Raw pointers are freed deterministically in `deinit`/`close()`/`unload()` for zero leaks. RSS read via `mach_task_basic_info`.
+- **Android** — stateless Kotlin conforming to `HybridLiteRTLMSpec`, with Proguard keep rules and optional `libOpenCL.so` probing for the GPU delegate (with a CPU fallback chain when engine creation fails). Messages generate on worker threads; a conversation is closed only once the messages running on it have returned, and `close()` frees the engine on a background thread.
 - **Embeddings** — a separate `Embedder` hybrid object with its own serial queue (iOS) or worker thread (Android), so an LLM and an embedder can run at the same time; `close()` returns at once and frees the engine after any in-flight call.
 
 ## Testing

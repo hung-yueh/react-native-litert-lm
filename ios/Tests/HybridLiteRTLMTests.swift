@@ -292,6 +292,33 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertFalse(try bridge.isReady())
     }
 
+    func testResetAndCloseUpdateStateAtOnce() throws {
+        let transcript = #"[{"role":"user","content":"hi"},{"role":"model","content":"hello"}]"#
+        try bridge.resetConversation(historyJson: transcript, systemPrompt: nil)
+        XCTAssertEqual(try bridge.getHistory().map(\.role), [.user, .model])
+        try bridge.close()
+        XCTAssertTrue(try bridge.getHistory().isEmpty)
+        XCTAssertFalse(try bridge.isReady())
+        XCTAssertEqual(try bridge.getContextTokenCount(), -1)
+    }
+
+    /// A load waits for engines closed before it was called — and only those,
+    /// so a close() queued behind a load can't deadlock it.
+    func testLoadsWaitOnlyForEarlierTeardowns() {
+        let earlier = Teardowns.begin()
+        let mark = Teardowns.mark()
+        let later = Teardowns.begin()
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            Teardowns.wait(through: mark)
+            returned.signal()
+        }
+        XCTAssertEqual(returned.wait(timeout: .now() + 0.3), .timedOut, "must wait for the earlier teardown")
+        Teardowns.end(earlier)
+        XCTAssertEqual(returned.wait(timeout: .now() + 5), .success, "must not wait for the later teardown")
+        Teardowns.end(later)
+    }
+
     // MARK: - Opt-in real inference smoke test
     //
     // Set LITERTLM_TEST_MODEL to the absolute path of a local .litertlm file

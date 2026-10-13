@@ -15,36 +15,75 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     // MARK: - Internal (for extension files)
     
-    /// Dedicated background serial queue to protect the JSI/JS thread from blocking and deadlocks (User Rule #1).
+    /// Serial queue for all engine work: load, conversation changes, and
+    /// non-streaming generation, which can hold it for seconds. Nothing the
+    /// JS thread calls waits on it — see `Snapshot`.
     let queue = DispatchQueue(label: "dev.litert.engine", qos: .userInteractive)
-    
-    /// Opaque pointer to the active conversation state.
-    var conversation: OpaquePointer?
-    
-    /// Conversation history.
-    var history: [Message] = []
-    
-    /// Latest inference generation statistics.
-    var lastStats = GenerationStats(
-        promptTokens: 0.0,
-        completionTokens: 0.0,
-        totalTokens: 0.0,
-        timeToFirstToken: 0.0,
-        totalTime: 0.0,
-        tokensPerSecond: 0.0
-    )
-    
+
+    /// Opaque pointer to the active conversation state. Used on `queue`, and
+    /// written there under `conversationLock` so cancelGeneration() can reach
+    /// it from any thread.
+    private(set) var conversation: OpaquePointer?
+    private let conversationLock = NSLock()
+
+    /// Why the last conversation change failed, reported by the next execute()
+    /// (resetConversation() returns before the engine does the work). `queue` only.
+    var conversationFailure: LiteRTLMNativeError?
+
     var loadedModelPath: String?
     let modelStore = HybridModelStore()
-    
+
+    // MARK: - State the JS thread reads
+
+    /// What the JS thread sees. Reading it never waits for engine work on
+    /// `queue`; work on `queue` keeps it current, and close(), unload(),
+    /// loadModel() and resetConversation() update it the moment they're called.
+    struct Snapshot {
+        var isLoaded = false
+        var history: [Message] = []
+        var stats = GenerationStats.zero
+        /// Tokens in the context after the last completed turn; -1 when unknown.
+        var contextTokens: Double = -1
+        var modelSizeBytes = 0
+        /// Moves whenever the conversation is replaced (reset, close, unload,
+        /// load). A turn that started under an older epoch keeps its result
+        /// out of the transcript, and one that hadn't started yet is cancelled.
+        var epoch = 0
+        /// Moves on load, close and unload only, so a load finishing after a
+        /// close() doesn't report itself ready.
+        var lifecycle = 0
+        /// Streams generating on the engine's own thread.
+        var streamsInFlight = 0
+        var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Void)?
+        var memoryPressureSource: DispatchSourceMemoryPressure?
+    }
+    private let snapshotLock = NSLock()
+    private var snapshot = Snapshot()
+
+    /// Read or update the snapshot. Keep the body short: it runs under a lock
+    /// the JS thread takes.
+    @discardableResult
+    func withSnapshot<T>(_ body: (inout Snapshot) -> T) -> T {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return body(&snapshot)
+    }
+
+    /// Streams in flight, so work on `queue` can wait for them to end before
+    /// it deletes their conversation.
+    let streams = DispatchGroup()
+
     // MARK: - Private state
-    
-    /// Opaque pointer to the LiteRT LM C Engine.
+
+    /// Opaque pointer to the LiteRT LM C Engine. Written on `queue` under
+    /// `engineLock`, which countTokens() holds while it uses the engine.
     private var engine: OpaquePointer?
-    
-    /// Thread-safe status flag.
-    private var isLoaded = false
-    
+    private let engineLock = NSLock()
+
+    /// Memory-pressure events run here, so they arrive even while `queue` is
+    /// busy with a load or a generation.
+    private let memoryQueue = DispatchQueue(label: "dev.litert.engine.memory", qos: .utility)
+
     // Default configuration variables
     /// Readable by tests: a failed GPU/NPU init falls back to CPU and updates this.
     private(set) var backend: Backend = .cpu
@@ -76,75 +115,73 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private(set) var hasVisionEncoder = false
     private(set) var hasAudioEncoder = false
 
-    /// Size of the loaded model file in bytes (0 when unloaded).
-    /// Read lock-free from `memorySize` (GC may query mid-load; a stale read
-    /// is harmless, blocking the JS thread behind a model load is not).
-    private var loadedModelSizeBytes: Int = 0
-
-    /// OS memory-pressure listener (DISPATCH_SOURCE_TYPE_MEMORYPRESSURE).
-    private var memoryPressureSource: DispatchSourceMemoryPressure?
-    private var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Void)?
-
     /// Actual model weight size to inform the JS engine's garbage collection.
     public var memorySize: Int {
-        return loadedModelSizeBytes
+        withSnapshot { $0.modelSizeBytes }
     }
 
     deinit {
         stopMemoryPressureMonitoring()
         closeInternal()
     }
-    
+
     // MARK: - Core Hybrid Object API
-    
+
     public func isReady() throws -> Bool {
-        return queue.sync { isLoaded }
+        withSnapshot { $0.isLoaded }
     }
-    
+
     public func getHistory() throws -> [Message] {
-        return queue.sync { history }
+        withSnapshot { $0.history }
     }
-    
+
+    /// Returns at once. The transcript and stats switch immediately, a message
+    /// still generating in the old conversation is cancelled, and `queue`
+    /// replaces the conversation before any message sent after this call. A
+    /// failure to create the new conversation is reported by the next execute().
     public func resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Bool? = nil) throws {
-        let failure: LiteRTLMNativeError? = queue.sync {
-            // Mirror the replayed transcript into the wrapper's own history so
-            // getHistory() stays truthful for the restored conversation.
-            history = Self.parseTranscript(historyJson)
-            lastStats = GenerationStats(
-                promptTokens: 0.0,
-                completionTokens: 0.0,
-                totalTokens: 0.0,
-                timeToFirstToken: 0.0,
-                totalTime: 0.0,
-                tokensPerSecond: 0.0
-            )
-            guard isLoaded && engine != nil else { return nil }
+        // Mirror the replayed transcript into the wrapper's own history so
+        // getHistory() stays truthful for the restored conversation.
+        let transcript = Self.parseTranscript(historyJson)
+        let epoch: Int = withSnapshot { s in
+            s.epoch += 1
+            s.history = transcript
+            s.stats = .zero
+            s.contextTokens = -1
+            return s.epoch
+        }
+        cancelGeneration()
+        queue.async {
+            // Skip it if a newer reset, close or load has superseded it.
+            guard self.engine != nil, self.withSnapshot({ $0.epoch }) == epoch else { return }
             // Replay in the engine's own message format, tool exchanges included.
-            return createNewConversation(
-                initialMessagesJson: Self.engineMessagesJson(history),
+            self.conversationFailure = self.createNewConversation(
+                initialMessagesJson: Self.engineMessagesJson(transcript),
                 systemPromptOverride: systemPrompt,
                 speculativeDecoding: speculativeDecoding
             )
+            let tokens = self.conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+            self.withSnapshot { s in
+                if s.epoch == epoch { s.contextTokens = tokens }
+            }
         }
-        if let failure = failure { throw failure }
     }
-    
+
     public func getStats() throws -> GenerationStats {
-        return queue.sync { lastStats }
+        withSnapshot { $0.stats }
     }
-    
+
+    /// The one engine call made off `queue`: tokenizing reads only the
+    /// tokenizer, so it needn't wait behind a generation. `engineLock` keeps
+    /// the engine from being freed meanwhile.
     public func countTokens(text: String) throws -> Double {
-        return queue.sync {
-            guard let engine = self.engine else {
-                return -1.0
-            }
-            guard let result = litert_lm_engine_tokenize(engine, text) else {
-                return -1.0
-            }
-            let numTokens = litert_lm_tokenize_result_get_num_tokens(result)
-            litert_lm_tokenize_result_delete(result)
-            return Double(numTokens)
+        engineLock.lock()
+        defer { engineLock.unlock() }
+        guard let engine = engine, let result = litert_lm_engine_tokenize(engine, text) else {
+            return -1.0
         }
+        defer { litert_lm_tokenize_result_delete(result) }
+        return Double(litert_lm_tokenize_result_get_num_tokens(result))
     }
     
     public func getMemoryUsage() throws -> MemoryUsage {
@@ -190,17 +227,21 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
+    /// Tokens in the context as of the last completed turn (-1 when unknown).
     public func getContextTokenCount() throws -> Double {
-        return queue.sync {
-            guard let conversation = self.conversation else { return -1.0 }
-            return Double(litert_lm_conversation_get_token_count(conversation))
-        }
+        withSnapshot { $0.contextTokens }
     }
 
+    /// Reports not-ready at once and cancels a message still generating; the
+    /// promise resolves once `queue` has freed the engine.
     public func unload() throws -> Promise<Void> {
+        markUnloaded()
+        cancelGeneration()
         let promise = Promise<Void>()
+        let teardown = Teardowns.begin()
         queue.async {
             self.closeInternal()
+            Teardowns.end(teardown)
             promise.resolve()
         }
         return promise
@@ -209,46 +250,67 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     public func setMemoryWarningCallback(
         onWarning: @escaping (_ level: MemoryWarningLevel, _ usage: MemoryUsage) -> Void
     ) throws {
-        queue.sync {
-            self.memoryWarningCallback = onWarning
-            self.startMemoryPressureMonitoring()
-        }
+        withSnapshot { $0.memoryWarningCallback = onWarning }
+        startMemoryPressureMonitoring()
     }
 
     public func clearMemoryWarningCallback() throws {
-        queue.sync {
-            self.memoryWarningCallback = nil
-            self.stopMemoryPressureMonitoring()
-        }
+        withSnapshot { $0.memoryWarningCallback = nil }
+        stopMemoryPressureMonitoring()
     }
 
-    /// Must be called on `queue`.
     private func startMemoryPressureMonitoring() {
-        guard memoryPressureSource == nil else { return }
-        let source = DispatchSource.makeMemoryPressureSource(
-            eventMask: [.warning, .critical], queue: queue)
-        source.setEventHandler { [weak self] in
-            guard let self = self, let callback = self.memoryWarningCallback else { return }
-            let event = source.data
-            let level: MemoryWarningLevel = event.contains(.critical) ? .critical : .moderate
-            if let usage = try? self.getMemoryUsage() {
-                callback(level, usage)
-            }
+        let source: DispatchSourceMemoryPressure? = withSnapshot { s in
+            guard s.memoryPressureSource == nil else { return nil }
+            let source = DispatchSource.makeMemoryPressureSource(
+                eventMask: [.warning, .critical], queue: memoryQueue)
+            s.memoryPressureSource = source
+            return source
+        }
+        guard let source = source else { return }
+        source.setEventHandler { [weak self, weak source] in
+            guard let self = self, let source = source,
+                  let callback = self.withSnapshot({ $0.memoryWarningCallback }) else { return }
+            let level: MemoryWarningLevel = source.data.contains(.critical) ? .critical : .moderate
+            callback(level, Self.processMemoryUsage())
         }
         source.resume()
-        memoryPressureSource = source
     }
 
     private func stopMemoryPressureMonitoring() {
-        memoryPressureSource?.cancel()
-        memoryPressureSource = nil
+        let source: DispatchSourceMemoryPressure? = withSnapshot { s in
+            defer { s.memoryPressureSource = nil }
+            return s.memoryPressureSource
+        }
+        source?.cancel()
     }
 
+    /// Returns at once: the instance reports not-ready and stops memory
+    /// warnings immediately, a message still generating is cancelled, and
+    /// `queue` frees the engine once that message has stopped.
     public func close() throws {
-        queue.sync {
-            self.memoryWarningCallback = nil
-            self.stopMemoryPressureMonitoring()
-            closeInternal()
+        withSnapshot { $0.memoryWarningCallback = nil }
+        stopMemoryPressureMonitoring()
+        markUnloaded()
+        cancelGeneration()
+        let teardown = Teardowns.begin()
+        queue.async {
+            self.closeInternal()
+            Teardowns.end(teardown)
+        }
+    }
+
+    /// The not-loaded state, published to the JS thread ahead of the teardown
+    /// on `queue`; also moves the epoch so work still in flight lands nowhere.
+    private func markUnloaded() {
+        withSnapshot { s in
+            s.epoch += 1
+            s.lifecycle += 1
+            s.isLoaded = false
+            s.history = []
+            s.stats = .zero
+            s.contextTokens = -1
+            s.modelSizeBytes = 0
         }
     }
     
@@ -256,10 +318,22 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     public func loadModel(modelPath: String, config: LLMConfig?) throws -> Promise<Void> {
         let promise = Promise<Void>()
-        
+        // A new load replaces the conversation: work still in flight in the
+        // old one lands nowhere, and a close() or unload() that follows wins.
+        let lifecycle: Int = withSnapshot { s in
+            s.epoch += 1
+            s.lifecycle += 1
+            return s.lifecycle
+        }
+        cancelGeneration()
+        let teardownsBefore = Teardowns.mark()
+
         queue.async {
             // Teardown any previous contexts
             self.closeInternal()
+            // An engine another instance closed before this call is still
+            // being freed on its own queue; don't hold both in memory.
+            Teardowns.wait(through: teardownsBefore)
 
             // A missing file would otherwise burn through all four engine
             // attempts below and surface as a generic creation failure.
@@ -467,19 +541,28 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 return
             }
             
+            self.engineLock.lock()
             self.engine = engine
+            self.engineLock.unlock()
             let conversationFailure = self.createNewConversation()
             self.loadedModelPath = modelPath
-            self.loadedModelSizeBytes =
-                (try? FileManager.default.attributesOfItem(atPath: modelPath)[.size] as? Int).flatMap { $0 } ?? 0
-            
+
             if let failure = conversationFailure {
                 self.closeInternal()
                 promise.reject(withError: failure)
                 return
             }
-            
-            self.isLoaded = true
+
+            let attributes = try? FileManager.default.attributesOfItem(atPath: modelPath)
+            let tokens = self.conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+            self.withSnapshot { s in
+                // A close() or unload() called during the load wins; its
+                // teardown is already queued behind this block.
+                guard s.lifecycle == lifecycle else { return }
+                s.isLoaded = true
+                s.modelSizeBytes = attributes?[.size] as? Int ?? 0
+                s.contextTokens = tokens
+            }
             promise.resolve()
         }
         
@@ -547,7 +630,9 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 try self.modelStore.deleteFile(fileName: fileName)
                 let currentlyLoadedName = self.loadedModelPath.map { ($0 as NSString).lastPathComponent.lowercased() }
                 if let loadedName = currentlyLoadedName, loadedName == fileName.lowercased() {
-                    if self.isLoaded {
+                    if self.engine != nil {
+                        // A stream's turn still waiting to be recorded lands nowhere.
+                        self.withSnapshot { $0.epoch += 1 }
                         self.closeInternal()
                     }
                     // The backing file is gone — clear the stale path even if
@@ -578,9 +663,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                                        "No model loaded. Call loadModel() first.")
         }
         
-        if let oldConv = self.conversation {
-            litert_lm_conversation_delete(oldConv)
-            self.conversation = nil
+        if self.conversation != nil {
+            settleStreams()
+            if let oldConv = swapConversation(nil) {
+                litert_lm_conversation_delete(oldConv)
+            }
         }
         
         guard let convConfig = litert_lm_conversation_config_create() else {
@@ -702,38 +789,101 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         }
         
         LiteRTLMNativeError.clearEngineError()
-        self.conversation = litert_lm_conversation_create(engine, convConfig)
-        if self.conversation == nil {
+        guard let created = litert_lm_conversation_create(engine, convConfig) else {
             return LiteRTLMNativeError.fromEngine(.load, context: "Failed to create the conversation")
         }
+        swapConversation(created)
         return nil
     }
     
+    /// Free the conversation and engine. Runs on `queue` (or in deinit).
     private func closeInternal() {
-        isLoaded = false
         hasVisionEncoder = false
         hasAudioEncoder = false
-        history.removeAll()
         loadedModelPath = nil
-        loadedModelSizeBytes = 0
-        
-        if let conversation = self.conversation {
-            litert_lm_conversation_delete(conversation)
-            self.conversation = nil
+        conversationFailure = nil
+
+        if self.conversation != nil {
+            settleStreams()
+            if let conversation = swapConversation(nil) {
+                litert_lm_conversation_delete(conversation)
+            }
         }
-        if let engine = self.engine {
+        // countTokens() holds engineLock while it uses the engine; once the
+        // pointer is cleared under it, no caller can still be using it.
+        engineLock.lock()
+        let engine = self.engine
+        self.engine = nil
+        engineLock.unlock()
+        if let engine = engine {
             litert_lm_engine_delete(engine)
-            self.engine = nil
         }
-        
-        lastStats = GenerationStats(
-            promptTokens: 0.0,
-            completionTokens: 0.0,
-            totalTokens: 0.0,
-            timeToFirstToken: 0.0,
-            totalTime: 0.0,
-            tokensPerSecond: 0.0
-        )
+
+        withSnapshot { s in
+            s.isLoaded = false
+            s.history = []
+            s.stats = .zero
+            s.contextTokens = -1
+            s.modelSizeBytes = 0
+        }
+    }
+
+    // MARK: - Generations in flight
+
+    /// Install a conversation (or none) and return the one it replaces. The
+    /// caller, on `queue`, deletes the old one: once it's out of the property,
+    /// cancelGeneration() can't reach it.
+    @discardableResult
+    private func swapConversation(_ new: OpaquePointer?) -> OpaquePointer? {
+        conversationLock.lock()
+        defer { conversationLock.unlock() }
+        let old = conversation
+        conversation = new
+        return old
+    }
+
+    /// Stop whatever the current conversation is generating — a blocking
+    /// send on `queue` or a stream on the engine's thread — without waiting:
+    /// it ends at its next decode step with a CANCELLED error. Callable from
+    /// any thread. Only for a conversation about to be replaced or freed,
+    /// since LiteRT-LM leaves a cancelled session unusable.
+    private func cancelGeneration() {
+        conversationLock.lock()
+        defer { conversationLock.unlock() }
+        if let conversation = conversation {
+            litert_lm_conversation_cancel_process(conversation)
+        }
+    }
+
+    /// Before a conversation is deleted: a stream still generating on the
+    /// engine's thread is cancelled, and this waits for its last callback so
+    /// the conversation isn't freed under it. The engine completes its own
+    /// work on the conversation before that callback, and the session's
+    /// destructor waits for the task to return. Runs on `queue`, never on the
+    /// JS thread.
+    private func settleStreams() {
+        guard withSnapshot({ $0.streamsInFlight }) > 0, let conversation = conversation else { return }
+        litert_lm_conversation_cancel_process(conversation)
+        // A cancel lands at the next decode step, but a prefill runs to the
+        // end first, which can take a while for a long prompt. Freeing the
+        // conversation before the stream's last callback would pull it out
+        // from under the engine, so wait it out.
+        while streams.wait(timeout: .now() + 10) == .timedOut {
+            NSLog("[LiteRTLM] Still waiting for a cancelled stream to end before freeing its conversation")
+        }
+    }
+
+    /// Call on `queue` right before starting a stream.
+    func streamStarted() {
+        withSnapshot { $0.streamsInFlight += 1 }
+        streams.enter()
+    }
+
+    /// Call exactly once per started stream, from its final or error callback
+    /// (the engine's thread) or when it failed to start.
+    func streamEnded() {
+        withSnapshot { $0.streamsInFlight -= 1 }
+        streams.leave()
     }
     
     /// 0.7's default for `multimodal` when unset (on for Gemma 3n / Gemma 3
@@ -821,4 +971,55 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return stripControlTokens(jsonResponse)
     }
     
+}
+
+extension GenerationStats {
+    /// Stats before any turn has run.
+    static var zero: GenerationStats {
+        GenerationStats(promptTokens: 0, completionTokens: 0, totalTokens: 0,
+                        timeToFirstToken: 0, totalTime: 0, tokensPerSecond: 0)
+    }
+}
+
+/// Engine teardowns that close() or unload() queued, on any instance, and
+/// that haven't finished. A load waits for the ones queued before it was
+/// called: models are gigabytes, and one loaded right after another was
+/// closed shouldn't sit beside it in memory. A load never waits for a
+/// teardown queued after it was called, so the waits can't form a cycle.
+enum Teardowns {
+    private static let condition = NSCondition()
+    private static var issued = 0
+    private static var pending = Set<Int>()
+
+    static func begin() -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        issued += 1
+        pending.insert(issued)
+        return issued
+    }
+
+    static func end(_ ticket: Int) {
+        condition.lock()
+        defer { condition.unlock() }
+        pending.remove(ticket)
+        condition.broadcast()
+    }
+
+    /// The latest teardown so far — what a load called now waits for.
+    static func mark() -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return issued
+    }
+
+    /// Block until every teardown up to `ticket` has finished. Never call it
+    /// on the JS thread.
+    static func wait(through ticket: Int) {
+        condition.lock()
+        defer { condition.unlock() }
+        while pending.contains(where: { $0 <= ticket }) {
+            condition.wait()
+        }
+    }
 }

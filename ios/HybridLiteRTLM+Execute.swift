@@ -52,6 +52,8 @@ extension HybridLiteRTLM {
         options: ExecuteOptions?
     ) throws -> Promise<String> {
         let promise = Promise<String>()
+        // The conversation this message belongs to (see Snapshot.epoch).
+        let epoch = withSnapshot { $0.epoch }
 
         // Structured output needs the constraint provider, which is initialized
         // at conversation creation — fail fast with an actionable error.
@@ -116,6 +118,15 @@ extension HybridLiteRTLM {
             : toolResults.map { Message(role: .tool, content: $0.json, toolCalls: nil, toolName: $0.name) }
 
         queue.async {
+            // Reset, closed or reloaded since this call: the message belonged
+            // to a conversation that no longer exists.
+            guard self.withSnapshot({ $0.epoch }) == epoch else {
+                promise.reject(withError: LiteRTLMNativeError(
+                    .execute, status: "CANCELLED", code: "INFERENCE_CANCELLED",
+                    "The conversation was reset or the model unloaded before this message ran."))
+                return
+            }
+
             // Validate and materialize media inputs first so callers get a
             // specific file-not-found error even when no model is loaded.
             let payload: (json: String, tempFiles: [String])
@@ -128,7 +139,8 @@ extension HybridLiteRTLM {
 
             guard let conversation = self.conversation else {
                 cleanup()
-                promise.reject(withError: LiteRTLMNativeError(
+                // A failed resetConversation() leaves no conversation; say why.
+                promise.reject(withError: self.conversationFailure ?? LiteRTLMNativeError(
                     .execute, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED",
                     "No model loaded. Call loadModel() first."))
                 return
@@ -149,6 +161,7 @@ extension HybridLiteRTLM {
                     msgJson: msgJson,
                     userLabel: userLabel,
                     inputTurns: inputTurns,
+                    epoch: epoch,
                     onToken: onToken,
                     promise: promise,
                     cleanup: cleanup,
@@ -160,6 +173,7 @@ extension HybridLiteRTLM {
                     msgJson: msgJson,
                     userLabel: userLabel,
                     inputTurns: inputTurns,
+                    epoch: epoch,
                     promise: promise,
                     cleanup: cleanup,
                     options: options
@@ -393,6 +407,7 @@ extension HybridLiteRTLM {
         msgJson: String,
         userLabel: String,
         inputTurns: [Message],
+        epoch: Int,
         promise: Promise<String>,
         cleanup: @escaping () -> Void,
         options: ExecuteOptions?
@@ -416,6 +431,7 @@ extension HybridLiteRTLM {
         }
 
         commitExecuteTurn(
+            epoch: epoch,
             inputTurns: inputTurns,
             modelResponse: result,
             startTime: startTime,
@@ -428,13 +444,18 @@ extension HybridLiteRTLM {
 
 
 
+    /// Record a finished turn in the transcript and stats. Runs on `queue`.
     func commitExecuteTurn(
+        epoch: Int,
         inputTurns: [Message],
         modelResponse: String,
         startTime: Date,
         conversation: OpaquePointer?,
         tokenCount: Int
     ) {
+        // The conversation was reset or closed while this turn ran: it
+        // belongs to neither the new transcript nor the new stats.
+        guard withSnapshot({ $0.epoch }) == epoch else { return }
         let totalTime = Date().timeIntervalSince(startTime)
         var compTok = Double(tokenCount)
         var tps = 0.0, ttft = 0.0
@@ -451,16 +472,23 @@ extension HybridLiteRTLM {
         }
         let pt = Double(inputTurns.reduce(0) { $0 + $1.content.count }) / 4.0
         if compTok == 0.0 { compTok = Double(modelResponse.count) / 4.0 }
-        lastStats = GenerationStats(
+        let stats = GenerationStats(
             promptTokens: pt, completionTokens: compTok,
             totalTokens: pt + compTok, timeToFirstToken: ttft,
             totalTime: totalTime,
             tokensPerSecond: tps > 0 ? tps : (compTok / totalTime)
         )
-        history.append(contentsOf: inputTurns)
         // Tool calls move out of the text into structured toolCalls.
         let (text, calls) = Self.splitToolCalls(modelResponse)
-        history.append(Message(role: .model, content: text, toolCalls: calls.isEmpty ? nil : calls, toolName: nil))
+        let reply = Message(role: .model, content: text, toolCalls: calls.isEmpty ? nil : calls, toolName: nil)
+        let contextTokens = conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+        withSnapshot { s in
+            guard s.epoch == epoch else { return }
+            s.stats = stats
+            s.history.append(contentsOf: inputTurns)
+            s.history.append(reply)
+            s.contextTokens = contextTokens
+        }
     }
 }
 

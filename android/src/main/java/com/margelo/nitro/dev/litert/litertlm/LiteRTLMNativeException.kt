@@ -1,6 +1,7 @@
 package com.margelo.nitro.dev.litert.litertlm
 
 import java.io.FileNotFoundException
+import java.util.concurrent.CancellationException
 
 /**
  * A failure carrying the engine's canonical status, rendered as
@@ -46,6 +47,9 @@ class LiteRTLMNativeException(
                 is OutOfMemoryError -> "RESOURCE_EXHAUSTED"
                 is FileNotFoundException -> "NOT_FOUND"
                 is IllegalArgumentException -> "INVALID_ARGUMENT"
+                // How the SDK reports a cancelled stream; an IllegalStateException
+                // subclass, so it comes first.
+                is CancellationException -> "CANCELLED"
                 is IllegalStateException -> "FAILED_PRECONDITION"
                 is UnsupportedOperationException -> "UNIMPLEMENTED"
                 is InterruptedException -> "CANCELLED"

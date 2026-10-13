@@ -268,4 +268,36 @@ class HybridLiteRTLMTest {
         threads.forEach { it.join(15_000) }
         assertTrue("Concurrent execute/unload raised: ${errors.firstOrNull()}", errors.isEmpty())
     }
+
+    @Test
+    fun testCloseReportsTheClosedStateAtOnce() {
+        bridge.close()
+        assertFalse(bridge.isReady())
+        val promise = bridge.execute(arrayOf(MultimodalPartFactories.textPart("hi")), null, null)
+        while (!promise.isCompleted) { Thread.sleep(1) }
+        assertTrue("execute after close() must reject as not loaded, got: ${promise.error}",
+            promise.error?.message?.contains("MODEL_NOT_LOADED") == true)
+    }
+
+    /**
+     * A load waits for engines closed before it was called — and only those,
+     * so a close() started behind a load can't deadlock it.
+     */
+    @Test
+    fun testLoadsWaitOnlyForEarlierTeardowns() {
+        val earlier = Teardowns.begin()
+        val mark = Teardowns.mark()
+        val later = Teardowns.begin()
+        val returned = java.util.concurrent.CountDownLatch(1)
+        Thread {
+            Teardowns.await(mark)
+            returned.countDown()
+        }.start()
+        assertFalse("must wait for the earlier teardown",
+            returned.await(300, java.util.concurrent.TimeUnit.MILLISECONDS))
+        Teardowns.end(earlier)
+        assertTrue("must not wait for the later teardown",
+            returned.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        Teardowns.end(later)
+    }
 }

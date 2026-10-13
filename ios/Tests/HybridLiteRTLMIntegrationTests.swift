@@ -452,6 +452,103 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
     }
 
+    // MARK: - The JS thread never waits for the engine
+
+    /// Calls the JS thread makes while a message generates return at once
+    /// (through 0.7 most of them waited on the engine queue until the
+    /// generation ended). A reset or close() cancels the message in flight
+    /// instead of waiting it out, and close() mid-stream frees the
+    /// conversation only after the stream's last callback.
+    func testJ_JSThreadNeverWaitsForTheEngine() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        // This test closes its engines; keep the suite's out of memory meanwhile.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+
+        let essay = [textPart("Write a long, detailed essay about the history of the bicycle.")]
+        let long = Self.makeOptions(maxOutputTokens: 512)
+        let limitMs = 50.0
+
+        /// How long a call takes, in milliseconds.
+        func ms(_ label: String, _ call: () throws -> Void) rethrows -> Double {
+            let start = DispatchTime.now().uptimeNanoseconds
+            try call()
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+            print(String(format: "[integration][nonblocking] %@ took %.2f ms", label, elapsed))
+            return elapsed
+        }
+        func expectCancelled(_ generation: Task<String, Error>, _ label: String) async {
+            do {
+                let text = try await generation.value
+                XCTFail("\(label): the message finished instead of being cancelled: \(text.prefix(60))")
+            } catch let error as LiteRTLMNativeError {
+                XCTAssertEqual(error.status, "CANCELLED", "\(label): \(error)")
+            } catch {
+                XCTFail("\(label): unexpected error \(error)")
+            }
+        }
+
+        let bridge = HybridLiteRTLM()
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig()).await()
+
+        // A blocking generation holds the engine queue for many seconds.
+        var generation = Task { try await bridge.execute(parts: essay, onToken: nil, options: long).await() }
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        XCTAssertLessThan(try ms("isReady") { XCTAssertTrue(try bridge.isReady()) }, limitMs)
+        XCTAssertLessThan(try ms("getHistory") { _ = try bridge.getHistory() }, limitMs)
+        XCTAssertLessThan(try ms("getStats") { _ = try bridge.getStats() }, limitMs)
+        XCTAssertLessThan(try ms("getContextTokenCount") { _ = try bridge.getContextTokenCount() }, limitMs)
+        XCTAssertLessThan(try ms("countTokens") {
+            XCTAssertGreaterThan(try bridge.countTokens(text: "How many tokens is this?"), 0)
+        }, limitMs)
+        XCTAssertLessThan(ms("memorySize") { XCTAssertGreaterThan(bridge.memorySize, 0) }, limitMs)
+        XCTAssertLessThan(try ms("setMemoryWarningCallback") { try bridge.setMemoryWarningCallback { _, _ in } }, limitMs)
+        XCTAssertLessThan(try ms("clearMemoryWarningCallback") { try bridge.clearMemoryWarningCallback() }, limitMs)
+
+        // Reset: returns at once and cancels the message in flight; the next
+        // message runs in the new conversation, without the cancelled one.
+        var cancelStarted = Date()
+        XCTAssertLessThan(try ms("resetConversation") {
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        }, limitMs)
+        await expectCancelled(generation, "reset")
+        print(String(format: "[integration][nonblocking] reset cancelled the message in %.2f s",
+                     Date().timeIntervalSince(cancelStarted)))
+        let hello = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 16))
+        XCTAssertFalse(hello.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertEqual(try bridge.getHistory().map(\.role), [.user, .model],
+                       "the cancelled message must stay out of the transcript")
+
+        // close() during a blocking generation: not ready at once, the message
+        // cancelled rather than waited out.
+        generation = Task { try await bridge.execute(parts: essay, onToken: nil, options: long).await() }
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        cancelStarted = Date()
+        XCTAssertLessThan(try ms("close") { try bridge.close() }, limitMs)
+        XCTAssertFalse(try bridge.isReady())
+        XCTAssertTrue(try bridge.getHistory().isEmpty)
+        await expectCancelled(generation, "close")
+        XCTAssertLessThan(Date().timeIntervalSince(cancelStarted), 5, "close() must cancel the message, not wait it out")
+
+        // close() mid-stream: the stream is cancelled, and the teardown — which
+        // waits for the stream's last callback — completes.
+        let streamer = HybridLiteRTLM()
+        _ = try await streamer.loadModel(modelPath: path, config: Self.makeConfig()).await()
+        let firstToken = expectation(description: "first streamed token")
+        firstToken.assertForOverFulfill = false
+        let stream = Task {
+            try await streamer.execute(parts: essay, onToken: { token, done in
+                if !done && !token.isEmpty { firstToken.fulfill() }
+            }, options: long).await()
+        }
+        await fulfillment(of: [firstToken], timeout: 60)
+        XCTAssertLessThan(try ms("close mid-stream") { try streamer.close() }, limitMs)
+        await expectCancelled(stream, "close mid-stream")
+        await awaitTeardowns()
+    }
+
     /// The 0.18 engine knobs load and generate; Metal residency (GPU) is A/B
     /// timed. Simulator numbers are not a device benchmark — they only show
     /// the knobs work. (YNNPACK isn't compiled into the iOS framework, so it
@@ -639,9 +736,10 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
         }
         // Release the suite's shared engine first — two multi-GB engines at once
-        // would be an unfair memory test.
+        // would be an unfair memory test. close() frees it on its own queue.
         try? Self.sharedBridge?.close()
         Self.sharedBridge = nil
+        await awaitTeardowns()
 
         guard let settings = litert_lm_engine_settings_create(path, "cpu", nil, nil) else {
             XCTFail("engine settings creation failed")
@@ -728,6 +826,18 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
 }
 
 private extension HybridLiteRTLMIntegrationTests {
+    /// Wait until every engine that close() or unload() has queued for
+    /// freeing so far is gone.
+    func awaitTeardowns() async {
+        let mark = Teardowns.mark()
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                Teardowns.wait(through: mark)
+                done.resume()
+            }
+        }
+    }
+
     /// Minimal text extraction for the raw C-API tests (the wrapper's own helper
     /// lives on HybridLiteRTLM, which these tests bypass).
     func extractTextFromResponseForTest(_ json: String) -> String {

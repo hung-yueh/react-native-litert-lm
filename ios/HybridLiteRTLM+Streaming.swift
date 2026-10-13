@@ -12,6 +12,8 @@ import CLiteRTLM
 class ExecuteStreamContext {
     let userLabel: String
     let inputTurns: [Message]
+    /// The conversation this turn belongs to (see Snapshot.epoch).
+    let epoch: Int
     let startTime: Date
     let onToken: (_ token: String, _ done: Bool) -> Void
     let promise: Promise<String>
@@ -25,6 +27,7 @@ class ExecuteStreamContext {
     init(
         userLabel: String,
         inputTurns: [Message],
+        epoch: Int,
         startTime: Date,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
@@ -33,6 +36,7 @@ class ExecuteStreamContext {
     ) {
         self.userLabel = userLabel
         self.inputTurns = inputTurns
+        self.epoch = epoch
         self.startTime = startTime
         self.onToken = onToken
         self.promise = promise
@@ -48,6 +52,7 @@ extension HybridLiteRTLM {
         msgJson: String,
         userLabel: String,
         inputTurns: [Message],
+        epoch: Int,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
         cleanup: @escaping () -> Void,
@@ -63,7 +68,7 @@ extension HybridLiteRTLM {
             }
         }
         let ctx = ExecuteStreamContext(
-            userLabel: userLabel, inputTurns: inputTurns, startTime: Date(),
+            userLabel: userLabel, inputTurns: inputTurns, epoch: epoch, startTime: Date(),
             onToken: onToken, promise: promise, parent: self,
             cleanup: fullCleanup
         )
@@ -78,12 +83,15 @@ extension HybridLiteRTLM {
 
             if let errorMsg = litert_lm_stream_chunk_get_error(chunk) {
                 let msg = String(cString: errorMsg)
+                let parent = ctx.parent
                 ctx.onToken("Error: \(msg)", true)
                 ctx.cleanup()
                 // Stream errors arrive as text on the engine's thread — classify
                 // from the absl::Status prefix ("RESOURCE_EXHAUSTED: …") if any.
+                // A cancel (close/reset mid-stream) lands here as CANCELLED.
                 ctx.promise.reject(withError: LiteRTLMNativeError.fromStatusMessage(.execute, msg))
                 Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
+                parent.streamEnded()
                 return
             }
 
@@ -97,6 +105,7 @@ extension HybridLiteRTLM {
             }
         }
 
+        streamStarted()
         LiteRTLMNativeError.clearEngineError()
         let status = litert_lm_conversation_send_message_stream(
             conversation, msgJson, nil, optionalArgs, cb, ptr)
@@ -104,6 +113,7 @@ extension HybridLiteRTLM {
             let failure = LiteRTLMNativeError.fromEngine(.execute, context: "Failed to start streaming")
             Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
             fullCleanup()
+            streamEnded()
             promise.reject(withError: failure)
         }
     }
@@ -122,8 +132,11 @@ extension HybridLiteRTLM {
         }
         ctx.fullResponse = finalText
 
+        // The engine is done with the conversation (see settleStreams()).
+        streamEnded()
         queue.async {
             self.commitExecuteTurn(
+                epoch: ctx.epoch,
                 inputTurns: ctx.inputTurns,
                 modelResponse: ctx.fullResponse,
                 startTime: ctx.startTime,

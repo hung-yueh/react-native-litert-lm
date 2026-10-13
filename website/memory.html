@@ -495,8 +495,8 @@ clearMemoryWarningCallback(): void</div>
     <table>
       <thead><tr><th>Method</th><th>Semantics</th></tr></thead>
       <tbody>
-        <tr><td><code>unload()</code></td><td>Releases the loaded model and conversation, freeing all engine memory, while keeping the instance reusable — call <code>loadModel()</code> again to reload.</td></tr>
-        <tr><td><code>close()</code></td><td>Releases all native resources and permanently invalidates the instance. Call it when you are done with the LLM instance for good (<code>useModel</code> does this on unmount).</td></tr>
+        <tr><td><code>unload()</code></td><td>Releases the loaded model and conversation, freeing all engine memory, while keeping the instance reusable — call <code>loadModel()</code> again to reload. A message still generating is cancelled, so the memory comes back without waiting for it.</td></tr>
+        <tr><td><code>close()</code></td><td>Releases all native resources and permanently invalidates the instance. Call it when you are done with the LLM instance for good (<code>useModel</code> does this on unmount). It returns at once and frees the engine in the background; a model loaded afterwards waits for that.</td></tr>
       </tbody>
     </table>
   </div>

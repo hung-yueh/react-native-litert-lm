@@ -29,6 +29,7 @@ import org.junit.runners.MethodSorters
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * On-device integration tests that run REAL inference through the Kotlin
@@ -562,6 +563,95 @@ class HybridLiteRTLMInstrumentedTest {
         } finally {
             llm.close()
         }
+    }
+
+    /**
+     * Calls the JS thread makes while a message generates return at once, and
+     * a reset or close() cancels the message instead of waiting it out — the
+     * counterpart of the iOS suite's testJ. Through 0.7, close() could wait
+     * behind a whole load, and a reset or close() during a blocking send
+     * freed the conversation under it (the SDK's close() frees native state
+     * at once).
+     */
+    @Test
+    fun testJ_jsThreadNeverWaitsForTheEngine() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        val essay = arrayOf(textPart("Write a long, detailed essay about the history of the bicycle."))
+        val long = options(maxOutputTokens = 512.0)
+        val limitMs = 50.0
+
+        fun ms(label: String, call: () -> Unit): Double {
+            val start = System.nanoTime()
+            call()
+            val elapsed = (System.nanoTime() - start) / 1e6
+            println("[android-int][nonblocking] $label took ${"%.2f".format(elapsed)} ms")
+            return elapsed
+        }
+        /** A message's outcome: the latch opens when it settles, with its error if it failed. */
+        class Sent(val settled: CountDownLatch = CountDownLatch(1), val error: AtomicReference<Throwable?> = AtomicReference(null))
+        fun send(llm: HybridLiteRTLM, onToken: ((String, Boolean) -> Unit)? = null): Sent {
+            val sent = Sent()
+            llm.execute(essay, onToken, long)
+                .then { sent.settled.countDown() }
+                .catch { sent.error.set(it); sent.settled.countDown() }
+            return sent
+        }
+        fun assertCancelled(label: String, sent: Sent) {
+            assertTrue("$label: the message never settled", sent.settled.await(30, TimeUnit.SECONDS))
+            val error = sent.error.get()
+            assertNotNull("$label: the message finished instead of being cancelled", error)
+            val native = error as? LiteRTLMNativeException ?: error?.cause as? LiteRTLMNativeException
+            assertEquals("$label: $error", "CANCELLED", native?.status)
+        }
+
+        val llm = HybridLiteRTLM()
+        llm.loadModelBlocking(model!!.absolutePath, llmConfig())
+
+        // A blocking send holds a worker — and the conversation — for many seconds.
+        var sent = send(llm)
+        Thread.sleep(2_000)
+        assertTrue(ms("isReady") { assertTrue(llm.isReady()) } < limitMs)
+        assertTrue(ms("getHistory") { llm.getHistory() } < limitMs)
+        assertTrue(ms("getStats") { llm.getStats() } < limitMs)
+        assertTrue(ms("setMemoryWarningCallback") { llm.setMemoryWarningCallback { _, _ -> } } < limitMs)
+        assertTrue(ms("clearMemoryWarningCallback") { llm.clearMemoryWarningCallback() } < limitMs)
+
+        // Reset cancels the message and waits only for it to return; the next
+        // message runs in the new conversation, without the cancelled one.
+        var started = System.nanoTime()
+        ms("resetConversation") { llm.resetConversation(null, null, null) }
+        assertCancelled("reset", sent)
+        println("[android-int][nonblocking] reset cancelled the message in ${(System.nanoTime() - started) / 1_000_000} ms")
+        val (hello, _) = generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
+        assertTrue(hello.isNotBlank())
+        assertEquals("the cancelled message must stay out of the transcript",
+            listOf(Role.USER, Role.MODEL), llm.getHistory().map { it.role })
+
+        // close() during a blocking send: not ready at once, the message
+        // cancelled, and the engine freed once it has returned.
+        sent = send(llm)
+        Thread.sleep(2_000)
+        started = System.nanoTime()
+        assertTrue(ms("close") { llm.close() } < limitMs)
+        assertFalse(llm.isReady())
+        assertCancelled("close", sent)
+        Teardowns.await(Teardowns.mark())
+        val closeSec = (System.nanoTime() - started) / 1e9
+        assertTrue("close() must cancel the message, not wait it out ($closeSec s)", closeSec < 10)
+
+        // close() mid-stream: the stream is cancelled, and the release — which
+        // waits for the stream to return — completes.
+        val streamer = HybridLiteRTLM()
+        streamer.loadModelBlocking(model.absolutePath, llmConfig())
+        val firstToken = CountDownLatch(1)
+        sent = send(streamer) { token, done -> if (!done && token.isNotEmpty()) firstToken.countDown() }
+        assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+        assertTrue(ms("close mid-stream") { streamer.close() } < limitMs)
+        assertCancelled("close mid-stream", sent)
+        Teardowns.await(Teardowns.mark())
     }
 
     /** numThreads reaches the CPU backend (LiteRT-LM 0.18's Backend.CPU(threadCount)); speed reported. */

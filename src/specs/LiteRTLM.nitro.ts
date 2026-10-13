@@ -601,11 +601,19 @@ export interface LiteRTLM extends HybridObject<{
    * @param speculativeDecoding Turn speculative decoding on or off for the new
    *   conversation (undefined = the session default). `true` loads the
    *   bundle's drafter on first use if the engine started without it.
+   *
+   * `getHistory()` reflects the new transcript at once, and messages sent
+   * after this run in the new conversation. A message sent before it that is
+   * still generating or waiting to run is cancelled (its promise rejects with
+   * `INFERENCE_CANCELLED`). iOS returns at once and reports a failure to
+   * create the new conversation from the next `execute()`; Android waits up
+   * to 2 s for a cancelled message to return.
    */
   resetConversation(historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean): void;
 
   /**
-   * Check if a model is loaded and ready for inference.
+   * Check if a model is loaded and ready for inference. False the moment
+   * `unload()` or `close()` is called.
    */
   isReady(): boolean;
 
@@ -626,8 +634,10 @@ export interface LiteRTLM extends HybridObject<{
   getMemoryUsage(): MemoryUsage;
 
   /**
-   * Number of tokens currently held in the conversation KV cache
-   * (prompt + history + generated tokens). Returns -1 if unavailable.
+   * Number of tokens held in the conversation KV cache (prompt + history +
+   * generated tokens) as of the last completed message — it doesn't move
+   * while one generates. Returns -1 if unavailable (always on Android: the
+   * Kotlin SDK doesn't expose it).
    *
    * Combine with `maxContextTokens` to warn before the context window
    * (and its memory) runs out — see `getMemoryForecast()` in the JS API.
@@ -638,6 +648,9 @@ export interface LiteRTLM extends HybridObject<{
    * Release the loaded model and conversation, freeing all engine memory,
    * while keeping this instance reusable — call `loadModel()` again to reload.
    * Unlike `close()`, which permanently invalidates the instance.
+   *
+   * Reports not-ready and cancels a message still generating at once
+   * (`INFERENCE_CANCELLED`); resolves once the engine is freed.
    */
   unload(): Promise<void>;
 
@@ -666,7 +679,9 @@ export interface LiteRTLM extends HybridObject<{
    * @param parts Array of content parts (text, image, audio)
    * @param onToken Optional streaming callback - invoked per token with (token, isDone)
    * @param options Optional per-message options (maxOutputTokens, visualTokenBudget)
-   * @returns Promise resolving to the full response string
+   * @returns Promise resolving to the full response string. It rejects with
+   *   `INFERENCE_CANCELLED` if `resetConversation()`, `loadModel()`,
+   *   `unload()` or `close()` is called before the message finishes.
    */
   execute(
     parts: MultimodalPart[],
@@ -677,6 +692,12 @@ export interface LiteRTLM extends HybridObject<{
   /**
    * Release all native resources.
    * Call this when done with the LLM instance.
+   *
+   * Returns at once: the instance reports not-ready, stops memory warnings
+   * and cancels a message still generating immediately; the engine is freed
+   * in the background once that message has stopped. A model loaded
+   * afterwards, on any instance, waits for that, so the two never sit in
+   * memory together.
    */
   close(): void;
 }

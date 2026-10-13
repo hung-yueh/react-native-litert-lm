@@ -13,6 +13,9 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.thread
+import kotlin.concurrent.withLock
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
 import dev.litert.litertlm.LiteRTLMInitProvider
@@ -154,16 +157,31 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         LiteRTLMRegistry.register(this)
     }
 
-    // LiteRT-LM Engine and Conversation
+    // LiteRT-LM Engine and Conversation, and the generations running on them.
+    // Guarded by stateLock: a reset swaps the conversation on the JS thread,
+    // messages generate on Promise workers, and a teardown frees both on a
+    // background thread. Nothing holds it while waiting except
+    // generationEnded.await(), which releases it.
+    private val stateLock = ReentrantLock()
+    private val generationEnded = stateLock.newCondition()
     private var engine: Engine? = null
     private var conversation: Conversation? = null
-    
+    private var generationsRunning = 0
+    /**
+     * Out of service but maybe still generating (a cancelled message returning).
+     * Closed once no generation runs: the SDK's close() frees native state at
+     * once, even under a send in progress.
+     */
+    private val retiredConversations = mutableListOf<Conversation>()
+    /** Moves on load, unload, close and memory release; a load superseded meanwhile installs nothing. */
+    private var lifecycle = 0
+
     @Volatile
     private var isClosed = false
 
-    /** Latch of the in-flight streaming worker, if any. Used to wait for cancellation to settle. */
+    /** What isReady() reports: set when a load installs its engine, cleared the moment unload() or close() is called. */
     @Volatile
-    private var activeStreamingLatch: CountDownLatch? = null
+    private var ready = false
 
     private val modelStore = HybridModelStore()
     private var loadedModelPath: String? = null
@@ -175,6 +193,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private val history: MutableList<Message> = Collections.synchronizedList(mutableListOf())
 
     // Last generation stats
+    @Volatile
     private var lastStats = GenerationStats(
         promptTokens = 0.0,
         completionTokens = 0.0,
@@ -218,7 +237,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     @Volatile
     private var loadedModelSizeBytes: Long = 0L
 
-    /** OS memory-pressure listener registered on the application context. */
+    /** OS memory-pressure listener registered on the application context, under callbackLock. */
+    private val callbackLock = Any()
+    @Volatile
     private var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Unit)? = null
     private var componentCallbacks: ComponentCallbacks2? = null
 
@@ -229,23 +250,38 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // loadModel - Initialize LiteRT-LM Engine and Conversation
     // -------------------------------------------------------------------------
     override fun loadModel(modelPath: String, config: LLMConfig?): Promise<Unit> {
-        return Promise.parallel { loadModelBlocking(modelPath, config) }
+        // Taken on the calling thread: an unload() or close() called after this
+        // supersedes the load, and the load waits for engines freed before it.
+        val loadLifecycle = nextLifecycle()
+        val teardownsBefore = Teardowns.mark()
+        return Promise.parallel { loadModelBlocking(modelPath, config, loadLifecycle, teardownsBefore) }
     }
+
+    private fun nextLifecycle(): Int = stateLock.withLock { ++lifecycle }
+
+    private fun closedError() = LiteRTLMNativeException(
+        "load", "FAILED_PRECONDITION", null,
+        "This LiteRTLM instance is closed; create a new one with createLLM().",
+    )
 
     /**
      * The body of [loadModel], run on a Promise worker. Internal so on-device
      * tests can observe the typed failure without Promise/JSI plumbing.
      */
-    internal fun loadModelBlocking(modelPath: String, config: LLMConfig?) {
+    internal fun loadModelBlocking(
+        modelPath: String,
+        config: LLMConfig?,
+        loadLifecycle: Int = nextLifecycle(),
+        teardownsBefore: Long = Teardowns.mark(),
+    ) {
+        if (isClosed) throw closedError()
+        // An engine closed before this load was called may still be on its way
+        // out (close() frees it on a background thread); don't hold both.
+        Teardowns.await(teardownsBefore)
         // Serialize initialization to prevent OOM from concurrent loads
         synchronized(initLock) {
-            if (isClosed) {
-                throw LiteRTLMNativeException(
-                    "load", "FAILED_PRECONDITION", null,
-                    "This LiteRTLM instance is closed; create a new one with createLLM().",
-                )
-            }
-            
+            if (isClosed) throw closedError()
+
             Log.i(TAG, "loadModel: $modelPath")
 
             // Clean up existing resources
@@ -404,16 +440,36 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                 // Report the last attempt (the most permissive config): if even
                 // CPU text-only failed, its reason is the real one.
-                engine = eng ?: throw LiteRTLMNativeException.from(
+                val created = eng ?: throw LiteRTLMNativeException.from(
                     "load",
                     "Failed to create the engine — tried ${backend.name.lowercase()}, then the CPU fallbacks",
                     lastEngineError ?: IllegalStateException("no engine was created"),
                 )
                 Log.i(TAG, "Engine created and initialized successfully")
 
-                // Create Conversation
-                createNewConversation()
+                val conv = try {
+                    newConversation(created)
+                } catch (e: Exception) {
+                    created.close()
+                    throw e
+                }
                 Log.i(TAG, "Conversation created successfully")
+                val installed = stateLock.withLock {
+                    // An unload() or close() called during the load wins.
+                    if (isClosed || lifecycle != loadLifecycle) return@withLock false
+                    engine = created
+                    conversation = conv
+                    ready = true
+                    true
+                }
+                if (!installed) {
+                    Log.i(TAG, "loadModel: superseded by a later unload/close/load — freeing what it loaded")
+                    closeQuietly(conv)
+                    created.close()
+                    hasVisionEncoder = false
+                    hasAudioEncoder = false
+                    return@synchronized
+                }
                 loadedModelPath = modelPath
                 loadedModelSizeBytes = try { File(modelPath).length() } catch (_: Exception) { 0L }
 
@@ -501,7 +557,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             modelStore.deleteFile(fileName)
             val currentlyLoadedName = loadedModelPath?.substringAfterLast("/")?.lowercase()
             if (currentlyLoadedName != null && currentlyLoadedName == fileName.lowercase()) {
-                if (engine != null) {
+                if (stateLock.withLock { engine } != null) {
                     cleanupInternal()
                 }
                 // The backing file is gone — clear the stale path even if no
@@ -535,29 +591,32 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Boolean?) {
-        // Signal native inference to cancel and await the in-flight streaming
-        // worker to settle before closing the conversation underneath it.
-        cancelInFlightGeneration()
-        synchronized(history) {
-            history.clear()
-            // Mirror the replayed transcript into the wrapper's own history so
-            // getHistory() stays truthful for the restored conversation.
-            history.addAll(parseTranscript(historyJson))
+        stateLock.withLock {
+            // A message still generating is cancelled and given up to 2 s to
+            // return, so its last history write lands before the reset below.
+            // (A load finishing during that wait installs its own conversation;
+            // that one is replaced too.)
+            do {
+                retireConversationLocked(timeoutMs = 2_000)
+            } while (conversation != null)
+            synchronized(history) {
+                history.clear()
+                // Mirror the replayed transcript into the wrapper's own history so
+                // getHistory() stays truthful for the restored conversation.
+                history.addAll(parseTranscript(historyJson))
+            }
+            // Not ready: nothing loaded, a load still running, or unload()/close() called.
+            val eng = engine?.takeIf { ready } ?: throw notLoaded()
+            conversation = newConversation(
+                eng,
+                initialMessagesJson = historyJson,
+                systemPromptOverride = systemPrompt,
+                speculativeDecoding = speculativeDecoding,
+            )
         }
-        createNewConversation(
-            initialMessagesJson = historyJson,
-            systemPromptOverride = systemPrompt,
-            speculativeDecoding = speculativeDecoding,
-        )
     }
 
-    override fun isReady(): Boolean {
-        return isLoaded_
-    }
-    
-    // Property backing field for isReady check
-    private val isLoaded_: Boolean
-        get() = engine != null
+    override fun isReady(): Boolean = ready
 
     override fun getStats(): GenerationStats {
         return lastStats
@@ -574,15 +633,22 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return -1.0
     }
 
+    /** Reports not-ready and cancels a message still generating at once; resolves once the engine is freed. */
     override fun unload(): Promise<Unit> {
+        markUnloaded()
+        val teardown = Teardowns.begin()
         return Promise.parallel {
             Log.d(TAG, "Unloading model (instance stays reusable)")
-            cleanupInternal()
+            try {
+                cleanupInternal()
+            } finally {
+                Teardowns.end(teardown)
+            }
         }
     }
 
     override fun setMemoryWarningCallback(onWarning: (MemoryWarningLevel, MemoryUsage) -> Unit) {
-        synchronized(initLock) {
+        synchronized(callbackLock) {
             memoryWarningCallback = onWarning
             if (componentCallbacks == null) {
                 val context = LiteRTLMInitProvider.applicationContext
@@ -620,7 +686,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun clearMemoryWarningCallback() {
-        synchronized(initLock) {
+        synchronized(callbackLock) {
             memoryWarningCallback = null
             componentCallbacks?.let { callbacks ->
                 try {
@@ -633,11 +699,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
+    /**
+     * Returns at once: the instance reports not-ready, stops memory warnings
+     * and cancels a message still generating immediately, and a background
+     * thread frees the engine once that message has returned.
+     */
     override fun close() {
         Log.d(TAG, "Closing resources")
         isClosed = true
+        markUnloaded()
         clearMemoryWarningCallback()
-        cleanupInternal()
+        releaseInBackground()
     }
 
     /**
@@ -648,43 +720,58 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
      * callback was registered at process start (before any JS could call
      * setMemoryWarningCallback), so the per-instance callback fires after this
      * release and reports the same trim event as CRITICAL.
+     *
+     * Called on the main thread, so it only starts the release: the engine is
+     * freed on a background thread (it may have to wait for a load to finish).
      */
     internal fun releaseUnderMemoryPressure() {
-        if (engine == null) return
+        if (stateLock.withLock { engine } == null) return
         Log.w(TAG, "Releasing engine under memory pressure (instance stays reloadable)")
-        cleanupInternal()
+        markUnloaded()
+        releaseInBackground()
     }
 
     /**
-     * Signals the native inference thread to cancel and awaits the in-flight
-     * streaming worker to settle before closing or deleting the conversation.
-     * Prevents native race conditions where close() deletes native conversation
-     * state while the decode loop is still running on a background worker thread.
+     * The unloaded state, the moment unload(), close() or a memory release is
+     * called: not ready, no message can start, and one still generating is
+     * cancelled (it ends at its next decode step). The teardown that follows
+     * frees the engine.
      */
-    private fun cancelInFlightGeneration() {
-        try {
-            conversation?.cancelProcess()
-            val latch = activeStreamingLatch
-            if (latch != null) {
-                val settled = latch.await(2, TimeUnit.SECONDS)
-                if (!settled) {
-                    Log.w(TAG, "cancelInFlightGeneration: worker did not settle within timeout")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "cancelInFlightGeneration error: ${e.message}")
+    private fun markUnloaded() = stateLock.withLock {
+        lifecycle++
+        ready = false
+        conversation?.let { live ->
+            conversation = null
+            if (generationsRunning > 0) runCatching { live.cancelProcess() }
+            retiredConversations += live
         }
     }
 
+    /** Free the engine on a background thread; a load called after this waits for it. */
+    private fun releaseInBackground() {
+        val teardown = Teardowns.begin()
+        thread(name = "LiteRTLM-release") {
+            try {
+                cleanupInternal()
+            } finally {
+                Teardowns.end(teardown)
+            }
+        }
+    }
+
+    /**
+     * Free the conversation and engine. Never on the JS thread: it waits for a
+     * cancelled message to return before freeing what it generates on.
+     */
     private fun cleanupInternal() {
         synchronized(initLock) {
             try {
-                // Abort any in-flight generation and let worker settle before close
-                cancelInFlightGeneration()
-                conversation?.close()
-                conversation = null
-                engine?.close()        // Direct call
-                engine = null
+                val eng = stateLock.withLock {
+                    ready = false
+                    retireConversationLocked(timeoutMs = null)
+                    engine.also { engine = null }
+                }
+                eng?.close()
                 hasVisionEncoder = false
                 hasAudioEncoder = false
                 loadedModelPath = null
@@ -695,14 +782,72 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    private fun ensureLoaded() {
-        if (engine == null) {
-            throw LiteRTLMNativeException(
-                "execute", "FAILED_PRECONDITION", "MODEL_NOT_LOADED",
-                "No model loaded. Call loadModel() first.",
-            )
+    // -------------------------------------------------------------------------
+    // Generations in flight
+    // -------------------------------------------------------------------------
+
+    /**
+     * Claim [target] for one message. False if it left service since the
+     * message was sent — a reset, unload() or close() came first.
+     */
+    private fun beginGeneration(target: Conversation): Boolean = stateLock.withLock {
+        if (conversation !== target) return@withLock false
+        generationsRunning++
+        true
+    }
+
+    private fun endGeneration() = stateLock.withLock {
+        generationsRunning--
+        if (generationsRunning == 0) {
+            generationEnded.signalAll()
+            closeRetiredLocked()
         }
     }
+
+    /**
+     * Take the live conversation out of service, cancelling a message still
+     * generating in it, and wait up to [timeoutMs] (forever when null) for
+     * every running message to return; the retired conversations close once
+     * none runs. Call with [stateLock] held — the wait releases it.
+     */
+    private fun retireConversationLocked(timeoutMs: Long?) {
+        conversation?.let { live ->
+            conversation = null
+            if (generationsRunning > 0) runCatching { live.cancelProcess() }
+            retiredConversations += live
+        }
+        if (timeoutMs == null) {
+            // A cancel lands at the next decode step, but a prefill runs to the
+            // end first, which can take a while for a long prompt.
+            while (generationsRunning > 0) {
+                if (!generationEnded.await(10, TimeUnit.SECONDS) && generationsRunning > 0) {
+                    Log.w(TAG, "Still waiting for a cancelled message to return before freeing the engine")
+                }
+            }
+        } else {
+            var left = TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+            while (generationsRunning > 0 && left > 0) left = generationEnded.awaitNanos(left)
+        }
+        if (generationsRunning == 0) closeRetiredLocked()
+    }
+
+    private fun closeRetiredLocked() {
+        retiredConversations.forEach(::closeQuietly)
+        retiredConversations.clear()
+    }
+
+    private fun closeQuietly(conversation: Conversation) {
+        try {
+            conversation.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to close a conversation: ${e.message}")
+        }
+    }
+
+    private fun notLoaded() = LiteRTLMNativeException(
+        "execute", "FAILED_PRECONDITION", "MODEL_NOT_LOADED",
+        "No model loaded. Call loadModel() first.",
+    )
 
     /** Mirrors iOS validateMediaPath: a typed error instead of a decode failure later. */
     private fun requireMediaFile(path: String, label: String) {
@@ -711,21 +856,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    private fun createNewConversation(
+    /** A new conversation on [engine]; the caller installs it (the old one is retired first). */
+    private fun newConversation(
+        engine: Engine,
         initialMessagesJson: String? = null,
         systemPromptOverride: String? = null,
         speculativeDecoding: Boolean? = null,
-    ) {
-        ensureLoaded()
-        // v0.10.2 enforces single-session: close existing conversation first
-        conversation?.let { oldConv ->
-            try {
-                oldConv.close()
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to close old conversation: ${e.message}")
-            }
-            conversation = null
-        }
+    ): Conversation {
         // Map tools. The SDK's tool() adapter requires a {name, description,
         // parameters} description JSON — parameters alone makes it throw, and
         // the old `as ToolProvider` cast of an OpenApiTool always threw
@@ -789,7 +926,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             enableSpeculativeDecoding = speculativeDecoding,
             chatTemplate = chatTemplate,
         )
-        conversation = engine!!.createConversation(convConfig)
+        return engine.createConversation(convConfig)
     }
 
 
@@ -854,6 +991,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 responseJson = part.responseJson,
             )
         }
+        // The conversation this message belongs to: a reset, unload() or
+        // close() called after this cancels it rather than letting it run in
+        // whatever comes next (matching iOS).
+        val target = stateLock.withLock { conversation }
 
         return Promise.parallel {
             // A tool-result message is a 'tool' turn: results only, each naming its tool.
@@ -872,7 +1013,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
                 }
             }
-            ensureLoaded()
+            val conv = target ?: throw notLoaded()
             preprocessed.firstOrNull { (it.type == PartType.IMAGE && !hasVisionEncoder) || (it.type == PartType.AUDIO && !hasAudioEncoder) }
                 ?.let { part ->
                     val missing = if (part.type == PartType.IMAGE) "vision" else "audio"
@@ -882,6 +1023,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             "loadModel() (inspectModel() shows whether the bundle has one).",
                     )
                 }
+            if (!beginGeneration(conv)) {
+                throw LiteRTLMNativeException(
+                    "execute", "CANCELLED", "INFERENCE_CANCELLED",
+                    "The conversation was reset or the model unloaded before this message ran.",
+                )
+            }
 
             val tempFiles = mutableListOf<java.io.File>()
 
@@ -1004,7 +1151,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
-                    activeStreamingLatch = latch
                     val errorRef = AtomicReference<Throwable?>(null)
                     val fullResponseBuilder = StringBuilder()
 
@@ -1021,41 +1167,37 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
 
                     try {
-                        try {
-                            withVisualBudget {
-                                conversation!!.sendMessageAsync(
-                                    message = userMsg,
-                                    callback = listener,
-                                    repetitionPenaltyConfig = repetitionPenaltyConfig,
-                                    noRepeatNgramConfig = noRepeatNgramConfig,
-                                    suppressTokensConfig = suppressTokensConfig,
-                                    maxOutputToken = perCallMaxOutput,
-                                    thinkingConfig = perCallThinking,
-                                    responseFormat = responseFormat,
-                                )
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "execute streaming failed", e)
-                            errorRef.set(e)
-                            onToken("Error: ${e.message}", true)
-                            latch.countDown()
+                        withVisualBudget {
+                            conv.sendMessageAsync(
+                                message = userMsg,
+                                callback = listener,
+                                repetitionPenaltyConfig = repetitionPenaltyConfig,
+                                noRepeatNgramConfig = noRepeatNgramConfig,
+                                suppressTokensConfig = suppressTokensConfig,
+                                maxOutputToken = perCallMaxOutput,
+                                thinkingConfig = perCallThinking,
+                                responseFormat = responseFormat,
+                            )
                         }
-
-                        latch.await()
-                        errorRef.get()?.let { throw LiteRTLMNativeException.from("execute", "Inference failed", it) }
-                        fullResponseBuilder.toString()
-                    } finally {
-                        if (activeStreamingLatch === latch) {
-                            activeStreamingLatch = null
-                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "execute streaming failed", e)
+                        errorRef.set(e)
+                        onToken("Error: ${e.message}", true)
+                        latch.countDown()
                     }
+
+                    // Holds this message's claim on the conversation until the
+                    // stream's last callback (see endGeneration below).
+                    latch.await()
+                    errorRef.get()?.let { throw LiteRTLMNativeException.from("execute", "Inference failed", it) }
+                    fullResponseBuilder.toString()
 
                 } else {
                     // ── Blocking path ─────────────────────────────────────────────────
                     val startTime = System.nanoTime()
                     val responseMsg = try {
                         withVisualBudget {
-                            conversation!!.sendMessage(
+                            conv.sendMessage(
                                 message = userMsg,
                                 repetitionPenaltyConfig = repetitionPenaltyConfig,
                                 noRepeatNgramConfig = noRepeatNgramConfig,
@@ -1094,6 +1236,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     response
                 }
             } finally {
+                // The message has returned (its history and stats written): a
+                // reset or teardown waiting on it may close the conversation.
+                endGeneration()
                 // Clean up all temp files created during this execute call
                 for (f in tempFiles) {
                     try { f.delete() } catch (e: Exception) {

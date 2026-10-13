@@ -53,6 +53,8 @@ class LiteRTLMNativeExceptionTest {
         assertEquals("NOT_FOUND", statusOf(FileNotFoundException("/x")))
         assertEquals("INVALID_ARGUMENT", statusOf(IllegalArgumentException("bad")))
         assertEquals("FAILED_PRECONDITION", statusOf(IllegalStateException("closed")))
+        // The SDK's cancelled stream (an IllegalStateException subclass).
+        assertEquals("CANCELLED", statusOf(java.util.concurrent.CancellationException("Task cancelled")))
         assertEquals("UNIMPLEMENTED", statusOf(UnsupportedOperationException("nope")))
         assertEquals("NOT_FOUND", statusOf(RuntimeException("Model file not found: /x.litertlm")))
         assertEquals("UNKNOWN", statusOf(RuntimeException("something odd")))
