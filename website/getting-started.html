@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -62,7 +63,7 @@
       <tbody>
         <tr><td>React Native</td><td>0.76+</td></tr>
         <tr><td><code>react-native-nitro-modules</code></td><td>0.37.1+</td></tr>
-        <tr><td>LiteRT-LM engine (bundled)</td><td>0.15.0</td></tr>
+        <tr><td>LiteRT-LM engine (bundled)</td><td>0.18.0</td></tr>
         <tr><td>Android</td><td>API 26+, arm64-v8a</td></tr>
         <tr><td>iOS</td><td>15.1+, arm64</td></tr>
       </tbody>
@@ -110,9 +111,11 @@ cd android &amp;&amp; ./gradlew clean</code></pre>
   <p>
     Models over ~2&nbsp;GB need <strong>Extended Virtual Addressing</strong>,
     or iOS caps virtual memory at ~2&nbsp;GB and Jetsam kills the app during
-    load. This applies to all three bundled model constants
+    load. Among the <a href="models.html#supported-models">bundled model
+    constants</a>, that means the Gemma 4 and Gemma 3n models
     (<code>GEMMA_4_E2B_IT</code>, <code>GEMMA_4_E4B_IT</code>,
-    <code>GEMMA_3N_E2B_IT_INT4</code>).
+    <code>GEMMA_3N_E2B_IT_INT4</code>). LFM2.5 and the embedding models fit
+    without it.
   </p>
   <div class="code">
     <div class="code-head"><span>App.entitlements</span></div>
@@ -127,8 +130,8 @@ cd android &amp;&amp; ./gradlew clean</code></pre>
   <h2 id="first-inference">First inference</h2>
   <p>
     <code>useModel</code> owns the whole lifecycle: it downloads the model with
-    progress, runs a pre-flight memory check, loads the engine, and cleans up
-    on unmount.
+    progress, checks the bundle and the device's memory before loading, loads
+    the engine, and cleans up on unmount.
   </p>
   <div class="code">
     <div class="code-head"><span>Chat.tsx</span></div>
@@ -149,7 +152,7 @@ function Chat() {
     return &lt;Text&gt;Loading… {Math.round(downloadProgress * 100)}%&lt;/Text&gt;;
 
   const ask = async () =&gt;
-    console.log(await model.sendMessage("Hello!"));
+    console.log(await model.execute([{ type: "text", text: "Hello!" }]));
 
   return &lt;Button title="Generate" onPress={ask} /&gt;;
 }</code></pre>
@@ -182,7 +185,7 @@ function Chat() {
 
 const llm = createLLM();
 await llm.loadModel("https://example.com/model.litertlm", { backend: "gpu" });
-const reply = await llm.sendMessage("What is the capital of France?");
+const reply = await llm.execute([{ type: "text", text: "What is the capital of France?" }]);
 llm.unload(); // free the engine; llm stays reusable</code></pre>
   </div>
 
@@ -190,7 +193,9 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
   <ul>
     <li><a href="use-model.html">useModel</a> — every field the hook returns, and its config.</li>
     <li><a href="inference.html">Inference &amp; streaming</a> — multimodal parts, typed events, tool calling, structured output.</li>
-    <li><a href="memory.html">Memory &amp; errors</a> — pre-flight estimates, forecasts, budgets, and OS pressure warnings.</li>
+    <li><a href="embeddings.html">Embeddings</a> — on-device vectors for semantic search and RAG.</li>
+    <li><a href="models.html">Models &amp; registry</a> — which bundles run, and how to inspect one before loading it.</li>
+    <li><a href="memory.html">Memory &amp; errors</a> — pre-flight estimates, forecasts, budgets, OS pressure warnings, and typed errors.</li>
   </ul>
 
   <div class="pager">

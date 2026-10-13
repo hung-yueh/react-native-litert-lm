@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Inference &amp; streaming — litert·lm</title>
-<meta name="description" content="execute() and executeWithEvents(): multimodal parts, typed streaming events, tool calling, thinking, structured output, and generation controls in react-native-litert-lm." />
+<meta name="description" content="execute() and executeWithEvents(): multimodal parts, typed streaming events, tool calling with tool results, thinking, structured output, generation controls, speculative decoding, and chat templates in react-native-litert-lm." />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html" class="here">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -51,17 +52,19 @@
   <p class="eyebrow">Core API</p>
   <h1>Inference &amp; streaming</h1>
   <p class="lede">
-    One entry point — <code>execute()</code> — handles text, images, and audio,
-    streaming or blocking. <code>executeWithEvents()</code> adds typed
-    <code>token</code> / <code>toolCall</code> / <code>thinking</code> events on top.
+    One entry point — <code>execute()</code> — handles text, images, audio and
+    tool results, streaming or blocking. <code>executeWithEvents()</code> adds
+    typed <code>token</code> / <code>toolCall</code> / <code>thinking</code>
+    events on top.
   </p>
 
   <h2 id="execute">execute()</h2>
   <p>
     <code>execute()</code> is the single deep entry point for inference. It
-    replaces all modality-specific send methods: pass an array of
-    <a href="#multimodalpart"><code>MultimodalPart</code></a>s mixing text,
-    image, and audio.
+    replaces all modality-specific send methods (now
+    <a href="create-llm.html#legacy-send-methods">deprecated</a>): pass an
+    array of <a href="#multimodalpart"><code>MultimodalPart</code></a>s mixing
+    text, image, and audio — or the results of the tools the model called.
   </p>
   <div class="sig">execute(
   parts: MultimodalPart[],
@@ -100,7 +103,7 @@ const reply = await llm.execute(
 
   <h2 id="multimodalpart">MultimodalPart</h2>
   <div class="sig">export interface MultimodalPart {
-  /** The part type: 'text', 'image', or 'audio' */
+  /** The part type: 'text', 'image', 'audio' or 'toolResult' */
   type: PartType;
   /** The plain text content, if type is 'text' */
   text?: string;
@@ -113,16 +116,22 @@ const reply = await llm.execute(
   imageBuffer?: ArrayBuffer;
   /** Raw audio binary data, if type is 'audio' (zero-copy ArrayBuffer mapping) */
   audioBuffer?: ArrayBuffer;
+  /** The tool's name, if type is 'toolResult' (as the model called it) */
+  name?: string;
+  /** The tool's result as JSON, if type is 'toolResult' — build it with `toolResultPart()` */
+  responseJson?: string;
 }</div>
   <div class="tbl-wrap">
     <table>
       <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>type</code></td><td><code>"text" | "image" | "audio"</code></td><td>The part type.</td></tr>
+        <tr><td><code>type</code></td><td><code>"text" | "image" | "audio" | "toolResult"</code></td><td>The part type.</td></tr>
         <tr><td><code>text</code></td><td><code>string</code></td><td>Plain text content, if <code>type</code> is <code>'text'</code>.</td></tr>
         <tr><td><code>path</code></td><td><code>string</code></td><td>Local filesystem path to an image or audio file. Takes precedence over <code>imageBuffer</code>/<code>audioBuffer</code> if both are set. A leading <code>file://</code> is stripped.</td></tr>
         <tr><td><code>imageBuffer</code></td><td><code>ArrayBuffer</code></td><td>Raw image binary data (zero-copy ArrayBuffer mapping), if <code>type</code> is <code>'image'</code>.</td></tr>
         <tr><td><code>audioBuffer</code></td><td><code>ArrayBuffer</code></td><td>Raw audio binary data (zero-copy ArrayBuffer mapping), if <code>type</code> is <code>'audio'</code>.</td></tr>
+        <tr><td><code>name</code></td><td><code>string</code></td><td>The tool's name, as the model called it, if <code>type</code> is <code>'toolResult'</code>.</td></tr>
+        <tr><td><code>responseJson</code></td><td><code>string</code></td><td>The tool's result as JSON, if <code>type</code> is <code>'toolResult'</code>. Build the part with <a href="#toolresultpart"><code>toolResultPart()</code></a> rather than by hand.</td></tr>
       </tbody>
     </table>
   </div>
@@ -130,6 +139,14 @@ const reply = await llm.execute(
     Buffers are staged to temp files for the engine's file-based API and
     cleaned up after inference. Image paths are auto-scaled to 1024px on both
     platforms.
+  </p>
+  <p>
+    Images and audio need a bundle with the matching encoder (e.g. Gemma 4
+    E2B). <a href="models.html#inspectmodel"><code>inspectModel()</code></a>
+    shows which a bundle has, and sending media to an engine without one
+    rejects with <code>UNSUPPORTED</code>. A <code>'toolResult'</code> part
+    answers a tool call, and a message of tool results takes no other parts —
+    see <a href="#tool-calling">Tool calling</a>.
   </p>
 
   <h3 id="multimodal-example">Multimodal example</h3>
@@ -192,15 +209,18 @@ await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (even
       — <span class="pill ios">iOS</span> only; on
       <span class="pill android">Android</span> a tool call surfaces once it is
       complete. The final event of every stream is
-      <code>{ type: "token", text: "", done: true }</code>.
+      <code>{ type: "token", text: "", done: true }</code>. To read whole
+      calls with parsed arguments and answer them, see
+      <a href="#tool-calling">Tool calling</a>.
     </p>
   </div>
 
-  <h2 id="tool-calling">Tool calling</h2>
+  <h2 id="tool-calling">Tool calling (agents)</h2>
   <p>
-    Declare tools in <code>LLMConfig.tools</code> at load time. When the model
-    decides to call one, the JSON call content arrives as
-    <code>toolCall</code> events.
+    Declare tools when you load. When the model wants one, its reply carries
+    the call; run the tool and send the result back with
+    <code>toolResultPart()</code>, and the model continues from it. That loop
+    is an agent.
   </p>
   <div class="sig">export interface ToolDefinition {
   /** Name of the function/tool */
@@ -210,31 +230,103 @@ await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (even
   /** JSON schema defining parameter names and types (stringified) */
   parametersJson: string;
 }</div>
+
+  <h3 id="tool-round-trip">The round trip</h3>
+  <ol>
+    <li><strong>Declare</strong> the tools in <code>LLMConfig.tools</code> at load time.</li>
+    <li><strong>Read the calls.</strong> A reply that calls tools carries <code>&lt;tool_call&gt;…&lt;/tool_call&gt;</code> markers; <code>parseToolCalls(reply)</code> turns them into <code>{ name, arguments }</code> objects.</li>
+    <li><strong>Answer every call in one <code>execute()</code></strong>: run each tool and send one <code>toolResultPart(name, result)</code> per call. The model continues from the results.</li>
+    <li><strong>Loop</strong> while the reply holds calls — with a step cap — then show <code>stripToolCalls(reply)</code>.</li>
+  </ol>
   <div class="code">
     <div class="code-head"><span>typescript</span></div>
-    <pre><code>const tools = [
-  {
-    name: "get_weather",
-    description: "Get the current weather for a city",
+    <pre><code>import { createLLM, parseToolCalls, stripToolCalls, toolResultPart, GEMMA_4_E2B_IT } from "react-native-litert-lm";
+
+// Your implementations, keyed by the names the model sees
+const tools: Record&lt;string, (args: Record&lt;string, unknown&gt;) =&gt; Promise&lt;unknown&gt;&gt; = {
+  get_current_weather: async ({ location }) =&gt; fetchWeather(String(location)),
+};
+
+const llm = createLLM();
+await llm.loadModel(GEMMA_4_E2B_IT, {
+  tools: [{
+    name: "get_current_weather",
+    description: "Get the current weather for a location",
     parametersJson: JSON.stringify({
       type: "object",
-      properties: { city: { type: "string" } },
-      required: ["city"],
+      properties: { location: { type: "string" } },
+      required: ["location"],
     }),
-  },
-];
+  }],
+});
 
-await llm.loadModel(modelUrl, { tools });
-
-let toolBuffer = "";
-await llm.executeWithEvents([{ type: "text", text: "Weather in Tokyo?" }], (event) =&gt; {
-  if (event.type === "toolCall") toolBuffer += event.text;
-  if (event.done &amp;&amp; toolBuffer) {
-    const call = JSON.parse(toolBuffer); // shape follows the model's tool-call JSON
-    dispatchTool(call);
-  }
-});</code></pre>
+let reply = await llm.execute([{ type: "text", text: "Is it warmer in Paris or Rome?" }]);
+for (let step = 0; step &lt; 5; step++) {
+  const calls = parseToolCalls(reply); // [{ name, arguments }]
+  if (calls.length === 0) break;
+  reply = await llm.execute(
+    await Promise.all(calls.map(async (call) =&gt; toolResultPart(call.name, await tools[call.name](call.arguments)))),
+  );
+}
+showAnswer(stripToolCalls(reply));</code></pre>
   </div>
+
+  <h3 id="tool-rules">What to know</h3>
+  <ul>
+    <li><strong>A message of tool results takes no other parts.</strong> Answer every call of a reply in the same <code>execute()</code>. Mixing a <code>toolResult</code> part with text, image or audio rejects with <code>INVALID_INPUT</code>; send any text in the next message.</li>
+    <li><strong><code>getHistory()</code> keeps the exchange</strong> as structured turns: the model's turn carries <code>toolCalls</code>, then each result is its own <code>'tool'</code> turn with <code>toolName</code>, its <code>content</code> holding the result's JSON. A model turn that called tools keeps any text around the calls in <code>content</code>.</li>
+    <li><strong>Conversation switches replay it</strong>, so a restored conversation still knows what the tools returned — whether through <a href="create-llm.html#multiple-conversations"><code>createConversation()</code></a> or <a href="create-llm.html#resetconversation"><code>resetConversation(historyJson)</code></a>.</li>
+    <li><strong>Integers in tool arguments stay integers.</strong></li>
+    <li><strong>It depends on the model's chat template.</strong> Gemma 4 handles the round trip; LFM2.5 writes calls in its own <code>&lt;|tool_call_start|&gt;</code> syntax, which <code>parseToolCalls()</code> doesn't read.</li>
+  </ul>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// The transcript after one round trip
+llm.getHistory();
+// [
+//   { role: "user", content: "Weather in Tokyo?" },
+//   { role: "model", content: "",
+//     toolCalls: [{ name: "get_current_weather", argumentsJson: '{"location":"Tokyo"}' }] },
+//   { role: "tool", toolName: "get_current_weather", content: '{"temperature":27}' },
+//   { role: "model", content: "It is 27°C in Tokyo right now." },
+// ]</code></pre>
+  </div>
+  <p>
+    To show a call while the reply is still streaming, use
+    <a href="#executewithevents"><code>executeWithEvents()</code></a>: calls
+    arrive as <code>toolCall</code> events on both platforms.
+  </p>
+
+  <h3 id="parsetoolcalls">parseToolCalls(source)</h3>
+  <div class="sig">function parseToolCalls(source: string | Message): ToolCallRequest[]
+
+/** A tool call with its arguments parsed. */
+interface ToolCallRequest {
+  /** The tool the model wants to run */
+  name: string;
+  /** Its arguments, as the model wrote them (integers stay integers) */
+  arguments: Record&lt;string, unknown&gt;;
+}</div>
+  <p>
+    The tool calls in a model response: the string <code>execute()</code>
+    resolves with, or a <code>'model'</code> turn from
+    <code>getHistory()</code>. A call whose JSON doesn't parse is skipped, and
+    its marker stays in the text.
+  </p>
+
+  <h3 id="striptoolcalls">stripToolCalls(response)</h3>
+  <div class="sig">function stripToolCalls(response: string): string</div>
+  <p>A response without its tool-call markers, trimmed — the text to show a user.</p>
+
+  <h3 id="toolresultpart">toolResultPart(name, response)</h3>
+  <div class="sig">function toolResultPart(name: string, response: unknown): MultimodalPart</div>
+  <p>
+    A tool's result, as a <code>{ type: "toolResult", name, responseJson }</code>
+    part for <code>execute()</code>. <code>response</code> is any JSON value: an
+    object reaches the model field by field; anything else is wrapped as
+    <code>{value: …}</code> by Gemma's template. Send one part per call the
+    model made, all in one <code>execute()</code>.
+  </p>
 
   <h2 id="thinking">Thinking</h2>
   <p>
@@ -327,7 +419,7 @@ await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
   presencePenalty: 0.5,            // OpenAI-style subtractive
   frequencyPenalty: 0.3,
   noRepeatNgramSize: 3,            // ban exact 3-gram repeats
-  suppressTokens: [128010],        // token IDs forced to -inf (iOS only)
+  suppressTokens: [128010],        // token IDs forced to -inf
 });</code></pre>
   </div>
   <div class="tbl-wrap">
@@ -340,15 +432,64 @@ await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
         <tr><td><code>penaltyWindowSize</code></td><td><code>0</code></td><td>How many recent generated tokens the penalties consider. <code>0</code> = the entire generation history.</td></tr>
         <tr><td><code>noRepeatNgramSize</code></td><td>—</td><td>Ban exact n-gram repeats of this size during generation (<code>0</code> disables).</td></tr>
         <tr><td><code>noRepeatNgramWindowSize</code></td><td><code>0</code></td><td>Window of recent tokens checked for repeating n-grams. <code>0</code> = entire generation history.</td></tr>
-        <tr><td><code>suppressTokens</code></td><td>—</td><td>Token IDs that must never be generated — logits forced to -inf. <span class="pill ios">iOS</span> only; ignored with a warning on <span class="pill android">Android</span> (LiteRT-LM 0.15.0's <code>SuppressTokensConfig</code> JNI binding aborts the process, so the library refuses to use it there until upstream fixes it).</td></tr>
+        <tr><td><code>suppressTokens</code></td><td>—</td><td>Token IDs that must never be generated — logits forced to -inf. Both platforms: Android since LiteRT-LM 0.17.0, which fixed the JNI binding that aborted the process (<a href="https://github.com/google-ai-edge/LiteRT-LM/issues/3229">upstream issue #3229</a>).</td></tr>
         <tr><td><code>maxOutputTokens</code></td><td>—</td><td>Cap output tokens for this message only, overriding the session-level <code>maxOutputTokens</code>. Both platforms (LiteRT-LM 0.15+).</td></tr>
-        <tr><td><code>visualTokenBudget</code></td><td>—</td><td>Visual token budget for this message (multimodal models). Lower values reduce memory spent encoding images. <span class="pill ios">iOS</span> only.</td></tr>
+        <tr><td><code>visualTokenBudget</code></td><td>—</td><td>Visual token budget for images in this message (Gemma 4: 70, 140, 280, 560 or 1120), up to <code>LLMConfig.maxVisionTokensPerImage</code>. Lower values reduce memory and time spent encoding images. Both platforms; on Android the SDK's budget is process-wide, so messages that set it run one at a time.</td></tr>
       </tbody>
     </table>
   </div>
   <p>
-    See <a href="configuration.html">Configuration</a> for the full
-    <code>ExecuteOptions</code> reference.
+    See <a href="configuration.html#executeoptions">Configuration</a> for the
+    full <code>ExecuteOptions</code> reference.
+  </p>
+
+  <h2 id="speculative-decoding">Speculative decoding</h2>
+  <p>
+    Bundles with a multi-token-prediction drafter (Gemma 4 E2B ships one) can
+    decode faster. <code>enableSpeculativeDecoding: true</code> turns it on for
+    the engine, and <code>createConversation({ speculativeDecoding })</code>
+    overrides it per conversation — <code>true</code> loads the bundle's
+    drafter on first use if the engine started without it.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// The session default, for every conversation on this engine
+await llm.loadModel(GEMMA_4_E2B_IT, { enableSpeculativeDecoding: true });
+
+// Or per conversation
+const drafting = llm.createConversation({ speculativeDecoding: true });
+const plain = llm.createConversation({ speculativeDecoding: false });</code></pre>
+  </div>
+  <p>
+    A bundle without a drafter ignores the request with a warning;
+    <code>llm.getModelInfo()?.llm?.speculativeDecoding</code> (or
+    <a href="models.html#inspectmodel"><code>inspectModel()</code></a> before
+    loading) tells you whether a bundle has one.
+  </p>
+  <div class="note">
+    <span class="note-label">Measure it</span>
+    <p>
+      Measure on your target devices: on CPU, speculative decoding isn't
+      always a win.
+    </p>
+  </div>
+
+  <h2 id="chat-templates">Chat templates</h2>
+  <p>
+    Every bundle carries its own chat template. When a community conversion's
+    template is missing or wrong, <code>chatTemplate</code> replaces it with a
+    Jinja template of yours. Start from upstream's
+    <a href="https://github.com/google-ai-edge/LiteRT-LM/tree/main/models"><code>models/&lt;family&gt;/chat_template.jinja</code></a>;
+    the engine adds the BOS token itself, so the template must not. An invalid
+    template fails the load.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await llm.loadModel(url, { chatTemplate: myJinjaTemplate });</code></pre>
+  </div>
+  <p>
+    The template also decides whether <a href="#tool-calling">tool calling</a>
+    works: the model's calls and your results travel through it.
   </p>
 
   <h2 id="stream-parser">Stream parser (advanced)</h2>
@@ -437,23 +578,51 @@ export function createStreamEventParser(
   <h3 id="gethistory">getHistory()</h3>
   <div class="sig">getHistory(): Message[]</div>
   <p>
-    Get the current conversation history as an array of
-    <code>{ role, content }</code> messages.
+    The current conversation's transcript, one <code>Message</code> per turn.
+    Images and audio appear as <code>[Image]</code> / <code>[Audio]</code>
+    placeholders in <code>content</code>. Tool exchanges are structured: a
+    <code>'model'</code> turn that called tools lists them in
+    <code>toolCalls</code>, and each result is its own <code>'tool'</code>
+    turn — see <a href="#tool-calling">Tool calling</a>.
   </p>
+  <div class="sig">export type Role = "user" | "model" | "system" | "tool";
+
+export interface Message {
+  /** Role of the message sender */
+  role: Role;
+  /**
+   * Text content of the message. For a 'tool' turn, the tool's result as
+   * JSON; for a 'model' turn that called tools, any text around the calls.
+   */
+  content: string;
+  /** Tool calls the model made in this turn ('model' turns only) */
+  toolCalls?: ToolCall[];
+  /** The tool whose result this turn carries ('tool' turns only) */
+  toolName?: string;
+}
+
+export interface ToolCall {
+  /** Name of the tool the model wants to run */
+  name: string;
+  /** The call's arguments as a JSON object; integers stay integers */
+  argumentsJson: string;
+}</div>
 
   <h3 id="resetconversation">resetConversation()</h3>
-  <div class="sig">resetConversation(historyJson?: string, systemPrompt?: string): void</div>
+  <div class="sig">resetConversation(historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean): void</div>
   <p>
     Clear the conversation context and start fresh. Optionally seed the fresh
-    context from a prior transcript (a JSON array of
-    <code>{role: 'user'|'model', content: string}</code> turns, re-prefilled by
-    the engine on the next message) and/or override the session
-    <code>systemPrompt</code> for the new conversation.
+    context from a prior transcript — the JSON of the <code>Message[]</code>
+    that <code>getHistory()</code> returns, tool exchanges included,
+    re-prefilled by the engine on the next message — override the session
+    <code>systemPrompt</code>, and turn speculative decoding on or off for the
+    new conversation. Details on
+    <a href="create-llm.html#resetconversation">createLLM &amp; instances</a>.
   </p>
 
   <div class="pager">
     <a href="create-llm.html"><span>Previous</span>createLLM &amp; instances</a>
-    <a class="next" href="configuration.html"><span>Next</span>Configuration</a>
+    <a class="next" href="embeddings.html"><span>Next</span>Embeddings</a>
   </div>
 </main>
 </div>

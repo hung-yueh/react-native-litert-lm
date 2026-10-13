@@ -2,13 +2,14 @@ import type { HybridObject } from "react-native-nitro-modules";
 
 /**
  * Backend types for LLM inference.
- * - 'cpu': CPU inference (slowest, always available)
- * - 'gpu': GPU acceleration (fast, recommended for most devices)
- * - 'npu': NPU/Neural Engine (fastest on supported hardware)
+ * - 'cpu': CPU inference (always available)
+ * - 'gpu': GPU acceleration (Metal on iOS, OpenCL on Android)
+ * - 'npu': NPU (bundles compiled for a specific SoC, e.g. Qualcomm or MediaTek)
  *
  * @remarks
- * NPU acceleration requires compatible hardware (e.g., Qualcomm Hexagon, MediaTek APU).
- * If NPU is unavailable, LiteRT-LM automatically falls back to GPU.
+ * `recommendBackend(await inspectModel(path))` says which of these a bundle
+ * supports on this device. If the engine can't be created on the requested
+ * backend, `loadModel()` falls back to CPU.
  */
 export type Backend = "cpu" | "gpu" | "npu";
 
@@ -83,18 +84,19 @@ export interface LLMConfig {
 
   /**
    * Primary compute backend for text generation.
-   * - 'cpu': CPU inference (safe default, always available)
-   * - 'gpu': GPU acceleration (fast, Metal on iOS, GPU delegate on Android)
-   * - 'npu': NPU/Neural Engine (fastest on supported devices)
+   * - 'cpu': CPU inference (always available)
+   * - 'gpu': GPU acceleration (Metal on iOS, OpenCL on Android)
+   * - 'npu': NPU (per-SoC bundles on supported devices)
    *
-   * If not specified, defaults to 'cpu'.
-   * If specified backend is unavailable, falls back automatically.
+   * When omitted, `loadModel()` uses the bundle's preferred backend that this
+   * device can run (see `recommendBackend()`), else CPU. If the engine can't
+   * be created on the requested backend, it falls back to CPU.
    *
    * @remarks
-   * Vision encoder is always set to GPU (required by Gemma models).
-   * Audio encoder is always set to CPU (optimal for audio processing).
+   * Image and audio encoders run on the backends the bundle declares for
+   * them; `multimodal: false` leaves them out.
    *
-   * @default 'cpu'
+   * @default the bundle's preference, else 'cpu'
    */
   backend?: Backend;
 
@@ -466,18 +468,19 @@ export interface MemoryUsage {
 
 /**
  * LiteRT-LM: High-performance LLM inference engine.
- * Supports Gemma 4, Gemma 3n, Phi-4, Qwen, and other .litertlm models.
+ * Runs any .litertlm bundle whose model family the engine supports (Gemma 4,
+ * Gemma 3n, Qwen, LFM2, Phi-4, …).
  *
  * @example
  * ```typescript
  * const llm = createLLM();
- * llm.loadModel('/path/to/gemma-4-E2B-it.litertlm', { backend: 'cpu' });
+ * await llm.loadModel('/path/to/gemma-4-E2B-it.litertlm');
  *
  * // Blocking generation
- * const response = llm.sendMessage('What is the capital of France?');
+ * const response = await llm.execute([{ type: 'text', text: 'What is the capital of France?' }]);
  *
  * // Streaming generation
- * llm.sendMessageAsync('Tell me a story', (token, done) => {
+ * await llm.execute([{ type: 'text', text: 'Tell me a story' }], (token, done) => {
  *   process.stdout.write(token);
  * });
  *

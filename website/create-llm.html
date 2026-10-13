@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html" class="here">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -52,8 +53,8 @@
   <h1>createLLM &amp; instances</h1>
   <p class="lede">
     <code>createLLM()</code> is the imperative entry point: it returns an engine
-    instance with pre-flight memory checks, forecasting, budget monitoring,
-    typed event streaming, and multi-conversation support.
+    instance with pre-flight bundle and memory checks, forecasting, budget
+    monitoring, typed event streaming, and multi-conversation support.
   </p>
 
   <h2 id="createllm">createLLM(options?)</h2>
@@ -73,7 +74,7 @@
 
 const llm = createLLM();
 await llm.loadModel("https://example.com/model.litertlm", { backend: "gpu" });
-const reply = await llm.sendMessage("What is the capital of France?");
+const reply = await llm.execute([{ type: "text", text: "What is the capital of France?" }]);
 llm.unload(); // free the engine; llm stays reusable</code></pre>
   </div>
 
@@ -127,8 +128,19 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
     <code>loadModel(modelPath, config?)</code>. It resolves the URL via
     <code>ModelRegistry.resolveModel</code> — HTTPS URLs are downloaded to the
     native cache with progress reported through
-    <code>onDownloadProgress</code> (0–1) — then runs a pre-flight memory
-    estimate before touching the engine.
+    <code>onDownloadProgress</code> (0–1) — then checks the bundle and the
+    memory budget before touching the engine:
+  </p>
+  <ol>
+    <li><strong>Bundle pre-flight.</strong> It reads the bundle's metadata and refuses the wrong model type (<code>MODEL_TYPE_MISMATCH</code>), a bundle that needs a newer engine (<code>RUNTIME_TOO_OLD</code>), or one this device can't run (<code>UNSUPPORTED</code>). It fills an omitted <code>backend</code> from the bundle and clamps <code>maxContextTokens</code> to the bundle's maximum — see <a href="models.html#load-pre-flight">the load pre-flight</a>.</li>
+    <li><strong>Memory pre-flight.</strong> It estimates weights, KV cache and overhead against the memory the OS reports as available — see <a href="memory.html#automatic-pre-flight">Memory &amp; errors</a>.</li>
+  </ol>
+  <p>
+    Native failures reject with a typed
+    <a href="memory.html#errors"><code>LiteRTLMError</code></a>; an engine
+    out-of-memory has code <code>OUT_OF_MEMORY</code> and, when the
+    pre-flight estimate can be computed, arrives as a <code>MemoryError</code>
+    carrying it.
   </p>
   <div class="warn">
     <span class="note-label">Warning</span>
@@ -139,6 +151,26 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
       Set <code>forceLoad: true</code> in the config to skip the check. See
       <a href="memory.html">Memory &amp; errors</a> for the estimate math.
     </p>
+  </div>
+
+  <h3 id="getmodelinfo">getModelInfo</h3>
+  <div class="sig">getModelInfo: () =&gt; ModelInfo | null</div>
+  <p>
+    What the loaded bundle declares about itself — type, modalities, context
+    limit, backends, sampler defaults, thinking and tool support — read during
+    <code>loadModel()</code>. Returns <code>null</code> before a load, or when
+    the bundle's metadata could not be read. The fields are documented under
+    <a href="models.html#modelinfo">ModelInfo</a>; <code>useModel()</code>
+    exposes the same object as <code>modelInfo</code>.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>await llm.loadModel(GEMMA_4_E2B_IT);
+
+const info = llm.getModelInfo();
+info?.modalities.vision;          // show the image picker?
+info?.maxContextTokens;           // the bundle's context limit
+info?.llm?.supportsFunctionCalling;</code></pre>
   </div>
 
   <h3 id="estimatememory">estimateMemory</h3>
@@ -165,66 +197,72 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
   <p>
     Execute inference receiving typed streaming events
     (<code>token</code> / <code>toolCall</code> / <code>thinking</code>)
-    instead of a raw token stream. Requires <code>streamToolCalls: true</code>
-    in the load config for tool-call events to appear. Full coverage in
-    <a href="inference.html">Inference &amp; streaming</a>.
+    instead of a raw token stream. Completed tool calls arrive as
+    <code>toolCall</code> events on both platforms;
+    <code>streamToolCalls: true</code> in the load config additionally streams
+    tool-call and reasoning tokens as they are generated —
+    <span class="pill ios">iOS</span> only. Full coverage in
+    <a href="inference.html#executewithevents">Inference &amp; streaming</a>.
   </p>
 
   <h3 id="createconversation">createConversation</h3>
   <div class="sig">createConversation: (options?: ConversationOptions) =&gt; ConversationHandle</div>
   <p>
-    Create a logical conversation sharing the loaded engine — see
-    <a href="#multiple-conversations">Multiple conversations</a> below.
+    Create a logical conversation sharing the loaded engine, with its own
+    <code>systemPrompt</code> and <code>speculativeDecoding</code> overrides —
+    see <a href="#multiple-conversations">Multiple conversations</a> below.
   </p>
 
   <h2 id="instance-methods">Instance methods reference</h2>
   <p>
     Everything below is inherited from the native <code>LiteRTLM</code> spec
-    and available on every instance.
+    and available on every instance. The <code>sendMessage*</code> family and
+    <code>sendMultimodalMessage</code> are deprecated — see
+    <a href="#legacy-send-methods">Deprecated send methods</a>.
   </p>
   <div class="tbl-wrap">
     <table>
       <thead><tr><th>Method</th><th>Description</th></tr></thead>
       <tbody>
         <tr>
-          <td><code>sendMessage(message: string): Promise&lt;string&gt;</code></td>
-          <td>Send a text message and get the complete response (blocking).</td>
-        </tr>
-        <tr>
-          <td><code>sendMessageAsync(message: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
-          <td>Send a message with streaming response.</td>
-        </tr>
-        <tr>
-          <td><code>sendMessageWithImage(message: string, imagePath: string): Promise&lt;string&gt;</code></td>
-          <td>Send a text message with an image (multimodal).</td>
-        </tr>
-        <tr>
-          <td><code>sendMessageWithImageAsync(message: string, imagePath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
-          <td>Streaming variant; tokens are delivered via callback as they are generated.</td>
-        </tr>
-        <tr>
-          <td><code>sendMessageWithAudio(message: string, audioPath: string): Promise&lt;string&gt;</code></td>
-          <td>Send a text message with audio (multimodal); <code>audioPath</code> is an absolute path to a WAV file.</td>
-        </tr>
-        <tr>
-          <td><code>sendMessageWithAudioAsync(message: string, audioPath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code></td>
-          <td>Streaming variant of <code>sendMessageWithAudio</code>.</td>
-        </tr>
-        <tr>
-          <td><code>sendMultimodalMessage(parts: MultimodalPart[]): Promise&lt;string&gt;</code></td>
-          <td>Send a unified multimodal message containing text and/or zero-copy binary buffers.</td>
-        </tr>
-        <tr>
           <td><code>execute(parts: MultimodalPart[], onToken?: (token: string, done: boolean) =&gt; void, options?: ExecuteOptions): Promise&lt;string&gt;</code></td>
-          <td>Unified multimodal inference — the single deep entry point that replaces all modality-specific send methods. Streams when <code>onToken</code> is given, otherwise resolves with the complete response.</td>
+          <td>Unified multimodal inference — the single deep entry point for text, images, audio and tool results. Streams when <code>onToken</code> is given, otherwise resolves with the complete response.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessage(message: string): Promise&lt;string&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Send a text message and get the complete response (blocking). Use <code>execute()</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageAsync(message: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Send a message with streaming response. Use <code>execute()</code> with <code>onToken</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithImage(message: string, imagePath: string): Promise&lt;string&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Send a text message with an image (multimodal). Use <code>execute()</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithImageAsync(message: string, imagePath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Streaming variant; tokens are delivered via callback as they are generated. Use <code>execute()</code> with <code>onToken</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithAudio(message: string, audioPath: string): Promise&lt;string&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Send a text message with audio (multimodal); <code>audioPath</code> is an absolute path to a WAV file. Use <code>execute()</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMessageWithAudioAsync(message: string, audioPath: string, onToken: (token: string, done: boolean) =&gt; void): Promise&lt;void&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Streaming variant of <code>sendMessageWithAudio</code>. Use <code>execute()</code> with <code>onToken</code>.</td>
+        </tr>
+        <tr>
+          <td><code>sendMultimodalMessage(parts: MultimodalPart[]): Promise&lt;string&gt;</code> <span class="pill dep">deprecated</span></td>
+          <td>Send a unified multimodal message containing text and/or zero-copy binary buffers. Use <code>execute(parts)</code>.</td>
         </tr>
         <tr>
           <td><code>getHistory(): Message[]</code></td>
-          <td>Get the current conversation history.</td>
+          <td>Get the current conversation history as structured turns — tool calls and tool results included (see <a href="inference.html#gethistory">getHistory()</a>).</td>
         </tr>
         <tr>
-          <td><code>resetConversation(historyJson?: string, systemPrompt?: string): void</code></td>
-          <td>Clear the context and start fresh; optionally seed it from a prior transcript (JSON array of <code>{role, content}</code> turns, re-prefilled on the next message) and/or override the session system prompt.</td>
+          <td><code>resetConversation(historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean): void</code></td>
+          <td>Clear the context and start fresh — see <a href="#resetconversation">resetConversation</a> below.</td>
         </tr>
         <tr>
           <td><code>isReady(): boolean</code></td>
@@ -274,6 +312,38 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
     </table>
   </div>
 
+  <h3 id="resetconversation">resetConversation</h3>
+  <div class="sig">resetConversation(
+  historyJson?: string,
+  systemPrompt?: string,
+  speculativeDecoding?: boolean,
+): void</div>
+  <p>
+    Clear the conversation context and start fresh — the native primitive
+    behind <code>createConversation()</code>'s switching. All three arguments
+    are optional:
+  </p>
+  <ul>
+    <li><code>historyJson</code> seeds the new conversation with a prior transcript: the JSON of the <code>Message[]</code> that <code>getHistory()</code> returns. Tool exchanges replay as the model's tool calls and <code>'tool'</code> results, and the engine re-prefills the transcript on the next message.</li>
+    <li><code>systemPrompt</code> overrides the session-level system prompt for the new conversation; unset keeps the session default.</li>
+    <li><code>speculativeDecoding</code> turns speculative decoding on or off for the new conversation; unset follows the session default. <code>true</code> loads the bundle's drafter on first use if the engine started without it.</li>
+  </ul>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// Save a chat, then restore it later (tool calls and results included)
+const saved = JSON.stringify(llm.getHistory());
+// …
+llm.resetConversation(saved);</code></pre>
+  </div>
+  <p>
+    It throws a typed <a href="memory.html#errors"><code>LiteRTLMError</code></a>
+    when the new conversation can't be created. A manual reset returns the
+    live context to the default conversation. For several chats over one engine, prefer
+    <a href="#multiple-conversations">createConversation()</a>, which does
+    this bookkeeping for you, per-conversation
+    <code>speculativeDecoding</code> included.
+  </p>
+
   <h3 id="unload-vs-close">unload vs close</h3>
   <div class="note">
     <span class="note-label">Note</span>
@@ -308,7 +378,23 @@ await summarizer.release(); // drop a side-chain when done</code></pre>
   <div class="sig">export interface ConversationOptions {
   /** Override the session-level `systemPrompt` for this conversation. */
   systemPrompt?: string;
+  /**
+   * Turn speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
+   * MTP) on or off for this conversation; unset follows
+   * `LLMConfig.enableSpeculativeDecoding`. `true` loads the drafter on first use.
+   */
+  speculativeDecoding?: boolean;
 }</div>
+  <p>
+    A bundle without a drafter ignores <code>speculativeDecoding: true</code>
+    with a warning. See <a href="inference.html#speculative-decoding">Speculative
+    decoding</a> for when it pays off.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const drafting = llm.createConversation({ speculativeDecoding: true });
+const plain = llm.createConversation({ speculativeDecoding: false });</code></pre>
+  </div>
 
   <h3 id="conversationhandle">ConversationHandle</h3>
   <div class="sig">export interface ConversationHandle {
@@ -337,24 +423,42 @@ await summarizer.release(); // drop a side-chain when done</code></pre>
     <li>One engine holds <strong>one native context at a time</strong>. Switching between conversations replays the target's transcript into a fresh context via <code>resetConversation</code>.</li>
     <li>The replay means a <strong>re-prefill cost on the next message</strong> — expect seconds of extra latency on long transcripts.</li>
     <li>Multimodal turns replay as text placeholders (<code>[Image]</code>, <code>[Audio]</code>); images and audio are not re-encoded on switch.</li>
+    <li><strong>Tool exchanges replay too</strong> — the model's tool calls and the <code>'tool'</code> results — so a restored conversation still knows what the tools returned. See <a href="inference.html#tool-calling">Tool calling</a>.</li>
     <li>Once <code>createConversation()</code> has been called, all inference — including top-level <code>execute()</code> — <strong>serializes through one queue</strong>.</li>
     <li>Calls on a released handle throw: <code>LiteRTLM: conversation '&lt;id&gt;' has been released.</code> Conversation ids follow the pattern <code>conversation_&lt;n&gt;</code>.</li>
     <li>Calling <code>resetConversation()</code> manually on the instance clears the live context and returns ownership to the default conversation.</li>
   </ul>
 
-  <h2 id="legacy-send-methods">Legacy send methods</h2>
+  <h2 id="legacy-send-methods">Deprecated send methods <span class="pill dep">deprecated</span></h2>
   <p>
-    The <code>sendMessage*</code> and <code>sendMultimodalMessage</code>
-    methods are fully supported but route through <code>execute()</code>
-    internally. Prefer <code>execute()</code> /
-    <code>executeWithEvents()</code> in new code — one entry point for text,
-    image, and audio, with per-message <code>ExecuteOptions</code>.
+    The <code>sendMessage*</code> family and <code>sendMultimodalMessage</code>
+    are deprecated in favor of <code>execute()</code> /
+    <code>executeWithEvents()</code> — one entry point for text, images, audio
+    and tool results, with per-message <code>ExecuteOptions</code>. They still
+    work (each routes through <code>execute()</code> internally), warn once
+    per method, and are removed in 1.0.
+    <code>setDeprecationWarningsEnabled(false)</code> silences the warnings.
   </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Deprecated</th><th>Replacement</th></tr></thead>
+      <tbody>
+        <tr><td><code>sendMessage(text)</code></td><td><code>execute([{ type: "text", text }])</code></td></tr>
+        <tr><td><code>sendMessageAsync(text, onToken)</code></td><td><code>execute([{ type: "text", text }], onToken)</code></td></tr>
+        <tr><td><code>sendMessageWithImage(text, path)</code></td><td><code>execute([{ type: "text", text }, { type: "image", path }])</code></td></tr>
+        <tr><td><code>sendMessageWithImageAsync(text, path, onToken)</code></td><td><code>execute([{ type: "text", text }, { type: "image", path }], onToken)</code></td></tr>
+        <tr><td><code>sendMessageWithAudio(text, path)</code></td><td><code>execute([{ type: "text", text }, { type: "audio", path }])</code></td></tr>
+        <tr><td><code>sendMessageWithAudioAsync(text, path, onToken)</code></td><td><code>execute([{ type: "text", text }, { type: "audio", path }], onToken)</code></td></tr>
+        <tr><td><code>sendMultimodalMessage(parts)</code></td><td><code>execute(parts)</code></td></tr>
+      </tbody>
+    </table>
+  </div>
   <div class="note">
     <span class="note-label">Note</span>
     <p>
       The <code>*Async</code> variants resolve <code>Promise&lt;void&gt;</code> —
       collect the response from the token callback, not the returned promise.
+      <code>execute()</code> resolves with the full response either way.
     </p>
   </div>
 

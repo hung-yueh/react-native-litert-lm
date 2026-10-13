@@ -121,9 +121,7 @@ export * from "./hooks";
  *   { type: 'image', path: '/path/to/photo.jpg' },
  * ]);
  *
- * // ── Legacy methods (still fully supported) ────────────────────────────────
- * const r = await llm.sendMessage('Hello');
- * llm.sendMessageAsync('Stream this', (t, done) => console.log(t));
+ * // The older sendMessage* methods still work but are deprecated (removed in 1.0).
  *
  * llm.close();
  * ```

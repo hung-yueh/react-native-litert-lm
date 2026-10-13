@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Models &amp; registry — litert·lm</title>
-<meta name="description" content="Supported .litertlm model bundles, the Models identifier map, and the ModelRegistry download and cache API for react-native-litert-lm." />
+<meta name="description" content="Supported .litertlm model bundles, the model constants, inspectModel and the load pre-flight, the Models identifier map, and the ModelRegistry download and cache API for react-native-litert-lm." />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -51,39 +52,74 @@
   <p class="eyebrow">Platform</p>
   <h1>Models &amp; registry</h1>
   <p class="lede">
-    The bundled model URL constants, the <code>Models</code> identifier map,
-    and <code>ModelRegistry</code> — the single source of truth for model
+    Which bundles run, the bundled model URL constants, how to know a model
+    before loading it, the <code>Models</code> identifier map, and
+    <code>ModelRegistry</code> — the single source of truth for model
     download and cache state.
   </p>
 
   <h2 id="supported-models">Supported models</h2>
   <p>
-    Only <code>.litertlm</code> bundles run. This is a native inference
-    engine, not a Python runtime — raw HuggingFace checkpoints will not load.
-    The library ships three ready-to-use URL constants; pass any of them
-    straight to <code>useModel()</code> or <code>loadModel()</code>.
+    Any <code>.litertlm</code> bundle runs if the engine knows its model
+    family: Gemma 4, 3n and 3, FunctionGemma, Qwen 3 and 3.5, LFM2, MiniCPM,
+    FastVLM and generic decoders, plus EmbeddingGemma 2 for embeddings.
+    <a href="https://huggingface.co/litert-community">litert-community</a>
+    hosts hundreds of them. This is a native inference engine, not a Python
+    runtime — raw Hugging Face checkpoints will not load.
+  </p>
+  <p>
+    <a href="#know-the-model"><code>inspectModel()</code></a> tells you what a
+    bundle is before you load it, and
+    <a href="manifest.html">manifest resolution</a> picks a repo's right
+    variant for the device.
+  </p>
+
+  <h3 id="model-constants">Model constants</h3>
+  <p>
+    The exported constants are public URLs — no Hugging Face account or
+    authentication required. Pass any of them to <code>useModel()</code> /
+    <code>loadModel()</code>, or the embedding ones to
+    <code>useEmbedder()</code> / <code>createEmbedder()</code>:
   </p>
   <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Constant</th><th>Size</th><th>Min RAM</th><th>Modalities</th></tr></thead>
+      <thead><tr><th>Constant</th><th>Model</th><th>Size</th><th>Min RAM</th></tr></thead>
       <tbody>
         <tr>
           <td><code>GEMMA_4_E2B_IT</code></td>
+          <td>Gemma 4 E2B — text, image, audio; tools and thinking</td>
           <td>2.58&nbsp;GB</td>
           <td>4&nbsp;GB+</td>
-          <td>Text, image, audio, tools, thinking</td>
         </tr>
         <tr>
           <td><code>GEMMA_4_E4B_IT</code></td>
+          <td>Gemma 4 E4B — higher quality</td>
           <td>3.65&nbsp;GB</td>
           <td>6&nbsp;GB+</td>
-          <td>Text, image, audio, tools, thinking</td>
+        </tr>
+        <tr>
+          <td><code>LFM2_5_1_2B_INSTRUCT</code></td>
+          <td>Liquid AI LFM2.5 1.2B Instruct — a fast small chat model, CPU</td>
+          <td>736&nbsp;MB</td>
+          <td>3&nbsp;GB+</td>
+        </tr>
+        <tr>
+          <td><code>EMBEDDING_GEMMA_2_TEXT_270M</code></td>
+          <td>EmbeddingGemma 2 — text embeddings</td>
+          <td>165&nbsp;MB</td>
+          <td>2&nbsp;GB+</td>
+        </tr>
+        <tr>
+          <td><code>EMBEDDING_GEMMA_2_740M</code></td>
+          <td>EmbeddingGemma 2 — text, image and audio embeddings</td>
+          <td>485&nbsp;MB</td>
+          <td>3&nbsp;GB+</td>
         </tr>
         <tr>
           <td><code>GEMMA_3N_E2B_IT_INT4</code> <span class="pill dep">deprecated</span></td>
+          <td>Gemma 3n E2B (int4, multimodal)</td>
           <td>~3.66&nbsp;GB</td>
           <td>6&nbsp;GB+</td>
-          <td>Text, image</td>
         </tr>
       </tbody>
     </table>
@@ -96,13 +132,41 @@
 export const GEMMA_4_E4B_IT =
   "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm";
 
+export const LFM2_5_1_2B_INSTRUCT =
+  "https://huggingface.co/litert-community/LFM2.5-1.2B-Instruct/resolve/main/LFM2.5-1.2B-Instruct_int4.litertlm";
+
+export const EMBEDDING_GEMMA_2_TEXT_270M =
+  "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm";
+
+export const EMBEDDING_GEMMA_2_740M =
+  "https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/main/embeddinggemma-2-740m.litertlm";
+
 export const GEMMA_3N_E2B_IT_INT4 =
   "https://models.litert.dev/gemma-3n-E2B-it-int4.litertlm";</code></pre>
   </div>
-  <p>
-    All three URLs are public — no HuggingFace account or authentication
-    required.
-  </p>
+  <div class="note">
+    <span class="note-label">Verified for this release</span>
+    <p>
+      Gemma 4 E2B, LFM2.5 and both EmbeddingGemma 2 models were verified end
+      to end on the iOS simulator and an Android emulator for this release.
+      The embedding models are covered on
+      <a href="embeddings.html#models">Embeddings</a>.
+    </p>
+  </div>
+  <div class="note">
+    <span class="note-label">LFM2.5</span>
+    <p>
+      LFM2.5 is under the
+      <a href="https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/blob/main/LICENSE">LFM
+      Open License</a>, not Apache; check its commercial terms. It runs on
+      CPU: the Metal GPU engine fails for this model family on iOS, and on
+      Android
+      <code>resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct")</code>
+      picks the GPU re-export where it helps. Its tool calls use LFM's own
+      <code>&lt;|tool_call_start|&gt;</code> syntax, which
+      <code>parseToolCalls()</code> doesn't read.
+    </p>
+  </div>
   <div class="note">
     <span class="note-label">Prefer Gemma 4</span>
     <p>
@@ -119,10 +183,11 @@ export const GEMMA_3N_E2B_IT_INT4 =
   <div class="note">
     <span class="note-label">iOS entitlement</span>
     <p>
-      All three bundled models exceed ~2&nbsp;GB, so on iOS they need the
+      Models over ~2&nbsp;GB need the
       <a href="getting-started.html#entitlements">Extended Virtual Addressing
-      entitlement</a> — without it, iOS caps virtual memory and kills the app
-      during load.
+      entitlement</a> on iOS — that includes the Gemma 4 and Gemma 3n models
+      above. Without it, iOS caps virtual memory and kills the app during
+      load. LFM2.5 and the embedding models fit without it.
     </p>
   </div>
 
@@ -133,11 +198,251 @@ export const GEMMA_3N_E2B_IT_INT4 =
       Gemma 4 models support <strong>thinking mode</strong> (reasoning content
       arrives in <code>&lt;thinking&gt;…&lt;/thinking&gt;</code> markers),
       <strong>tool calling</strong> (<code>&lt;tool_call&gt;…&lt;/tool_call&gt;</code>
-      markers), <strong>audio input</strong>, and are NPU-optimized. The library
-      parses the channel markers into typed events — see
+      markers, answered with <a href="inference.html#tool-calling">tool
+      results</a>), <strong>audio input</strong>, and are NPU-optimized.
+      Gemma 4 E2B also ships a
+      <a href="inference.html#speculative-decoding">speculative-decoding</a>
+      drafter. The library parses the channel markers into typed events — see
       <a href="inference.html">Inference &amp; streaming</a>.
     </p>
   </div>
+
+  <h2 id="know-the-model">Know the model before loading it</h2>
+  <p>
+    A <code>.litertlm</code> bundle describes itself.
+    <code>inspectModel()</code> reads that description without loading the
+    weights, in milliseconds rather than the seconds and gigabytes a load
+    costs:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { inspectModel, recommendBackend, getDeviceInfo } from "react-native-litert-lm";
+
+const info = await inspectModel(path); // a local path, or a URL that is already downloaded
+info.type;              // 'llm' | 'embedding' | 'unknown'
+info.modalities;        // { text, vision, audio, video }
+info.maxContextTokens;  // the bundle's limit
+info.backends.text;     // backends it was built for, most preferred first
+recommendBackend(info); // { backend, reason, candidates } for this device
+getDeviceInfo();        // platform, SoC, memory, GPU availability</code></pre>
+  </div>
+  <p>
+    <code>loadModel()</code> runs the same checks for you — see
+    <a href="#load-pre-flight">the load pre-flight</a> — so most apps never
+    call these directly. They earn their keep in model pickers and settings
+    screens.
+  </p>
+
+  <h3 id="inspectmodel">inspectModel(pathOrUrl)</h3>
+  <div class="sig">function inspectModel(pathOrUrl: string): Promise&lt;ModelInfo&gt;</div>
+  <p>
+    Reads a bundle's metadata — model type, input modalities, context limit,
+    declared backends, NPU target, sampler defaults, minimum runtime —
+    without creating an engine. It accepts a local path, a
+    <code>file://</code> URI, or the URL of a model that is already
+    downloaded. It never downloads: a URL that isn't cached rejects with
+    <code>MODEL_NOT_FOUND</code>, so call
+    <a href="#resolve-model"><code>ModelRegistry.resolveModel()</code></a>
+    first.
+  </p>
+  <div class="note">
+    <span class="note-label">Note</span>
+    <p>
+      Inspection is cheap, but not free for multimodal bundles: the engine
+      also reads the vision encoder's sections (hundreds of MB, briefly in
+      memory). Readings are cached per file version, so the
+      <code>loadModel()</code> that follows doesn't repeat the work.
+    </p>
+  </div>
+
+  <h3 id="modelinfo">ModelInfo</h3>
+  <p>
+    Everything a bundle declares about itself. <code>inspectModel()</code>
+    returns it, and so do <code>llm.getModelInfo()</code>,
+    <code>useModel().modelInfo</code> and the embedding equivalents for the
+    loaded bundle.
+  </p>
+  <div class="sig">export interface ModelInfo {
+  /** The local file that was inspected */
+  path: string;
+  fileSizeBytes: number;
+  /** 'llm' for generation, 'embedding' for createEmbedder(), 'unknown' for older bundles */
+  type: ModelType;
+  /** Input modalities the bundle accepts */
+  modalities: Record&lt;Modality, boolean&gt;;
+  /** Largest context the bundle supports; 0 when undeclared */
+  maxContextTokens: number;
+  /** True when the context is configurable up to maxContextTokens; false = fixed */
+  dynamicContext: boolean;
+  /** Oldest LiteRT-LM runtime that can run the bundle, when declared */
+  minRuntimeVersion: string | null;
+  /** Backends the bundle declares per modality, most preferred first (empty = undeclared) */
+  backends: Record&lt;Modality, Backend[]&gt;;
+  /** NPU targets, for modalities compiled for a specific NPU */
+  npu: Partial&lt;Record&lt;Modality, NpuTarget&gt;&gt;;
+  /** Generation capabilities (LLM bundles) */
+  llm?: {
+    supportsThinking: boolean;
+    supportsFunctionCalling: boolean;
+    /** Ships a multi-token-prediction drafter (enableSpeculativeDecoding) */
+    speculativeDecoding: boolean;
+    /** The author's intended sampler, when declared */
+    samplerDefaults: { type: SamplerType; temperature: number; topK: number; topP: number } | null;
+    /** Largest visual-token budget per image; null without vision */
+    maxVisionTokenBudget: number | null;
+    /** Visual-token budgets the vision encoder was compiled for */
+    visionTokenOptions: number[];
+  };
+  /** Embedding capabilities (embedding bundles) */
+  embedding?: {
+    /** Output width before any outputSize truncation; null when undeclared */
+    dimension: number | null;
+    /** Input lengths (tokens) the encoder was compiled for */
+    inputLengthOptions: number[];
+    maxVisionTokenBudget: number | null;
+    visionTokenOptions: number[];
+  };
+}
+
+type ModelType = "llm" | "embedding" | "unknown";
+type Modality = "text" | "vision" | "audio" | "video";
+type SamplerType = "topK" | "topP" | "greedy";
+
+/** The NPU a bundle (or one of its modalities) was compiled for. */
+interface NpuTarget {
+  brand: NpuBrand; // "unknown" | "qualcomm" | "googleTensor" | "mediatek" | "intel" | "samsung"
+  /** Target SoC, e.g. "SM8750"; null when not declared */
+  socName: string | null;
+}</div>
+  <p>
+    The capability facts come from the bundle itself, never from its file
+    name.
+  </p>
+
+  <h3 id="recommendbackend">recommendBackend(info, options?)</h3>
+  <div class="sig">function recommendBackend(
+  info: ModelInfo,
+  options?: RecommendBackendOptions,
+): BackendRecommendation
+
+interface BackendRecommendation {
+  /** The backend to load with */
+  backend: Backend;
+  /** Every usable backend for this bundle on this device, best first */
+  candidates: Backend[];
+  /** False when the bundle targets hardware this device lacks (e.g. another SoC's NPU) */
+  compatible: boolean;
+  /** Why — log it, or show it in a model picker */
+  reason: string;
+}
+
+interface RecommendBackendOptions {
+  /** 'speed' (default) follows the bundle's own preference order;
+   *  'compatibility' puts CPU first whenever the bundle allows it. */
+  prefer?: "speed" | "compatibility";
+  /** The device to evaluate (default: this one) */
+  device?: DeviceInfo;
+}</div>
+  <p>
+    Picks the backend for a bundle on this device: the bundle's own
+    preference order (<code>info.backends.text</code>), minus what this
+    device can't run — no GPU driver, an NPU build for another SoC, NPU on
+    iOS. A bundle that declares nothing gets CPU.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>const { backend, compatible, reason } = recommendBackend(await inspectModel(path));
+if (!compatible) showError(reason);
+await llm.loadModel(path, { backend });</code></pre>
+  </div>
+  <div class="note">
+    <span class="note-label">From /core</span>
+    <p>
+      The main entry point evaluates this device by default. The copy in
+      <code>react-native-litert-lm/core</code> has no device to read: without
+      <code>options.device</code>, it assumes a GPU is present and skips
+      SoC-specific NPU builds.
+    </p>
+  </div>
+
+  <h3 id="getdeviceinfo">getDeviceInfo()</h3>
+  <div class="sig">function getDeviceInfo(): DeviceInfo</div>
+  <p>
+    Facts about this device that decide which bundle variant and backend fit.
+    Read once and cached.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>platform</code></td><td><code>"ios" | "android"</code></td><td>The platform.</td></tr>
+        <tr><td><code>osVersion</code></td><td><code>string</code></td><td>The OS version.</td></tr>
+        <tr><td><code>model</code></td><td><code>string</code></td><td>Hardware model: <code>"iPhone17,1"</code>, <code>"Pixel 9 Pro"</code>, …</td></tr>
+        <tr><td><code>socModel?</code></td><td><code>string</code></td><td>Android 12+: <code>Build.SOC_MODEL</code>, e.g. <code>"SM8750"</code>.</td></tr>
+        <tr><td><code>socManufacturer?</code></td><td><code>string</code></td><td>Android 12+: <code>Build.SOC_MANUFACTURER</code>, e.g. <code>"QTI"</code>.</td></tr>
+        <tr><td><code>totalMemoryBytes</code></td><td><code>number</code></td><td>Total device memory in bytes.</td></tr>
+        <tr><td><code>gpuAvailable</code></td><td><code>boolean</code></td><td>Whether the GPU backend's driver is present (OpenCL on Android; Metal on iOS).</td></tr>
+        <tr><td><code>isEmulator</code></td><td><code>boolean</code></td><td>Whether this is a simulator or emulator.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="load-pre-flight">The load pre-flight</h3>
+  <p>
+    <code>loadModel()</code> inspects the bundle before any weights load, and
+    acts on what it declares:
+  </p>
+  <ul>
+    <li><strong>The wrong kind of bundle</strong> rejects with <code>MODEL_TYPE_MISMATCH</code>: an embedding model in <code>createLLM()</code>, or an LLM in <code>createEmbedder()</code>.</li>
+    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>: its <code>minRuntimeVersion</code> is compared with <code>LITERT_LM_VERSION</code>, the engine this package ships (<code>"0.18.0"</code>).</li>
+    <li><strong>With <code>backend</code> omitted</strong>, the bundle's preferred backend that this device can run is used (CPU when the bundle declares none). A per-SoC NPU build on another phone rejects with <code>UNSUPPORTED</code>.</li>
+    <li><strong>Image and audio encoders</strong> load only if the bundle has them, on the backends it declares; <code>multimodal: false</code> keeps an engine text-only.</li>
+    <li><strong><code>maxContextTokens</code></strong> above the bundle's maximum is clamped, so the memory estimate and the engine agree.</li>
+    <li><strong><code>enableSpeculativeDecoding</code></strong> on a bundle without a drafter loads without it.</li>
+  </ul>
+  <p>
+    It notes what it changed with <code>console.warn</code> — a backend it
+    picked, a context you set that was clamped, a flag it dropped. Then the
+    <a href="memory.html#automatic-pre-flight">memory pre-flight</a> runs on
+    the adjusted config. A bundle whose metadata can't be read (an older
+    bundle) skips this step with a warning and the engine has the final say;
+    a missing file still rejects with <code>MODEL_NOT_FOUND</code>.
+    <code>llm.getModelInfo()</code> and <code>useModel().modelInfo</code>
+    return what the loaded bundle declared.
+  </p>
+  <p>
+    The checks are pure functions you can run yourself — in a model picker,
+    or in Node through <code>react-native-litert-lm/core</code>:
+  </p>
+  <div class="sig">function preflightLoad(
+  info: ModelInfo,
+  config: LLMConfig | undefined,
+  options?: PreflightOptions,
+): PreflightResult
+
+function preflightEmbedder(
+  info: ModelInfo,
+  config: EmbedderConfig | undefined,
+  options?: Omit&lt;PreflightOptions, "expectType"&gt;,
+): EmbedderPreflightResult
+
+interface PreflightOptions {
+  device?: DeviceInfo;
+  /** The model type the caller is loading (default 'llm') */
+  expectType?: "llm" | "embedding";
+  /** Runtime to check minRuntimeVersion against (default: this package's engine) */
+  runtimeVersion?: string;
+}
+
+/** EmbedderPreflightResult has the same shape, with an EmbedderConfig. */
+interface PreflightResult {
+  /** The config to load with: backend chosen, context clamped */
+  config: LLMConfig;
+  /** Whether config differs from the caller's */
+  changed: boolean;
+  /** Adjustments that were made, worth logging */
+  notes: string[];
+}</div>
 
   <h2 id="model-identifiers">Model identifiers</h2>
   <p>
@@ -161,13 +466,19 @@ export const GEMMA_3N_E2B_IT_INT4 =
   PHI_4_MINI: "Phi-4-mini-instruct_multi-prefill-seq_q8_ekv4096",
   /** Qwen 2.5 1.5B Instruct */
   QWEN_2_5_1_5B: "Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv4096",
+  /** EmbeddingGemma 2 text encoder (270M, 165 MB) — use with createEmbedder() */
+  EMBEDDING_GEMMA_2_TEXT_270M: "embeddinggemma-2-text-270m-litert-lm",
+  /** EmbeddingGemma 2 text + image + audio encoder (740M, 485 MB) — use with createEmbedder() */
+  EMBEDDING_GEMMA_2_740M: "embeddinggemma-2-740m-litert-lm",
+  /** Liquid AI LFM2.5 1.2B Instruct (736 MB int4, CPU) — see LFM2_5_1_2B_INSTRUCT */
+  LFM2_5_1_2B_INSTRUCT: "LFM2.5-1.2B-Instruct",
 } as const;
 
 export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
   </div>
   <p>
-    Models without a bundled URL constant — Gemma 3 1B, Phi-4 Mini, and
-    Qwen 2.5 1.5B — download manually from HuggingFace
+    Models without a bundled URL constant — Gemma 3n E4B, Gemma 3 1B, Phi-4
+    Mini, and Qwen 2.5 1.5B — download manually from Hugging Face
     (<code>litert-community</code>), then load by local path or by your own
     HTTPS URL.
   </p>
@@ -224,7 +535,10 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     Resolve a model path or URL. Sniffs the protocol: an HTTPS URL is
     downloaded to the native cache directory (with throttled progress
     callbacks) if not already cached; a local path is returned directly.
-    Resolves to the absolute local path of the model.
+    Resolves to the absolute local path of the model. A failed download
+    rejects with a <a href="memory.html#errors"><code>LiteRTLMError</code></a>
+    with code <code>DOWNLOAD_FAILED</code>, keeping the native error as
+    <code>cause</code>.
   </p>
   <div class="code">
     <div class="code-head"><span>typescript</span></div>
@@ -238,12 +552,13 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
   <ul>
     <li>A leading <code>file://</code> prefix is stripped.</li>
     <li>The cache filename is derived from the URL's last path segment, with the query string stripped.</li>
-    <li>When no filename can be derived, resolution throws <code>Invalid model URL: &lt;url&gt;</code>.</li>
+    <li>When no filename can be derived, resolution throws <code>Invalid model URL: &lt;url&gt;</code> (code <code>INVALID_INPUT</code>).</li>
   </ul>
   <div class="warn">
     <span class="note-label">HTTPS only</span>
     <p>
-      <code>http://</code> URLs are rejected with:
+      <code>http://</code> URLs are rejected — a <code>LiteRTLMError</code>
+      with code <code>INVALID_INPUT</code> and the message
       <code>Insecure HTTP URLs are not allowed for model downloads. Use HTTPS
       instead: &lt;https-url&gt;</code>
     </p>

@@ -36,6 +36,7 @@
     <a href="use-model.html">useModel hook</a>
     <a href="create-llm.html">createLLM &amp; instances</a>
     <a href="inference.html">Inference &amp; streaming</a>
+    <a href="embeddings.html">Embeddings</a>
     <a href="configuration.html">Configuration</a>
   </div>
   <div class="group">
@@ -188,7 +189,10 @@ const runnable = options.filter((o) =&gt; o.estimate.verdict !== "critical");</c
   <p>
     The <code>loadModel()</code> on a <a href="create-llm.html">createLLM</a>
     instance runs the estimate automatically after resolving (and, if needed,
-    downloading) the model. On a <code>'critical'</code> verdict it throws a
+    downloading) the model, and after the
+    <a href="models.html#load-pre-flight">bundle pre-flight</a> — so the
+    backend it picked and a clamped <code>maxContextTokens</code> are what get
+    estimated. On a <code>'critical'</code> verdict it throws a
     <code>MemoryError</code> instead of loading — unless you pass
     <code>forceLoad: true</code> in the config. The error message follows this
     pattern:
@@ -226,6 +230,17 @@ try {
   }
 }</code></pre>
   </div>
+  <p>
+    The same branch covers the engine running out of memory for real. When
+    a load or a generation fails with the engine's
+    <code>RESOURCE_EXHAUSTED</code> status, the rejection has code
+    <code>OUT_OF_MEMORY</code> — a <code>MemoryError</code> whose
+    <code>estimate</code> is the pre-flight math for the same model and
+    config, whenever that estimate can be computed. See
+    <a href="#errors">Errors</a>.
+    <a href="embeddings.html#loading"><code>createEmbedder().loadModel()</code></a>
+    runs the same memory check before loading an embedding model.
+  </p>
   <div class="warn">
     <span class="note-label">forceLoad</span>
     <p>
@@ -494,59 +509,191 @@ await llm.loadModel(otherModelUrl);
 llm.close();   // done for good; the instance is no longer usable</code></pre>
   </div>
 
+  <h2 id="tuning-knobs">Tuning knobs</h2>
+  <p>
+    Every knob's memory impact, in one place. <code>maxContextTokens</code> is
+    the biggest lever; the full reference is on
+    <a href="configuration.html">Configuration</a>.
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Knob</th><th>Effect</th><th>Platform</th></tr></thead>
+      <tbody>
+        <tr><td><code>maxContextTokens</code></td><td>KV-cache size — the biggest lever.</td><td>Both</td></tr>
+        <tr><td><code>activationDataType: 'f16'</code></td><td>Roughly halves activation memory (mainly GPU).</td><td>Both</td></tr>
+        <tr><td><code>maxVisionTokensPerImage</code></td><td>Caps the visual tokens, and memory, each image may use (Gemma 4: 70–1120).</td><td>Both</td></tr>
+        <tr><td><code>execute(…, { visualTokenBudget })</code></td><td>Per-message image budget, up to that cap.</td><td>Both</td></tr>
+        <tr><td><code>prefillChunkSize</code></td><td>Caps peak prefill activation memory.</td><td>iOS</td></tr>
+        <tr><td><code>numThreads</code></td><td>CPU memory-bandwidth pressure.</td><td>Both</td></tr>
+        <tr><td><code>gpu: { metalResidencySet: true }</code></td><td>Keeps GPU weights resident between calls (iOS 18+).</td><td>iOS</td></tr>
+        <tr><td><code>execute(…, { maxOutputTokens })</code></td><td>Per-message output cap.</td><td>Both</td></tr>
+        <tr><td><code>loraPath</code></td><td>One base model plus small adapters, instead of full model copies.</td><td>Both</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <h2 id="errors">Errors</h2>
   <p>
-    Failures carry machine-readable codes — branch on <code>error.code</code>
-    instead of parsing messages.
+    Every failure is a <code>LiteRTLMError</code> with a stable
+    <code>code</code>, so you branch on codes rather than parse messages.
+    Failures from native code also carry the engine's status as
+    <a href="#native-status"><code>nativeStatus</code></a>.
+    <code>useModel()</code> and <code>useEmbedder()</code> expose the code as
+    <code>errorCode</code>.
   </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>import { LiteRTLMError } from "react-native-litert-lm";
+
+try {
+  await llm.loadModel(url);
+} catch (e) {
+  if (e instanceof LiteRTLMError &amp;&amp; e.code === "UNSUPPORTED") offerAnotherModel();
+}</code></pre>
+  </div>
 
   <h3 id="error-codes">LiteRTLMErrorCode</h3>
   <div class="sig">export type LiteRTLMErrorCode =
   | "MEMORY_ESTIMATE_EXCEEDED"
+  | "OUT_OF_MEMORY"
   | "MODEL_NOT_FOUND"
+  | "INVALID_MODEL"
   | "MODEL_NOT_LOADED"
+  | "MODEL_TYPE_MISMATCH"
+  | "RUNTIME_TOO_OLD"
   | "ENGINE_INIT_FAILED"
+  | "INVALID_CONFIG"
+  | "INVALID_INPUT"
+  | "INFERENCE_FAILED"
+  | "INFERENCE_CANCELLED"
+  | "EMBEDDING_FAILED"
+  | "UNSUPPORTED"
   | "DOWNLOAD_FAILED";</div>
   <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Code</th><th>When it occurs</th></tr></thead>
+      <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>MEMORY_ESTIMATE_EXCEEDED</code></td><td>The pre-flight estimate in <code>loadModel()</code> returned a <code>'critical'</code> verdict and <code>forceLoad</code> was not set. Thrown as <code>MemoryError</code>.</td></tr>
-        <tr><td><code>MODEL_NOT_FOUND</code></td><td>Reserved: the model file does not exist at the resolved path.</td></tr>
-        <tr><td><code>MODEL_NOT_LOADED</code></td><td>Reserved: an operation that needs a loaded model ran before <code>loadModel()</code> succeeded.</td></tr>
-        <tr><td><code>ENGINE_INIT_FAILED</code></td><td>Reserved: the native engine failed to initialize for the given model and config.</td></tr>
-        <tr><td><code>DOWNLOAD_FAILED</code></td><td>Reserved: the model download could not be completed.</td></tr>
+        <tr><td><code>MEMORY_ESTIMATE_EXCEEDED</code></td><td>The pre-flight refused a load that would not fit — a <code>MemoryError</code> carrying the estimate.</td></tr>
+        <tr><td><code>OUT_OF_MEMORY</code></td><td>The engine ran out of memory (<code>RESOURCE_EXHAUSTED</code>).</td></tr>
+        <tr><td><code>MODEL_NOT_FOUND</code> / <code>INVALID_MODEL</code></td><td>No file at the path, or not a usable bundle.</td></tr>
+        <tr><td><code>MODEL_TYPE_MISMATCH</code> / <code>RUNTIME_TOO_OLD</code> / <code>UNSUPPORTED</code></td><td>The bundle can't run here — the wrong model type, a bundle that needs a newer engine, or hardware this device lacks (see <a href="models.html#load-pre-flight">the load pre-flight</a>). <code>UNSUPPORTED</code> also covers requests the engine or platform doesn't implement, such as media sent to an engine without the matching encoder.</td></tr>
+        <tr><td><code>MODEL_NOT_LOADED</code></td><td>Inference before <code>loadModel()</code> (or after <code>unload()</code>).</td></tr>
+        <tr><td><code>ENGINE_INIT_FAILED</code> / <code>INVALID_CONFIG</code></td><td>Engine creation, or a config value, failed.</td></tr>
+        <tr><td><code>INVALID_INPUT</code></td><td>A bad part: a missing media file, an unreadable buffer, a malformed tool result.</td></tr>
+        <tr><td><code>INFERENCE_FAILED</code> / <code>INFERENCE_CANCELLED</code> / <code>EMBEDDING_FAILED</code></td><td>Generation or embedding failed, or was cancelled.</td></tr>
+        <tr><td><code>DOWNLOAD_FAILED</code></td><td>A model download failed.</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <h3 id="native-status">nativeStatus</h3>
+  <div class="sig">/** The engine's own account of a failure (LiteRTLMError.nativeStatus). */
+export interface NativeStatus {
+  /** Canonical status code, 0–16 (google.rpc.Code) */
+  code: number;
+  /** Canonical status name, e.g. "INVALID_ARGUMENT" */
+  name: NativeStatusName;
+  /** Which operation failed */
+  phase: NativePhase;
+  /** The engine's message, without bridge prefixes */
+  message: string;
+}
+
+export type NativePhase = "load" | "execute" | "embed" | "inspect";</div>
+  <p>
+    A failure that comes from native code carries the engine's canonical
+    status — a google.rpc code such as <code>RESOURCE_EXHAUSTED</code>, as
+    reported by <code>litert_lm_get_last_error_code()</code> on iOS and by the
+    SDK's <code>absl::Status</code> text on Android. Failures detected in JS,
+    such as the memory pre-flight, have no <code>nativeStatus</code>. The
+    error's <code>code</code> follows from the status and the phase:
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Engine status</th><th>Code</th></tr></thead>
+      <tbody>
+        <tr><td><code>RESOURCE_EXHAUSTED</code></td><td><code>OUT_OF_MEMORY</code></td></tr>
+        <tr><td><code>CANCELLED</code></td><td><code>INFERENCE_CANCELLED</code></td></tr>
+        <tr><td><code>UNIMPLEMENTED</code></td><td><code>UNSUPPORTED</code></td></tr>
+        <tr><td><code>NOT_FOUND</code></td><td><code>MODEL_NOT_FOUND</code> while loading or inspecting; <code>INVALID_INPUT</code> otherwise.</td></tr>
+        <tr><td><code>INVALID_ARGUMENT</code>, <code>OUT_OF_RANGE</code>, <code>FAILED_PRECONDITION</code></td><td><code>INVALID_CONFIG</code> while loading, <code>INVALID_MODEL</code> while inspecting, <code>INVALID_INPUT</code> otherwise.</td></tr>
+        <tr><td>anything else</td><td>The phase's default: <code>ENGINE_INIT_FAILED</code> (load), <code>INVALID_MODEL</code> (inspect), <code>INFERENCE_FAILED</code> (execute), <code>EMBEDDING_FAILED</code> (embed).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Where the wrapper itself detects the failure — inference before a load,
+    say — the native error names its code directly, and that code wins.
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>catch (e) {
+  if (e instanceof LiteRTLMError &amp;&amp; e.nativeStatus) {
+    const { name, phase, message } = e.nativeStatus;
+    log(`${phase} failed with ${name}: ${message}`); // e.g. "load failed with INVALID_ARGUMENT: …"
+  }
+}</code></pre>
   </div>
 
   <h3 id="error-classes">LiteRTLMError &amp; MemoryError</h3>
   <div class="sig">/** Base error class for all typed react-native-litert-lm errors. */
 class LiteRTLMError extends Error {
   readonly code: LiteRTLMErrorCode;
-  constructor(code: LiteRTLMErrorCode, message: string);
+  /** The engine's canonical status, when the failure originated natively */
+  readonly nativeStatus?: NativeStatus;
+  constructor(code: LiteRTLMErrorCode, message: string, options?: LiteRTLMErrorOptions);
   // name === "LiteRTLMError"
 }
 
-/** Thrown by loadModel() when the model likely does not fit. */
+interface LiteRTLMErrorOptions {
+  /** The engine's own status, when the failure came from native code */
+  nativeStatus?: NativeStatus;
+  /** The underlying error */
+  cause?: unknown;
+}
+
+/** A memory failure, with the estimate that explains it. */
 class MemoryError extends LiteRTLMError {
   readonly estimate: MemoryEstimate;
-  constructor(message: string, estimate: MemoryEstimate);
-  // code === "MEMORY_ESTIMATE_EXCEEDED", name === "MemoryError"
+  constructor(
+    message: string,
+    estimate: MemoryEstimate,
+    options?: LiteRTLMErrorOptions &amp; { code?: MemoryErrorCode },
+  );
+  // code: "MEMORY_ESTIMATE_EXCEEDED" (default) | "OUT_OF_MEMORY"; name === "MemoryError"
 }</div>
   <p>
-    <code>MemoryError</code> carries the full <code>MemoryEstimate</code> that
-    triggered the refusal, so apps can show a useful message — or lower
-    <code>maxContextTokens</code> and retry.
+    <code>MemoryError</code> carries a full <code>MemoryEstimate</code>, so
+    apps can show a useful message — or lower <code>maxContextTokens</code>
+    and retry. It comes with one of two codes:
   </p>
+  <ul>
+    <li><code>MEMORY_ESTIMATE_EXCEEDED</code> — an estimate refusal: <code>loadModel()</code> refused before loading, because the pre-flight estimate says the model likely does not fit.</li>
+    <li><code>OUT_OF_MEMORY</code> — the engine itself ran out of memory while loading or generating; <code>estimate</code> is the pre-flight math for the same model and config.</li>
+  </ul>
 
   <h3 id="ismemoryerror">isMemoryError</h3>
   <div class="sig">function isMemoryError(e: unknown): e is MemoryError</div>
   <p>
-    The type guard checks
-    <code>e instanceof Error &amp;&amp; e.code === "MEMORY_ESTIMATE_EXCEEDED"</code>
-    — not <code>instanceof MemoryError</code> — so it works across realms
-    (e.g. when the error crossed a bundle or worker boundary).
+    True for an estimate refusal (<code>MEMORY_ESTIMATE_EXCEEDED</code>) and
+    for an engine out-of-memory that carries an estimate
+    (<code>OUT_OF_MEMORY</code>), so one check covers “this did not fit”. The
+    guard reads <code>code</code> and <code>estimate</code> — not
+    <code>instanceof MemoryError</code> — so it works across realms (e.g. when
+    the error crossed a bundle or worker boundary). An
+    <code>OUT_OF_MEMORY</code> for which no estimate could be computed is a
+    plain <code>LiteRTLMError</code>; check <code>e.code</code> for it.
+  </p>
+
+  <h3 id="tolitertlmerror">toLiteRTLMError</h3>
+  <div class="sig">function toLiteRTLMError(e: unknown, phase: NativePhase): LiteRTLMError</div>
+  <p>
+    Converts anything a native call rejected with into a
+    <code>LiteRTLMError</code> — the conversion the library applies to the
+    engine's failures. Already-typed errors pass through unchanged; a
+    tagged native error gets its <code>code</code> and
+    <code>nativeStatus</code> as above; anything else gets the phase's
+    default code. The original error is kept as <code>cause</code>.
   </p>
 
   <div class="pager">
