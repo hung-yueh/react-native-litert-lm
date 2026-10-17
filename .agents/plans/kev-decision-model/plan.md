@@ -82,6 +82,12 @@
   - *Mitigation*: Provide default embedded pointer head weights for Kev-0.8B, plus allow custom weights in `KevModelConfig`.
 
 ## 7. Critique & Revisions
+- **Compilation Summary**:
+  - Total leaf tasks: 7
+  - Max tree depth: 1
+  - Concurrency waves: 4
+  - Compiled At: 2026-10-16T19:01:45-05:00
+  - Cycles: None detected
 - Reviewed against LiteRT and Kev repository specification on HuggingFace. Verified tensor dimensions (d=1024 for 0.8B), layer state count (48 tensors: 18 GDN, 6 Attention), delimiter token IDs (248044, 248049, 248050, 248060, 248061, 248062).
 
 ## 8. Decision Points for User
