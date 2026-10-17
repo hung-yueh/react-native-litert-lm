@@ -42,6 +42,53 @@ git clone https://github.com/hung-yueh/react-native-litert-lm && cd react-native
 - 🧠 **Speculative decoding** — multi-token prediction, per engine or per conversation.
 - 📥 **Automatic model download** — HTTPS download with progress and local caching.
 
+## Why not react-native-executorch or llama.cpp?
+
+Both are good libraries. This one is built for a narrower job: running a multi-gigabyte model inside a phone app **without the OS killing it and without freezing the UI**. It runs any `.litertlm` bundle LiteRT-LM supports — Gemma 4 / 3n / 3, Qwen, Phi-4 Mini, LFM2.5 — plus EmbeddingGemma for on-device embeddings. Where it pulls ahead is memory and throughput, not model choice.
+
+### Where it wins
+
+- **Memory is managed, not hoped for.** `loadModel()` estimates weights + KV cache + overhead against real OS headroom and refuses loads that estimate says would be Jetsam- or LMK-killed (`forceLoad: true` overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows (iOS), real OS pressure callbacks, budgets with thresholds, and deterministic `unload()`. The alternatives give you a model handle; the crash-prevention layer is yours to write.
+- **Faster where phones are actually fast.** GPU on both platforms with automatic CPU fallback, plus LiteRT-LM's **NPU** path on Android (Qualcomm / MediaTek, with a bundle compiled for that chip). Speculative decoding raises decode throughput on models that ship a drafter; on iOS, `prefillChunkSize` caps peak activation memory on long prompts.
+- **No bridge tax.** Nitro JSI: each streamed token reaches JS without serialization, and images and audio cross as raw `ArrayBuffer` bytes — no base64 (a 4 MB photo as base64 is 5+ MB of JS string plus copies). Nothing the JS thread calls waits on the engine: generation runs off-thread, and `close()` or a reset cancels a running reply instead of waiting it out.
+- **One model, many contexts.** `createConversation()` keeps several independent chats on one loaded engine and switches between them by replaying the transcript; one generates at a time. Loading a second 2–4 GB engine is not an option on a phone.
+- **Output you never repair.** Constrained decoding to a JSON Schema or regex on both platforms: the model can only emit tokens that fit, so there's no repair-and-retry loop. (Give it enough `maxOutputTokens` that a reply isn't cut off.)
+- **Agents and search in the same package.** Tool calls arrive as typed events and `toolResultPart()` answers them; `createEmbedder()` turns text, images or audio into vectors for on-device search and RAG.
+
+### Use cases it is built for
+
+| Use case | What matters | What this library gives you |
+| --- | --- | --- |
+| Chat / assistant on mid-range Android with a 2–4 GB model | Not getting OOM-killed | Pre-flight check, pressure warnings, budgets, `unload()` |
+| Structured extraction — receipts, forms, classification into your schema | Output that fits your schema | `responseSchema` / `responseRegex` constrained decoding |
+| Voice memos and photos as input | No base64 on the way in | `ArrayBuffer` image / audio parts |
+| Agentic apps with tool calls and visible reasoning | Typed events, not regex over text | `token` / `toolCall` / `thinking` events; `toolResultPart()` to answer calls |
+| Long-document summarization (up to 128K context) | Knowing when the context will overflow | `getMemoryForecast()`, `getContextTokenCount()` (iOS) |
+| Assistant plus background summarizer in one app | Two conversations, one engine | `createConversation()` — one reply at a time, no second load |
+| Semantic search / RAG over app content | Embeddings without a server | `createEmbedder()` with EmbeddingGemma 2 |
+| Battery-sensitive workloads on NPU-equipped devices | Throughput per watt | `backend: 'npu'` on Android, with CPU fallback |
+
+### Side by side
+
+| | react-native-litert-lm | react-native-executorch | llama.cpp (llama.rn) |
+| --- | --- | --- | --- |
+| Engine | Google LiteRT-LM | PyTorch ExecuTorch | llama.cpp |
+| Models | `.litertlm` — Gemma 4 / 3n / 3, Qwen, Phi-4 Mini, LFM2.5, any LiteRT-LM bundle | `.pte` from a curated export pipeline | GGUF — anything on Hugging Face |
+| Accelerators | CPU, GPU (Metal / OpenCL), NPU (Android) | XNNPACK, Core ML, MLX, Vulkan | Metal; OpenCL on Adreno (limited quant types); Hexagon experimental |
+| Memory safety | Pre-flight estimate, live tracking, context forecast, OS pressure warnings, budgets | Manual | Manual (`n_gpu_layers`, context size) |
+| Multimodal input transfer | Raw `ArrayBuffer` bytes or a file path | — | File path or base64 |
+| Streaming events (`token` / `toolCall` / `thinking`) | Typed, parsed by the library | Depends on export and chat template | Jinja chat templates |
+| Structured output | JSON Schema / regex, both platforms | — | GBNF / JSON Schema grammars |
+| Multiple chats on one loaded model | Yes (switched by transcript replay) | — | Manual session save / load |
+| JS thread during generation | Never waits on the engine; close and reset cancel a running reply | Native modules | Native modules |
+| Minimum platform | Nitro Modules 0.37, iOS 15.1, Android API 26 | RN 0.81 / Expo 54 (New Architecture), iOS 17, Android 13 | Varies with build |
+
+**Choose react-native-executorch when** you also need non-LLM pipelines — OCR, speech-to-text, text-to-speech, object detection — from one dependency, and your app is already on the New Architecture.
+
+**Choose llama.cpp when** you need the long tail of GGUF models and community fine-tunes, or full control over quantization and layer offloading, and are comfortable owning memory management yourself.
+
+Competitor details are as of September 2026; check each project's docs for current status.
+
 ## Installation
 
 ```bash

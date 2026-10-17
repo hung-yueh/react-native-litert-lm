@@ -168,6 +168,92 @@
   </div>
 </section>
 
+<!-- ── Why this library ─────────────────────────────────────────────────── -->
+<section class="band" id="why">
+  <div class="band-inner">
+    <p class="eyebrow">Why this and not…</p>
+    <h2>react-native-executorch? llama.cpp?</h2>
+    <p class="band-sub">
+      Both are good libraries. This one is built for a narrower job: running a
+      multi-gigabyte model inside a phone app without the OS killing it and
+      without freezing the UI. It runs any <code>.litertlm</code> bundle LiteRT-LM
+      supports — Gemma&nbsp;4 / 3n / 3, Qwen, Phi-4&nbsp;Mini, LFM2.5 — plus
+      EmbeddingGemma for on-device embeddings. Where it pulls
+      ahead is memory and throughput, not model choice.
+    </p>
+
+    <div class="feat-grid">
+      <div class="feat">
+        <span class="feat-pin">WINS ON · MEMORY</span>
+        <h3>Managed, not hoped for</h3>
+        <p><code>loadModel()</code> refuses loads its estimate says would be Jetsam- or LMK-killed (<code>forceLoad</code> overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows (iOS), real OS pressure callbacks, budgets, and deterministic <code>unload()</code>. The alternatives hand you a model handle; the crash-prevention layer is yours to write.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">WINS ON · THROUGHPUT</span>
+        <h3>Fast where phones are fast</h3>
+        <p>GPU on both platforms with automatic CPU fallback, plus LiteRT-LM's NPU path on Android (Qualcomm / MediaTek, with a bundle compiled for that chip). Speculative decoding raises decode throughput on models that ship a drafter; on iOS, <code>prefillChunkSize</code> caps peak memory on long prompts.</p>
+      </div>
+      <div class="feat">
+        <span class="feat-pin">WINS ON · THE BRIDGE</span>
+        <h3>No bridge tax</h3>
+        <p>Nitro JSI: each streamed token reaches JS without serialization, and images and audio cross as raw <code>ArrayBuffer</code> bytes — no base64 blow-up. Nothing the JS thread calls waits on the engine, and <code>close()</code> or a reset cancels a running reply instead of waiting it out.</p>
+      </div>
+    </div>
+
+    <h3 style="font-family:var(--display);font-size:18px;margin:44px 0 6px">Use cases it is built for</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Use case</th><th>What matters</th><th>What you get</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Chat / assistant on mid-range Android with a 2–4 GB model</td><td>Not getting OOM-killed</td><td>Pre-flight check, pressure warnings, budgets, <code>unload()</code></td></tr>
+          <tr><td>Structured extraction — receipts, forms, classification into your schema</td><td>Output that fits your schema</td><td><code>responseSchema</code> / <code>responseRegex</code> constrained decoding, both platforms</td></tr>
+          <tr><td>Voice memos and photos as input</td><td>No base64 on the way in</td><td><code>ArrayBuffer</code> image / audio parts</td></tr>
+          <tr><td>Agentic apps with tool calls and visible reasoning</td><td>Typed events, not regex over text</td><td><code>token</code> / <code>toolCall</code> / <code>thinking</code> events; <code>toolResultPart()</code> to answer calls</td></tr>
+          <tr><td>Long-document summarization, up to 128K context</td><td>Knowing when the context will overflow</td><td><code>getMemoryForecast()</code>, <code>getContextTokenCount()</code> (iOS)</td></tr>
+          <tr><td>Assistant plus background summarizer in one app</td><td>Two conversations, one engine</td><td><code>createConversation()</code> — one reply at a time, no second 4 GB load</td></tr>
+          <tr><td>Semantic search / RAG over app content</td><td>Embeddings without a server</td><td><code>createEmbedder()</code> with EmbeddingGemma 2</td></tr>
+          <tr><td>Battery-sensitive workloads on NPU-equipped devices</td><td>Throughput per watt</td><td><code>backend: 'npu'</code> on Android, with CPU fallback</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="font-family:var(--display);font-size:18px;margin:36px 0 6px">Side by side</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th></th><th>react-native-litert-lm</th><th>react-native-executorch</th><th>llama.cpp (llama.rn)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Engine</td><td>Google LiteRT-LM</td><td>PyTorch ExecuTorch</td><td>llama.cpp</td></tr>
+          <tr><td>Models</td><td><code>.litertlm</code> — Gemma 4 / 3n / 3, Qwen, Phi-4 Mini, LFM2.5, any LiteRT-LM bundle</td><td><code>.pte</code> from a curated export pipeline</td><td>GGUF — anything on Hugging Face</td></tr>
+          <tr><td>Accelerators</td><td>CPU · GPU (Metal / OpenCL) · NPU (Android)</td><td>XNNPACK · Core ML · MLX · Vulkan</td><td>Metal; OpenCL on Adreno (limited quant types); Hexagon experimental</td></tr>
+          <tr><td>Memory safety</td><td>Pre-flight estimate, live tracking, context forecast, OS pressure warnings, budgets</td><td>Manual</td><td>Manual (<code>n_gpu_layers</code>, context size)</td></tr>
+          <tr><td>Multimodal input transfer</td><td>Raw <code>ArrayBuffer</code> bytes or a file path</td><td>—</td><td>File path or base64</td></tr>
+          <tr><td>Streaming events (token / toolCall / thinking)</td><td>Typed, parsed by the library</td><td>Depends on export and chat template</td><td>Jinja chat templates</td></tr>
+          <tr><td>Structured output</td><td>JSON Schema / regex, both platforms</td><td>—</td><td>GBNF / JSON Schema grammars</td></tr>
+          <tr><td>Multiple chats, one loaded model</td><td>Yes (switched by transcript replay)</td><td>—</td><td>Manual session save / load</td></tr>
+          <tr><td>JS thread during generation</td><td>Never waits on the engine; close and reset cancel a running reply</td><td>Native modules</td><td>Native modules</td></tr>
+          <tr><td>Minimum platform</td><td>Nitro Modules 0.37 · iOS 15.1 · Android API 26</td><td>RN 0.81 / Expo 54 (New Architecture) · iOS 17 · Android 13</td><td>Varies with build</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="color:var(--text-2);font-size:14.5px;max-width:72ch">
+      <strong>Pick react-native-executorch</strong> when you also need non-LLM
+      pipelines — OCR, speech-to-text, text-to-speech, object
+      detection — from one dependency, and your app is already on the New
+      Architecture. <strong>Pick llama.cpp</strong> when you need the long tail
+      of GGUF models and community fine-tunes, or full control over quantization
+      and layer offloading, and are comfortable owning memory management yourself.
+    </p>
+    <p style="color:var(--text-3);font-size:13px;margin-top:12px">
+      Competitor details as of September 2026 — check each project's docs for current status.
+    </p>
+  </div>
+</section>
+
 <!-- ── Quick start ──────────────────────────────────────────────────────── -->
 <section class="band">
   <div class="band-inner two-col">
