@@ -21,7 +21,7 @@
     "rootDir": "src",
     "baseUrl": ".",
     "paths": {
-      "react-native": ["example/node_modules/react-native"],
+      "react-native": ["example/node_modules/react-native/types_generated/index.d.ts"],
       "react-native-nitro-modules": ["example/node_modules/react-native-nitro-modules"],
       "react": ["example/node_modules/@types/react", "example/node_modules/react"]
     }

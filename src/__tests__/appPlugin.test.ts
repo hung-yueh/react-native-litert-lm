@@ -52,7 +52,21 @@ describe('Expo config plugin', () => {
       expect(await gradleProperties([{ type: 'property', key: 'android.minSdkVersion', value: '28' }])).toBe('28');
     });
 
-    it('pins the Kotlin Gradle plugin the AAR needs', async () => {
+    async function kotlinVersion(existing: Array<{ type: string; key: string; value: string }>) {
+      const config = withLiteRTLM({ name: 'app', slug: 'app' });
+      const result = await config.mods.android.gradleProperties({
+        ...config, modResults: existing, modRequest: { ...modRequest, modName: 'gradleProperties' },
+      });
+      return result.modResults.find((p: { key: string }) => p.key === 'android.kotlinVersion')?.value;
+    }
+
+    it('sets android.kotlinVersion to at least 2.3.0 (Expo SDK 58 templates read it)', async () => {
+      expect(await kotlinVersion([])).toBe('2.3.0');
+      expect(await kotlinVersion([{ type: 'property', key: 'android.kotlinVersion', value: '2.2.0' }])).toBe('2.3.0');
+      expect(await kotlinVersion([{ type: 'property', key: 'android.kotlinVersion', value: '2.10.1' }])).toBe('2.10.1');
+    });
+
+    it('pins the Kotlin Gradle plugin in older templates', async () => {
       const config = withLiteRTLM({ name: 'app', slug: 'app' });
       const result = await config.mods.android.projectBuildGradle({
         ...config,

@@ -2,7 +2,7 @@
  * Expo config plugin for react-native-litert-lm.
  *
  * Ensures correct build settings for the LiteRT-LM native module:
- * - Android: minSdkVersion 26, Kotlin 2.3.0 (required by litertlm-android AAR)
+ * - Android: minSdkVersion 26, Kotlin 2.3.0 or newer (the litertlm-android AAR needs it)
  * - iOS (opt-in): the memory entitlements multi-GB models need.
  *
  *   plugins: [["react-native-litert-lm", {
@@ -17,6 +17,23 @@ const {
   withGradleProperties,
   withProjectBuildGradle,
 } = require('@expo/config-plugins');
+
+/**
+ * The oldest Kotlin Gradle plugin that reads the litertlm-android AAR's
+ * metadata (Kotlin reads one minor version ahead; the 0.18 AAR is 2.4).
+ */
+const MIN_KOTLIN = '2.3.0';
+
+/** Compare dotted version strings numerically: <0, 0 or >0. */
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
 
 /** Plugin option → entitlement key. */
 const IOS_ENTITLEMENTS = {
@@ -55,27 +72,30 @@ function withLiteRTLM(config, options = {}) {
       minSdkProp.value = '26';
     }
 
+    // Kotlin: the litertlm-android AAR carries newer metadata than React
+    // Native's default Kotlin can read. Templates from Expo SDK 58 read the
+    // Kotlin Gradle plugin version from this property; raise it to the
+    // minimum, never lower an app's newer choice.
+    const kotlinProp = props.find((p) => p.key === 'android.kotlinVersion');
+    if (!kotlinProp) {
+      props.push({ type: 'property', key: 'android.kotlinVersion', value: MIN_KOTLIN });
+    } else if (compareVersions(kotlinProp.value, MIN_KOTLIN) < 0) {
+      kotlinProp.value = MIN_KOTLIN;
+    }
+
     return config;
   });
 
-  // Android: Pin Kotlin Gradle plugin to 2.3.0
-  // The litertlm-android AAR uses Kotlin 2.3.0 metadata (version defined in
-  // package.json → litertLm.androidMavenVersion).
-  // React Native's default Kotlin version (2.1.0) cannot read this metadata,
-  // so we must force the Kotlin Gradle plugin to 2.3.0 in the project-level
-  // build.gradle. This ensures the fix survives `expo prebuild --clean`.
+  // Android, older templates (Expo SDK 55–57): they hard-code an unversioned
+  // Kotlin Gradle plugin classpath instead of reading android.kotlinVersion,
+  // so pin it in the project-level build.gradle. Surviving
+  // `expo prebuild --clean` is why this lives in the plugin.
   config = withProjectBuildGradle(config, (config) => {
     if (config.modResults.language === 'groovy') {
-      const contents = config.modResults.contents;
-
-      // Only add if not already pinned
-      if (!contents.includes("kotlin-gradle-plugin:2.3.0")) {
-        // Replace the unversioned kotlin-gradle-plugin classpath with a pinned one
-        config.modResults.contents = contents.replace(
-          "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')",
-          "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0')"
-        );
-      }
+      config.modResults.contents = config.modResults.contents.replace(
+        "classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')",
+        `classpath('org.jetbrains.kotlin:kotlin-gradle-plugin:${MIN_KOTLIN}')`
+      );
     }
 
     return config;

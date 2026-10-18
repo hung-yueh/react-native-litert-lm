@@ -19,6 +19,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  type ScrollViewInstance,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import {
@@ -120,7 +121,7 @@ function Main() {
   const [forceLoad, setForceLoad] = useState(false);
   const forceLoadPending = useRef(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ScrollViewInstance>(null);
 
   const config = useMemo(
     () => ({
@@ -219,13 +220,13 @@ function Main() {
     try {
       const parts: any[] = [];
       if (currentAttachment === "image") {
-        const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
+        const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET)!.uri;
         parts.push({
           type: "image",
           imageBuffer: await (await fetch(uri)).arrayBuffer(),
         });
       } else if (currentAttachment === "audio") {
-        const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
+        const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET)!.uri;
         parts.push({
           type: "audio",
           audioBuffer: await (await fetch(uri)).arrayBuffer(),

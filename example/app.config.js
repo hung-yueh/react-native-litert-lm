@@ -14,6 +14,8 @@ module.exports = {
     ios: {
       supportsTablet: true,
       bundleIdentifier: "com.hughchen.LLMTest",
+      // Expo SDK 58's floor (expo-modules-core); the library itself supports 15.1.
+      deploymentTarget: "16.4",
       entitlements: {
         "com.apple.developer.kernel.increased-memory-limit": true,
         "com.apple.developer.kernel.extended-virtual-addressing": true
@@ -34,20 +36,15 @@ module.exports = {
       [
         "expo-build-properties",
         {
-          buildReactNativeFromSource: true,
-          useHermesV1: true,
+          // Hermes V1 is React Native's default engine (since 0.84), so the
+          // prebuilt React Native core works; no source build needed.
           android: {
-            minSdkVersion: 26,
-            compileSdkVersion: 36,
-            targetSdkVersion: 36
-          },
-          ios: {
-            deploymentTarget: "15.1"
+            minSdkVersion: 26
           }
         }
       ],
       "react-native-litert-lm",
-      "./withGlogModulemapFix"
+      "./withLibraryTestSpecs"
     ]
   }
 };

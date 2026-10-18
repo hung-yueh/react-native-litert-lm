@@ -77,7 +77,7 @@ module.exports = tseslint.config(
       "react-native.config.js",
       "example/metro.config.js",
       "example/app.config.js",
-      "example/withGlogModulemapFix.js",
+      "example/withLibraryTestSpecs.js",
       "example/check-metro.js",
     ],
   },

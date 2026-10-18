@@ -636,7 +636,7 @@ Multi-tier suite that runs on CI without a device:
 
 - **JS/TS (Jest):** `npm test` — memory estimator (golden values), forecast/budget logic, bundle pre-flight, error typing, stream-event and tool-call parsing, embedding helpers, ring-buffer tracker, hook & factory behavior, HTTPS guard.
 - **Android (Robolectric):** `cd example/android && ./gradlew :react-native-litert-lm:testDebugUnitTest` — covers path-traversal/HTTPS guards, memory telemetry, and error paths. Requires a JDK 21+ test launcher (the litertlm-android AAR is built for Java 21); Gradle picks one up via toolchain auto-detection, or set `org.gradle.java.installations.paths`.
-- **iOS (XCTest):** the test spec isn't part of Expo's generated Podfile — add `pod 'react-native-litert-lm', :path => '../..', :testspecs => ['Tests']` to `example/ios/Podfile`, run `pod install`, then `cd example/ios && xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6'`.
+- **iOS (XCTest):** the example's `withLibraryTestSpecs` config plugin adds the library's test spec to the generated Podfile, so after `cd example && npx expo prebuild`, run `cd example/ios && xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
 The Jest tier also includes a **config-parity contract test** (every `LLMConfig` key must be forwarded by `useModel` or explicitly excluded) and a **device-baseline guardrail** that validates the memory cost model against peak-RSS numbers recorded in [`scripts/memory-baseline.json`](scripts/memory-baseline.json).
 

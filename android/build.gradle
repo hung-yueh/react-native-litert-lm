@@ -15,7 +15,9 @@ def litertLmVersion = packageJson.litertLm.androidMavenVersion
 
 android {
     namespace "dev.litert.litertlm"
-    compileSdk 36
+    // The app's compileSdk (React Native 0.88 / Expo SDK 58 use 37, and
+    // dependencies built with it require at least that), never below 36.
+    compileSdk Math.max(rootProject.ext.has("compileSdkVersion") ? rootProject.ext.get("compileSdkVersion") as int : 36, 36)
     
     defaultConfig {
         minSdk 26  // LiteRT-LM requires API 26+
@@ -74,6 +76,10 @@ android {
             // libraries — take the first instead of failing the merge.
             pickFirsts.add("**/libc++_shared.so")
             pickFirsts.add("**/libfbjni.so")
+            // React Native 0.88 links JSI and its core as shared libraries, so
+            // they arrive both from our CMake output and from react-android.
+            pickFirsts.add("**/libjsi.so")
+            pickFirsts.add("**/libreactnative.so")
         }
     }
     
