@@ -599,12 +599,20 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 
 ### iOS Entitlements
 
-Models over ~2 GB need **Extended Virtual Addressing** or iOS caps virtual memory at ~2 GB and Jetsam kills the app. Add to your `.entitlements` (requires a paid Apple Developer account):
+Models over ~2 GB need **Extended Virtual Addressing** or iOS caps virtual memory at ~2 GB and Jetsam kills the app. With Expo, let the config plugin add it (`increasedMemoryLimit` also raises the app's memory limit on devices that allow it):
+
+```json
+{ "expo": { "plugins": [["react-native-litert-lm", { "ios": { "extendedVirtualAddressing": true, "increasedMemoryLimit": true } }]] } }
+```
+
+Without Expo, add it to your `.entitlements`:
 
 ```xml
 <key>com.apple.developer.kernel.extended-virtual-addressing</key>
 <true/>
 ```
+
+Both entitlements require a paid Apple Developer account, which is why the plugin leaves them off unless asked.
 
 ## Architecture
 

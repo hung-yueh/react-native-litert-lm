@@ -472,10 +472,12 @@ extension HybridLiteRTLM {
         }
         let pt = Double(inputTurns.reduce(0) { $0 + $1.content.count }) / 4.0
         if compTok == 0.0 { compTok = Double(modelResponse.count) / 4.0 }
+        // The engine and Date measure seconds; GenerationStats reports
+        // milliseconds, as documented and as Android does.
         let stats = GenerationStats(
             promptTokens: pt, completionTokens: compTok,
-            totalTokens: pt + compTok, timeToFirstToken: ttft,
-            totalTime: totalTime,
+            totalTokens: pt + compTok, timeToFirstToken: ttft * 1000,
+            totalTime: totalTime * 1000,
             tokensPerSecond: tps > 0 ? tps : (compTok / totalTime)
         )
         // Tool calls move out of the text into structured toolCalls.

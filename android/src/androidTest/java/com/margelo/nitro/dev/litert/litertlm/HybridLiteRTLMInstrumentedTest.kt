@@ -318,6 +318,10 @@ class HybridLiteRTLMInstrumentedTest {
         println("[android-int] streaming response: $response")
         assertFalse("streamed generation was empty", response.isBlank())
         assertTrue("expected incremental tokens, got ${tokens.size}", tokens.size > 1)
+        // Milliseconds on both platforms, as documented.
+        val stats = llm.getStats()
+        assertTrue("totalTime should be in milliseconds: ${stats.totalTime}", stats.totalTime > 50)
+        assertTrue(stats.timeToFirstToken > 0 && stats.timeToFirstToken <= stats.totalTime)
     }
 
     @Test
@@ -647,10 +651,16 @@ class HybridLiteRTLMInstrumentedTest {
         val streamer = HybridLiteRTLM()
         streamer.loadModelBlocking(model.absolutePath, llmConfig())
         val firstToken = CountDownLatch(1)
-        sent = send(streamer) { token, done -> if (!done && token.isNotEmpty()) firstToken.countDown() }
+        val lastToken = AtomicReference<String?>(null)
+        sent = send(streamer) { token, done ->
+            if (!done && token.isNotEmpty()) firstToken.countDown()
+            if (done) lastToken.set(token)
+        }
         assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
         assertTrue(ms("close mid-stream") { streamer.close() } < limitMs)
         assertCancelled("close mid-stream", sent)
+        // A cancel is a deliberate stop: the stream ends without error text.
+        assertEquals("a cancelled stream must end with an empty done token", "", lastToken.get())
         Teardowns.await(Teardowns.mark())
     }
 

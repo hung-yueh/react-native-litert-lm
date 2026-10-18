@@ -117,6 +117,23 @@ cd android &amp;&amp; ./gradlew clean</code></pre>
     <code>GEMMA_3N_E2B_IT_INT4</code>). LFM2.5 and the embedding models fit
     without it.
   </p>
+  <p>
+    With Expo, let the config plugin add it. <code>increasedMemoryLimit</code>
+    also raises the app's memory limit on devices that allow it:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>app.json</span></div>
+    <pre><code>{
+  "expo": {
+    "plugins": [
+      ["react-native-litert-lm", {
+        "ios": { "extendedVirtualAddressing": true, "increasedMemoryLimit": true }
+      }]
+    ]
+  }
+}</code></pre>
+  </div>
+  <p>Without Expo, add it to your app's entitlements file:</p>
   <div class="code">
     <div class="code-head"><span>App.entitlements</span></div>
     <pre><code data-plain>&lt;key&gt;com.apple.developer.kernel.extended-virtual-addressing&lt;/key&gt;
@@ -124,7 +141,7 @@ cd android &amp;&amp; ./gradlew clean</code></pre>
   </div>
   <div class="note">
     <span class="note-label">Note</span>
-    <p>The entitlement requires a paid Apple Developer account.</p>
+    <p>Both entitlements require a paid Apple Developer account, so the plugin leaves them off unless asked.</p>
   </div>
 
   <h2 id="first-inference">First inference</h2>

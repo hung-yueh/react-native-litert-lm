@@ -2,6 +2,7 @@ package com.margelo.nitro.dev.litert.litertlm
 
 import android.util.Log
 import com.google.ai.edge.litertlm.Content
+import java.util.concurrent.CancellationException
 
 /**
  * Named implementation of the LiteRT-LM MessageCallback for streaming inference.
@@ -72,8 +73,17 @@ internal class StreamingCallbackListener(
     }
 
     override fun onError(throwable: Throwable) {
-        Log.e("StreamingCallbackListener", "Async generation failed", throwable)
-        onToken("Error: ${throwable.message}", true)
+        // Record the failure first: the done token releases the waiting
+        // worker, which then reads it.
         onFailure?.invoke(throwable)
+        if (throwable is CancellationException) {
+            // A cancel (close/unload/reset mid-stream) is a deliberate stop, not
+            // a failure to show: end the stream without error text. The promise
+            // still rejects with CANCELLED.
+            onToken("", true)
+        } else {
+            Log.e("StreamingCallbackListener", "Async generation failed", throwable)
+            onToken("Error: ${throwable.message}", true)
+        }
     }
 }

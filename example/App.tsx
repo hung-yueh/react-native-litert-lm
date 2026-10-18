@@ -247,19 +247,22 @@ function Main() {
       try {
         const stats = model.getStats();
         if (stats?.tokensPerSecond) {
-          acc.meta = `${stats.tokensPerSecond.toFixed(1)} tok/s · ${(
-            stats.timeToFirstToken * 1000
-          ).toFixed(0)} ms to first token`;
+          acc.meta = `${stats.tokensPerSecond.toFixed(1)} tok/s · ${stats.timeToFirstToken.toFixed(
+            0,
+          )} ms to first token`;
         }
       } catch {}
       setChat((prev) => [...prev, { ...acc }]);
       setStreaming(null);
       refreshUsage();
     } catch (e: any) {
-      setChat((prev) => [
-        ...prev,
-        { role: "model", text: `Error: ${e.message}`, error: true, ts: Date.now() },
-      ]);
+      // New chat (or unload) mid-reply cancels it; that's not an error to show.
+      if (e?.code !== "INFERENCE_CANCELLED") {
+        setChat((prev) => [
+          ...prev,
+          { role: "model", text: `Error: ${e.message}`, error: true, ts: Date.now() },
+        ]);
+      }
       setStreaming(null);
     } finally {
       setBusy(false);
@@ -343,7 +346,12 @@ function Main() {
             <TouchableOpacity
               testID="new-chat-btn"
               style={s.circleBtn}
-              onPress={() => setChat([])}
+              onPress={() => {
+                // Start the model's context over too (cancelling a reply in
+                // progress), not just the transcript on screen.
+                if (isReady) model?.resetConversation();
+                setChat([]);
+              }}
             >
               <Text style={s.circleIcon}>✎</Text>
             </TouchableOpacity>

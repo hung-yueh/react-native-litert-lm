@@ -137,7 +137,7 @@ final class HybridModelVerificationTests: XCTestCase {
             options: options(maxOutputTokens: 96)).await()
         let stats = try bridge.getStats()
         print(String(format: "[verify] streamed %d chunks in %.1fs, ttft %.0f ms, decode %.2f tok/s: %@",
-                     chunks, Date().timeIntervalSince(started), stats.timeToFirstToken * 1000,
+                     chunks, Date().timeIntervalSince(started), stats.timeToFirstToken,
                      stats.tokensPerSecond, String(story.prefix(160))))
         XCTAssertTrue(done && chunks > 1, "streaming")
 

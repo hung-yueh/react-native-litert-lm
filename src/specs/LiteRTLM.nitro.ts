@@ -677,7 +677,9 @@ export interface LiteRTLM extends HybridObject<{
    * with the complete response.
    *
    * @param parts Array of content parts (text, image, audio)
-   * @param onToken Optional streaming callback - invoked per token with (token, isDone)
+   * @param onToken Optional streaming callback - invoked per token with (token, isDone).
+   *   The last call has isDone true. A stream that fails ends with an `Error: …`
+   *   token; one that's cancelled (reset, unload, close) ends with an empty one.
    * @param options Optional per-message options (maxOutputTokens, visualTokenBudget)
    * @returns Promise resolving to the full response string. It rejects with
    *   `INFERENCE_CANCELLED` if `resetConversation()`, `loadModel()`,

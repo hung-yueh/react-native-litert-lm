@@ -84,12 +84,15 @@ extension HybridLiteRTLM {
             if let errorMsg = litert_lm_stream_chunk_get_error(chunk) {
                 let msg = String(cString: errorMsg)
                 let parent = ctx.parent
-                ctx.onToken("Error: \(msg)", true)
-                ctx.cleanup()
                 // Stream errors arrive as text on the engine's thread — classify
                 // from the absl::Status prefix ("RESOURCE_EXHAUSTED: …") if any.
-                // A cancel (close/reset mid-stream) lands here as CANCELLED.
-                ctx.promise.reject(withError: LiteRTLMNativeError.fromStatusMessage(.execute, msg))
+                let error = LiteRTLMNativeError.fromStatusMessage(.execute, msg)
+                // A cancel (close/unload/reset mid-stream) is a deliberate stop,
+                // not a failure to show: end the stream without error text. The
+                // promise still rejects with CANCELLED.
+                ctx.onToken(error.status == "CANCELLED" ? "" : "Error: \(msg)", true)
+                ctx.cleanup()
+                ctx.promise.reject(withError: error)
                 Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).release()
                 parent.streamEnded()
                 return

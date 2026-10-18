@@ -154,14 +154,14 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             _ = try await self.run(bridge, prompt,
                                    options: Self.makeOptions(maxOutputTokens: 128)) { _, _ in }
             let stats = try bridge.getStats()
-            print(String(format: "[bench] run %d: ttft=%.3fs decode=%.2f tok/s completion=%.0f tok",
+            print(String(format: "[bench] run %d: ttft=%.0fms decode=%.2f tok/s completion=%.0f tok",
                          run, stats.timeToFirstToken, stats.tokensPerSecond, stats.completionTokens))
             if run == 0 { continue } // warm-up
             ttfts.append(stats.timeToFirstToken)
             rates.append(stats.tokensPerSecond)
         }
         func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
-        print(String(format: "[bench] SUMMARY backend=%@ load=%.1fs median_ttft=%.3fs median_decode=%.2f tok/s",
+        print(String(format: "[bench] SUMMARY backend=%@ load=%.1fs median_ttft=%.0fms median_decode=%.2f tok/s",
                      bridge.backend.stringValue, loadSeconds, median(ttfts), median(rates)))
         XCTAssertGreaterThan(median(rates), 0, "engine reported no decode throughput")
     }
@@ -186,6 +186,11 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                        "streamed generation returned an empty response")
         XCTAssertEqual(doneCount, 1, "stream must complete exactly once")
         XCTAssertGreaterThan(tokens.count, 1, "expected incremental tokens, got \(tokens.count)")
+        // Milliseconds, as documented and as Android reports (0.8.0 gave seconds).
+        let stats = try bridge.getStats()
+        XCTAssertGreaterThan(stats.totalTime, 50, "totalTime should be in milliseconds: \(stats.totalTime)")
+        XCTAssertGreaterThan(stats.timeToFirstToken, 0)
+        XCTAssertLessThanOrEqual(stats.timeToFirstToken, stats.totalTime)
         print("[integration] streaming response: \(response)")
     }
 
@@ -538,14 +543,23 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         _ = try await streamer.loadModel(modelPath: path, config: Self.makeConfig()).await()
         let firstToken = expectation(description: "first streamed token")
         firstToken.assertForOverFulfill = false
+        let doneToken = expectation(description: "the stream's done token")
+        let lastToken = LockedBox<String?>(nil)
         let stream = Task {
             try await streamer.execute(parts: essay, onToken: { token, done in
                 if !done && !token.isEmpty { firstToken.fulfill() }
+                if done {
+                    lastToken.value = token
+                    doneToken.fulfill()
+                }
             }, options: long).await()
         }
         await fulfillment(of: [firstToken], timeout: 60)
         XCTAssertLessThan(try ms("close mid-stream") { try streamer.close() }, limitMs)
         await expectCancelled(stream, "close mid-stream")
+        // A cancel is a deliberate stop: the stream ends without error text.
+        await fulfillment(of: [doneToken], timeout: 10)
+        XCTAssertEqual(lastToken.value, "", "a cancelled stream must end with an empty done token")
         await awaitTeardowns()
     }
 
@@ -573,7 +587,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             let text = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
             let stats = try bridge.getStats()
             print(String(format: "[integration][knobs] %@ (ran on %@): load %.1fs, ttft %.0f ms, decode %.2f tok/s",
-                         label, bridge.backend.stringValue, load, stats.timeToFirstToken * 1000, stats.tokensPerSecond))
+                         label, bridge.backend.stringValue, load, stats.timeToFirstToken, stats.tokensPerSecond))
             XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(label) generated nothing")
             return stats.tokensPerSecond
         }
@@ -822,6 +836,17 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         XCTAssertTrue(answerA.contains("47"),
                       "INTERLEAVED RECALL FAILED — conversation A lost its state after B generated. " +
                       "Got: \(answerA)")
+    }
+}
+
+/// A value the engine's callback thread writes and the test reads.
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T
+    init(_ value: T) { stored = value }
+    var value: T {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); defer { lock.unlock() }; stored = newValue }
     }
 }
 
