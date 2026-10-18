@@ -207,6 +207,7 @@ class HybridLiteRTLMTest {
             streamToolCalls = null,
             toolCallChannelName = null,
             forceLoad = null,
+            kvCacheBytesPerToken = null,
         )
 
         // The model file doesn't exist, so the load rejects — but config is

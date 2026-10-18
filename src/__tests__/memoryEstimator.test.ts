@@ -111,6 +111,37 @@ describe("estimateMemory — golden values", () => {
     expect(e.kvCacheBytes).toBe(4096 * 1000);
   });
 
+  it("uses config.kvCacheBytesPerToken instead of the file-size heuristic", () => {
+    // LFM2.5-1.2B-like: a 736 MB int4 file the heuristic floors at 8 KiB,
+    // while its 6 attention layers cost 24 KiB per token at f32
+    const e = estimateMemory({
+      modelFileSizeBytes: 736 * MIB,
+      availableMemoryBytes: 4 * GIB,
+      config: { kvCacheBytesPerToken: 24 * 1024 },
+    });
+    expect(e.kvCacheBytesPerToken).toBe(24 * 1024);
+    expect(e.kvCacheBytes).toBe(4096 * 24 * 1024);
+  });
+
+  it("lets the per-token override win over config.kvCacheBytesPerToken", () => {
+    const e = estimateMemory({
+      modelFileSizeBytes: 1 * GIB,
+      availableMemoryBytes: 4 * GIB,
+      config: { kvCacheBytesPerToken: 24 * 1024 },
+      kvCacheBytesPerTokenOverride: 1000,
+    });
+    expect(e.kvCacheBytes).toBe(4096 * 1000);
+  });
+
+  it("still halves config.kvCacheBytesPerToken for f16 activations", () => {
+    const e = estimateMemory({
+      modelFileSizeBytes: 1 * GIB,
+      availableMemoryBytes: 4 * GIB,
+      config: { kvCacheBytesPerToken: 24 * 1024, activationDataType: "f16" },
+    });
+    expect(e.kvCacheBytes).toBe((4096 * 24 * 1024) / 2);
+  });
+
   it("scales KV cache with maxContextTokens — the biggest tuning lever", () => {
     const small = estimateMemory({
       modelFileSizeBytes: 1 * GIB,

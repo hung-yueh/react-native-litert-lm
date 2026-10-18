@@ -58,7 +58,8 @@ export interface MemoryEstimateInputs {
   config?: LLMConfig;
   /**
    * Override the per-token KV-cache cost in bytes (e.g. from calibration).
-   * Defaults to a heuristic derived from the model file size.
+   * Takes precedence over `config.kvCacheBytesPerToken`; without either, a
+   * heuristic derived from the model file size is used.
    */
   kvCacheBytesPerTokenOverride?: number;
 }
@@ -133,6 +134,7 @@ export function estimateMemory(inputs: MemoryEstimateInputs): MemoryEstimate {
 
   const kvCacheBytesPerToken =
     inputs.kvCacheBytesPerTokenOverride ??
+    config?.kvCacheBytesPerToken ??
     estimateKvCacheBytesPerToken(modelFileSizeBytes);
   const maxContextTokens = resolveMaxContextTokens(config);
   let kvCacheBytes = maxContextTokens * kvCacheBytesPerToken;

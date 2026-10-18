@@ -231,6 +231,13 @@ const estimate = estimateMemory({
 if (estimate.verdict !== "safe") suggestSmallerModel();
 ```
 
+The KV cache's per-token cost is guessed from the file size, which under-counts int4 weights and hybrid models such as LFM2.5 (only 6 of its 16 layers keep a KV cache). When you've measured the model or know its geometry, pass it — the pre-flight check and `getMemoryForecast()` both use it:
+
+```typescript
+// LFM2.5 1.2B: 6 layers × 8 KV heads × 64 dims × (K + V) × 4 bytes (f32, an upper bound)
+await llm.loadModel(LFM2_5_1_2B_INSTRUCT, { maxContextTokens: 32768, kvCacheBytesPerToken: 24 * 1024 });
+```
+
 ### 2. Watch — live usage & forecasting
 
 `getMemoryUsage()` reads real OS metrics (RSS, native heap, available memory) — no estimation. With `enableMemoryTracking`, snapshots are recorded into a native-backed ring buffer after every inference:
@@ -562,6 +569,7 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 | `chatTemplate` | the bundle's | Jinja template that replaces the bundle's — see [Chat templates](#chat-templates) |
 | `enableSpeculativeDecoding` | `false` | Multi-token prediction, if the bundle has a drafter |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
+| `kvCacheBytesPerToken` | file-size heuristic | Per-token KV-cache cost for the memory estimate — set it for int4 and hybrid models (LFM2.5), see [Predict](#1-predict--pre-flight-estimation) |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `maxVisionTokensPerImage`, `gpu.metalResidencySet`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 | `singleThreadedExecution` | `false` | One engine thread, for debugging and reproducibility (iOS) |
 
