@@ -208,7 +208,7 @@ class HybridLiteRTLMInstrumentedTest {
         numThreads = numThreads, maxVisionTokensPerImage = maxVisionTokensPerImage, gpu = null,
         singleThreadedExecution = null, prefillChunkSize = null,
         activationDataType = activationDataType, loraPath = null, audioLoraPath = null, loraRank = null,
-        streamToolCalls = null, toolCallChannelName = null, forceLoad = true,
+        streamToolCalls = null, toolCallChannelName = null, forceLoad = true, kvCacheBytesPerToken = null,
     )
 
     private fun options(

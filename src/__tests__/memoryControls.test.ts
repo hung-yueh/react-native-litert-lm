@@ -64,6 +64,38 @@ describe("loadModel pre-flight memory check", () => {
     expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
   });
 
+  it("counts config.kvCacheBytesPerToken in the pre-flight check", async () => {
+    // 1 GiB on CPU: weights 1.1 GiB + overhead 200 MiB, against 2 GiB free.
+    // The heuristic's 12 KiB/token × 32K = 384 MiB fits; 48 KiB × 32K = 1.5 GiB doesn't.
+    mockModelStore.getFileSizeBytes.mockReturnValue(1 * GIB);
+    const defaultUsage = mockLiteRTLM.getMemoryUsage.getMockImplementation()!;
+    mockLiteRTLM.getMemoryUsage.mockImplementation(() => ({
+      nativeHeapBytes: 0,
+      residentBytes: 0,
+      availableMemoryBytes: 2 * GIB,
+      isLowMemory: false,
+    }));
+
+    let caught: unknown;
+    try {
+      const llm = createLLM();
+      await expect(
+        llm.loadModel("/local/model.litertlm", { maxContextTokens: 32768 }),
+      ).resolves.not.toThrow();
+
+      await llm.loadModel("/local/model.litertlm", {
+        maxContextTokens: 32768,
+        kvCacheBytesPerToken: 48 * 1024,
+      });
+    } catch (e) {
+      caught = e;
+    } finally {
+      mockLiteRTLM.getMemoryUsage.mockImplementation(defaultUsage);
+    }
+    expect(caught).toBeInstanceOf(MemoryError);
+    expect((caught as MemoryError).estimate.kvCacheBytesPerToken).toBe(48 * 1024);
+  });
+
   it("skips the pre-flight when the file size is unknown", async () => {
     mockModelStore.getFileSizeBytes.mockReturnValue(-1);
 
@@ -109,6 +141,21 @@ describe("estimateMemory / getMemoryForecast on the instance", () => {
     expect(forecast!.maxContextTokens).toBe(512);
     expect(forecast!.contextUsedFraction).toBe(0.25);
     expect(forecast!.nearingLimit).toBe(false);
+  });
+
+  it("forecasts KV bytes from config.kvCacheBytesPerToken when set", async () => {
+    const llm = createLLM();
+    mockModelStore.getFileSizeBytes.mockReturnValue(1 * GIB);
+    await llm.loadModel("/local/model.litertlm", {
+      forceLoad: true,
+      maxContextTokens: 512,
+      kvCacheBytesPerToken: 24 * 1024,
+    });
+
+    // Mock engine reports 128 tokens in the KV cache
+    const forecast = llm.getMemoryForecast();
+    expect(forecast!.kvCacheBytesUsed).toBe(128 * 24 * 1024);
+    expect(forecast!.kvCacheBytesRemaining).toBe(384 * 24 * 1024);
   });
 });
 

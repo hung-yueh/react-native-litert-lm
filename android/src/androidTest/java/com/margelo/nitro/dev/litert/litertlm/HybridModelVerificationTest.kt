@@ -56,7 +56,7 @@ class HybridModelVerificationTest {
         enableSpeculativeDecoding = null, chatTemplate = null, enableStructuredOutput = true, thinking = null,
         numThreads = null, maxVisionTokensPerImage = null, gpu = null, singleThreadedExecution = null,
         prefillChunkSize = null, activationDataType = null, loraPath = null, audioLoraPath = null, loraRank = null,
-        streamToolCalls = null, toolCallChannelName = null, forceLoad = true,
+        streamToolCalls = null, toolCallChannelName = null, forceLoad = true, kvCacheBytesPerToken = null,
     )
 
     private fun options(maxOutputTokens: Double? = null, responseSchema: String? = null) = ExecuteOptions(

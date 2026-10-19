@@ -72,7 +72,8 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             loraRank: nil,
             streamToolCalls: nil,
             toolCallChannelName: nil,
-            forceLoad: true
+            forceLoad: true,
+            kvCacheBytesPerToken: nil
         )
     }
 
