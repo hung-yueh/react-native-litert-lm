@@ -186,7 +186,7 @@
       <div class="feat">
         <span class="feat-pin">WINS ON · MEMORY</span>
         <h3>Managed, not hoped for</h3>
-        <p><code>loadModel()</code> refuses loads its estimate says would be Jetsam- or LMK-killed (<code>forceLoad</code> overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows (iOS), real OS pressure callbacks, budgets, and deterministic <code>unload()</code>. The alternatives hand you a model handle; the crash-prevention layer is yours to write.</p>
+        <p><code>loadModel()</code> refuses loads its estimate says would be Jetsam- or LMK-killed (<code>forceLoad</code> overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows, real OS pressure callbacks, budgets, and deterministic <code>unload()</code>. The alternatives hand you a model handle; the crash-prevention layer is yours to write.</p>
       </div>
       <div class="feat">
         <span class="feat-pin">WINS ON · THROUGHPUT</span>
@@ -211,7 +211,7 @@
           <tr><td>Structured extraction — receipts, forms, classification into your schema</td><td>Output that fits your schema</td><td><code>responseSchema</code> / <code>responseRegex</code> constrained decoding, both platforms</td></tr>
           <tr><td>Voice memos and photos as input</td><td>No base64 on the way in</td><td><code>ArrayBuffer</code> image / audio parts</td></tr>
           <tr><td>Agentic apps with tool calls and visible reasoning</td><td>Typed events, not regex over text</td><td><code>token</code> / <code>toolCall</code> / <code>thinking</code> events; <code>toolResultPart()</code> to answer calls</td></tr>
-          <tr><td>Long-document summarization, up to 128K context</td><td>Knowing when the context will overflow</td><td><code>getMemoryForecast()</code>, <code>getContextTokenCount()</code> (iOS)</td></tr>
+          <tr><td>Long-document summarization, up to 128K context</td><td>Knowing when the context will overflow</td><td><code>getMemoryForecast()</code>, <code>getContextTokenCount()</code></td></tr>
           <tr><td>Assistant plus background summarizer in one app</td><td>Two conversations, one engine</td><td><code>createConversation()</code> — one reply at a time, no second 4 GB load</td></tr>
           <tr><td>Semantic search / RAG over app content</td><td>Embeddings without a server</td><td><code>createEmbedder()</code> with EmbeddingGemma 2</td></tr>
           <tr><td>Battery-sensitive workloads on NPU-equipped devices</td><td>Throughput per watt</td><td><code>backend: 'npu'</code> on Android, with CPU fallback</td></tr>
