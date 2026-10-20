@@ -48,7 +48,7 @@ Both are good libraries. This one is built for a narrower job: running a multi-g
 
 ### Where it wins
 
-- **Memory is managed, not hoped for.** `loadModel()` estimates weights + KV cache + overhead against real OS headroom and refuses loads that estimate says would be Jetsam- or LMK-killed (`forceLoad: true` overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows (iOS), real OS pressure callbacks, budgets with thresholds, and deterministic `unload()`. The alternatives give you a model handle; the crash-prevention layer is yours to write.
+- **Memory is managed, not hoped for.** `loadModel()` estimates weights + KV cache + overhead against real OS headroom and refuses loads that estimate says would be Jetsam- or LMK-killed (`forceLoad: true` overrides). After load: live RSS tracking, a context forecast that warns before the KV cache overflows, real OS pressure callbacks, budgets with thresholds, and deterministic `unload()`. The alternatives give you a model handle; the crash-prevention layer is yours to write.
 - **Faster where phones are actually fast.** GPU on both platforms with automatic CPU fallback, plus LiteRT-LM's **NPU** path on Android (Qualcomm / MediaTek, with a bundle compiled for that chip). Speculative decoding raises decode throughput on models that ship a drafter; on iOS, `prefillChunkSize` caps peak activation memory on long prompts.
 - **No bridge tax.** Nitro JSI: each streamed token reaches JS without serialization, and images and audio cross as raw `ArrayBuffer` bytes — no base64 (a 4 MB photo as base64 is 5+ MB of JS string plus copies). Nothing the JS thread calls waits on the engine: generation runs off-thread, and `close()` or a reset cancels a running reply instead of waiting it out.
 - **One model, many contexts.** `createConversation()` keeps several independent chats on one loaded engine and switches between them by replaying the transcript; one generates at a time. Loading a second 2–4 GB engine is not an option on a phone.
@@ -63,7 +63,7 @@ Both are good libraries. This one is built for a narrower job: running a multi-g
 | Structured extraction — receipts, forms, classification into your schema | Output that fits your schema | `responseSchema` / `responseRegex` constrained decoding |
 | Voice memos and photos as input | No base64 on the way in | `ArrayBuffer` image / audio parts |
 | Agentic apps with tool calls and visible reasoning | Typed events, not regex over text | `token` / `toolCall` / `thinking` events; `toolResultPart()` to answer calls |
-| Long-document summarization (up to 128K context) | Knowing when the context will overflow | `getMemoryForecast()`, `getContextTokenCount()` (iOS) |
+| Long-document summarization (up to 128K context) | Knowing when the context will overflow | `getMemoryForecast()`, `getContextTokenCount()` |
 | Assistant plus background summarizer in one app | Two conversations, one engine | `createConversation()` — one reply at a time, no second load |
 | Semantic search / RAG over app content | Embeddings without a server | `createEmbedder()` with EmbeddingGemma 2 |
 | Battery-sensitive workloads on NPU-equipped devices | Throughput per watt | `backend: 'npu'` on Android, with CPU fallback |
@@ -241,7 +241,7 @@ const llm = createLLM({ enableMemoryTracking: true, maxMemorySnapshots: 256 });
 const { peakResidentBytes, currentResidentBytes } = llm.memoryTracker!.getSummary();
 ```
 
-`getMemoryForecast()` combines the engine's KV-cache token count (exact on iOS; approximated on Android, where the SDK doesn't expose tokenizer counts) with the cost model to warn *before* the context window runs out:
+`getMemoryForecast()` combines the engine's KV-cache token count with the cost model to warn *before* the context window runs out:
 
 ```typescript
 const forecast = llm.getMemoryForecast();

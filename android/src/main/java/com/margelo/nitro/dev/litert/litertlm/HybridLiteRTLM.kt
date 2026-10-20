@@ -203,6 +203,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         tokensPerSecond = 0.0
     )
 
+    /**
+     * What getContextTokenCount() reports: the live conversation's token count,
+     * read from the engine after a load and after each completed message, and
+     * -1 (unknown) from an unload, a reset or a new load on.
+     */
+    @Volatile
+    private var contextTokens = -1.0
+
     // Configuration
     private var backend: Backend = Backend.CPU
     private var temperature: Double = 0.7
@@ -454,11 +462,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     throw e
                 }
                 Log.i(TAG, "Conversation created successfully")
+                val tokens = tokenCount(conv)
                 val installed = stateLock.withLock {
                     // An unload() or close() called during the load wins.
                     if (isClosed || lifecycle != loadLifecycle) return@withLock false
                     engine = created
                     conversation = conv
+                    contextTokens = tokens
                     ready = true
                     true
                 }
@@ -599,6 +609,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             do {
                 retireConversationLocked(timeoutMs = 2_000)
             } while (conversation != null)
+            // Unknown until the new conversation's first message: reading it
+            // here could wait on the JS thread for a cancelled message's prefill.
+            contextTokens = -1.0
             synchronized(history) {
                 history.clear()
                 // Mirror the replayed transcript into the wrapper's own history so
@@ -625,13 +638,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun getMemoryUsage(): MemoryUsage = processMemoryUsage()
 
 
-    override fun getContextTokenCount(): Double {
-        // The LiteRT-LM Kotlin SDK does not expose a conversation-level token
-        // count (the C API has litert_lm_conversation_get_token_count but the
-        // Kotlin wrapper omits it). Return -1 to signal "unknown" — callers
-        // already handle this gracefully.
-        return -1.0
-    }
+    /** Tokens in the conversation's KV cache as of its last completed message (-1 when unknown). */
+    override fun getContextTokenCount(): Double = contextTokens
 
     /** Reports not-ready and cancels a message still generating at once; resolves once the engine is freed. */
     override fun unload(): Promise<Unit> {
@@ -740,6 +748,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private fun markUnloaded() = stateLock.withLock {
         lifecycle++
         ready = false
+        contextTokens = -1.0
         conversation?.let { live ->
             conversation = null
             if (generationsRunning > 0) runCatching { live.cancelProcess() }
@@ -768,6 +777,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             try {
                 val eng = stateLock.withLock {
                     ready = false
+                    contextTokens = -1.0
                     retireConversationLocked(timeoutMs = null)
                     engine.also { engine = null }
                 }
@@ -842,6 +852,20 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to close a conversation: ${e.message}")
         }
+    }
+
+    /** Tokens in [conversation]'s KV cache, or -1 when the engine can't say. */
+    private fun tokenCount(conversation: Conversation): Double = try {
+        conversation.getTokenCount().toDouble()
+    } catch (e: Exception) {
+        Log.w(TAG, "Failed to read the context token count: ${e.message}")
+        -1.0
+    }
+
+    /** Record [conversation]'s token count, unless a reset, unload or load replaced it meanwhile. */
+    private fun recordContextTokens(conversation: Conversation) {
+        val tokens = tokenCount(conversation)
+        stateLock.withLock { if (this.conversation === conversation) contextTokens = tokens }
     }
 
     private fun notLoaded() = LiteRTLMNativeException(
@@ -1162,7 +1186,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         responseBuilder = fullResponseBuilder,
                         history = history,
                         userMessage = userTextRepresentation,
-                        onStatsReady = { stats -> lastStats = stats },
+                        onStatsReady = { stats ->
+                            lastStats = stats
+                            recordContextTokens(conv)
+                        },
                         onFailure = { e -> errorRef.set(e) }
                     )
 
@@ -1233,6 +1260,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         totalTime = elapsedMs,
                         tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
                     )
+                    recordContextTokens(conv)
                     response
                 }
             } finally {

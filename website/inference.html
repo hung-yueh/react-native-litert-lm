@@ -566,13 +566,13 @@ export function createStreamEventParser(
   <div class="sig">getContextTokenCount(): number</div>
   <p>
     Number of tokens currently held in the conversation KV cache (prompt +
-    history + generated tokens). Returns <code>-1</code> if unavailable.
-    Combine with <code>maxContextTokens</code> to warn before the context
-    window (and its memory) runs out — see <code>getMemoryForecast()</code> on
-    the <a href="memory.html">Memory &amp; errors</a> page. Exact on
-    <span class="pill ios">iOS</span>; approximated on
-    <span class="pill android">Android</span>, where the SDK doesn't expose
-    tokenizer counts.
+    history + generated tokens), read from the engine. Returns
+    <code>-1</code> if unknown: no model loaded, or, on
+    <span class="pill android">Android</span>, a reset conversation before
+    its first message completes. Combine with <code>maxContextTokens</code> to
+    warn before the context window (and its memory) runs out — see
+    <code>getMemoryForecast()</code> on the
+    <a href="memory.html">Memory &amp; errors</a> page.
   </p>
 
   <h3 id="gethistory">getHistory()</h3>
