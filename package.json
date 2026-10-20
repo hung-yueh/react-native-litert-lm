@@ -43,6 +43,7 @@
     "core/package.json",
     "android/src",
     "android/build.gradle",
+    "android/consumer-rules.pro",
     "android/CMakeLists.txt",
     "ios/**/*.swift",
     "ios/**/*.mm",
