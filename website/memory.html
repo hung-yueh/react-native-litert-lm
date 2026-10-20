@@ -299,9 +299,10 @@ try {
   <div class="note">
     <span class="note-label">Token counts</span>
     <p>
-      Token counts are exact on <span class="pill ios">iOS</span> (read from the
-      engine) and approximated on <span class="pill android">Android</span>,
-      where the SDK does not expose tokenizer counts.
+      Token counts are read from the engine on both platforms.
+      <code>getMemoryForecast()</code> returns <code>null</code> while the count
+      is unknown (on <span class="pill android">Android</span>, after
+      <code>resetConversation()</code> until the next message completes).
     </p>
   </div>
   <div class="code">
