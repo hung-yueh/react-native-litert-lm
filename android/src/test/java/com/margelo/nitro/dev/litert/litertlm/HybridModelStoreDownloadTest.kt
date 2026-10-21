@@ -3,6 +3,7 @@ package com.margelo.nitro.dev.litert.litertlm
 import dev.litert.litertlm.LiteRTLMInitProvider
 import java.io.File
 import java.net.InetAddress
+import java.security.MessageDigest
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
@@ -24,7 +25,8 @@ import org.robolectric.RuntimeEnvironment
  * Exercises HybridModelStore's real download machinery — HTTPS enforcement is
  * covered elsewhere; these tests cover what happens when the network answers:
  * success + atomic rename, progress reporting, HTTP errors, mid-stream
- * disconnects (no half-written files), and the cached-file short-circuit.
+ * disconnects (no half-written files), the cached-file short-circuit,
+ * continuing a partial download with a Range request, and the sha256 check.
  *
  * Uses a local MockWebServer over TLS since the store only accepts https URLs.
  */
@@ -96,7 +98,7 @@ class HybridModelStoreDownloadTest {
 
         val progress = mutableListOf<Double>()
         val (path, error) = await(
-            store.downloadFile(url("/model.litertlm"), "model.litertlm", "{}") { progress.add(it) }
+            store.downloadFile(url("/model.litertlm"), "model.litertlm", "{}", "") { progress.add(it) }
         )
 
         assertNull("Download should succeed, got: $error", error)
@@ -116,7 +118,7 @@ class HybridModelStoreDownloadTest {
         server.enqueue(MockResponse().setResponseCode(404))
 
         val (_, error) = await(
-            store.downloadFile(url("/missing.litertlm"), "missing.litertlm", "{}") {}
+            store.downloadFile(url("/missing.litertlm"), "missing.litertlm", "{}", "") {}
         )
 
         assertNotNull("Expected HTTP 404 rejection", error)
@@ -135,7 +137,7 @@ class HybridModelStoreDownloadTest {
         )
 
         val (_, error) = await(
-            store.downloadFile(url("/cut.litertlm"), "cut.litertlm", "{}") {}
+            store.downloadFile(url("/cut.litertlm"), "cut.litertlm", "{}", "") {}
         )
 
         // Depending on where the cut lands the read either errors or ends
@@ -153,7 +155,7 @@ class HybridModelStoreDownloadTest {
 
         val progress = mutableListOf<Double>()
         val (path, error) = await(
-            store.downloadFile(url("/cached.litertlm"), "cached.litertlm", "{}") { progress.add(it) }
+            store.downloadFile(url("/cached.litertlm"), "cached.litertlm", "{}", "") { progress.add(it) }
         )
 
         assertNull(error)
@@ -171,11 +173,241 @@ class HybridModelStoreDownloadTest {
                 url("/auth.litertlm"),
                 "auth.litertlm",
                 """{"Authorization":"Bearer secret-token"}""",
+                "",
             ) {}
         )
 
         assertNull(error)
         val recorded = server.takeRequest()
         assertEquals("Bearer secret-token", recorded.getHeader("Authorization"))
+    }
+
+    // ── Continuing a partial download ───────────────────────────────────────
+
+    private val payload = ByteArray(300 * 1024) { (it * 7 + 3).toByte() }
+
+    private fun sha256Of(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    /**
+     * A first call that the connection drops after [cut] bytes, from a server
+     * that named the file's version and size: the partial file stays.
+     */
+    private fun leavePartial(name: String, cut: Int, etag: String = "\"v1\"", sha256: String = "") {
+        server.enqueue(
+            MockResponse()
+                .setBody(Buffer().write(payload, 0, cut))
+                .setHeader("Content-Length", payload.size)
+                .setHeader("ETag", etag)
+                .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
+        )
+        val (_, error) = await(store.downloadFile(url("/$name"), name, "{}", sha256) {})
+        assertNotNull("A cut download must reject", error)
+        assertEquals(cut.toLong(), File(modelsDir, "$name.tmp").length())
+        assertFalse(File(modelsDir, name).exists())
+        server.takeRequest()
+    }
+
+    private fun rest(from: Int, etag: String = "\"v1\""): MockResponse =
+        MockResponse()
+            .setResponseCode(206)
+            .setBody(Buffer().write(payload, from, payload.size - from))
+            .setHeader("Content-Range", "bytes $from-${payload.size - 1}/${payload.size}")
+            .setHeader("ETag", etag)
+
+    @Test
+    fun aDroppedDownloadKeepsItsPartialFileWhenTheServerNamedTheVersion() {
+        leavePartial("kept.litertlm", cut = 100 * 1024)
+        assertTrue(File(modelsDir, "kept.litertlm.tmp.json").exists())
+        // Neither file is a cached model
+        assertEquals(0, store.listCachedFiles().size)
+        assertFalse(store.isCached("kept.litertlm"))
+    }
+
+    @Test
+    fun theNextCallContinuesWithARangeRequest() {
+        leavePartial("resume.litertlm", cut = 100 * 1024)
+        server.enqueue(rest(100 * 1024))
+
+        val progress = mutableListOf<Double>()
+        val (path, error) = await(
+            store.downloadFile(url("/resume.litertlm"), "resume.litertlm", "{}", "") { progress.add(it) }
+        )
+
+        assertNull("The continued download should succeed, got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        val request = server.takeRequest()
+        assertEquals("bytes=${100 * 1024}-", request.getHeader("Range"))
+        assertEquals("\"v1\"", request.getHeader("If-Range"))
+        assertFalse(File(modelsDir, "resume.litertlm.tmp").exists())
+        assertFalse(File(modelsDir, "resume.litertlm.tmp.json").exists())
+        // Progress counts the bytes already there, ends at 1, never decreases
+        assertEquals(100.0 * 1024 / payload.size, progress[1], 1e-9)
+        assertEquals(1.0, progress.last(), 0.0)
+        assertEquals(progress, progress.sorted())
+    }
+
+    @Test
+    fun aServerThatIgnoresTheRangeStartsTheFileOver() {
+        leavePartial("norange.litertlm", cut = 100 * 1024)
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)).setHeader("ETag", "\"v1\""))
+
+        val (path, error) = await(store.downloadFile(url("/norange.litertlm"), "norange.litertlm", "{}", "") {})
+
+        assertNull(error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun anUnsatisfiableRangeStartsOverWithoutIt() {
+        leavePartial("r416.litertlm", cut = 100 * 1024)
+        server.enqueue(MockResponse().setResponseCode(416))
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)).setHeader("ETag", "\"v1\""))
+
+        val (path, error) = await(store.downloadFile(url("/r416.litertlm"), "r416.litertlm", "{}", "") {})
+
+        assertNull(error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        assertNotNull(server.takeRequest().getHeader("Range"))
+        assertNull("The second request asks for the whole file", server.takeRequest().getHeader("Range"))
+    }
+
+    @Test
+    fun aRangeOfAnotherVersionIsNotAppended() {
+        // The Hugging Face CDN answers 206 whatever If-Range says: the validator
+        // of the 206 itself has to match.
+        leavePartial("changed.litertlm", cut = 100 * 1024)
+        server.enqueue(rest(100 * 1024, etag = "\"v2\""))
+        val v2 = payload.reversedArray()
+        server.enqueue(MockResponse().setBody(Buffer().write(v2)).setHeader("ETag", "\"v2\""))
+
+        val (path, error) = await(store.downloadFile(url("/changed.litertlm"), "changed.litertlm", "{}", "") {})
+
+        assertNull(error)
+        assertArrayEquals(v2, File(path!!).readBytes())
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun aServerErrorOnTheContinuationKeepsThePartialFile() {
+        leavePartial("busy.litertlm", cut = 100 * 1024)
+        server.enqueue(MockResponse().setResponseCode(503))
+
+        val (_, error) = await(store.downloadFile(url("/busy.litertlm"), "busy.litertlm", "{}", "") {})
+
+        assertNotNull(error)
+        assertTrue(error!!.message!!.contains("503"))
+        assertEquals(100L * 1024, File(modelsDir, "busy.litertlm.tmp").length())
+    }
+
+    @Test
+    fun aPartialFileFromAnotherUrlIsNotContinued() {
+        leavePartial("moved.litertlm", cut = 100 * 1024)
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)).setHeader("ETag", "\"v1\""))
+
+        val (path, error) = await(store.downloadFile(url("/elsewhere/moved.litertlm"), "moved.litertlm", "{}", "") {})
+
+        assertNull(error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        assertNull(server.takeRequest().getHeader("Range"))
+    }
+
+    @Test
+    fun theRangeAndIfRangeFollowARedirect() {
+        leavePartial("redirect.litertlm", cut = 100 * 1024)
+        server.enqueue(
+            MockResponse().setResponseCode(302).setHeader("Location", url("/cdn/redirect.litertlm"))
+        )
+        server.enqueue(rest(100 * 1024))
+
+        val (path, error) = await(store.downloadFile(url("/redirect.litertlm"), "redirect.litertlm", "{}", "") {})
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        server.takeRequest() // the redirect
+        val redirected = server.takeRequest()
+        assertEquals("/cdn/redirect.litertlm", redirected.path)
+        assertEquals("bytes=${100 * 1024}-", redirected.getHeader("Range"))
+        assertEquals("\"v1\"", redirected.getHeader("If-Range"))
+    }
+
+    @Test
+    fun deleteFileRemovesAPartialDownload() {
+        leavePartial("gone.litertlm", cut = 100 * 1024)
+
+        store.deleteFile("gone.litertlm")
+
+        assertFalse(File(modelsDir, "gone.litertlm.tmp").exists())
+        assertFalse(File(modelsDir, "gone.litertlm.tmp.json").exists())
+    }
+
+    // ── sha256 ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun aMatchingSha256InstallsTheFile() {
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)))
+
+        val (path, error) = await(store.downloadFile(url("/ok.litertlm"), "ok.litertlm", "{}", sha256Of(payload)) {})
+
+        assertNull(error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+    }
+
+    @Test
+    fun aSha256MismatchLeavesNothingBehind() {
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)).setHeader("ETag", "\"v1\""))
+        val wrong = "0".repeat(64)
+
+        val (_, error) = await(store.downloadFile(url("/bad.litertlm"), "bad.litertlm", "{}", wrong) {})
+
+        assertNotNull(error)
+        assertTrue(error!!.message!!, error.message!!.contains("sha256 mismatch: expected $wrong, got ${sha256Of(payload)}"))
+        assertFalse(File(modelsDir, "bad.litertlm").exists())
+        assertFalse(File(modelsDir, "bad.litertlm.tmp").exists())
+        assertFalse(File(modelsDir, "bad.litertlm.tmp.json").exists())
+        assertFalse(store.isCached("bad.litertlm"))
+    }
+
+    @Test
+    fun aContinuedDownloadIsHashedFromItsFirstByte() {
+        leavePartial("hashed.litertlm", cut = 100 * 1024, sha256 = sha256Of(payload))
+        server.enqueue(rest(100 * 1024))
+
+        val (path, error) = await(
+            store.downloadFile(url("/hashed.litertlm"), "hashed.litertlm", "{}", sha256Of(payload)) {}
+        )
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+    }
+
+    @Test
+    fun aContinuedDownloadWithTheWrongSha256LeavesNothingBehind() {
+        leavePartial("hashbad.litertlm", cut = 100 * 1024)
+        server.enqueue(rest(100 * 1024))
+        val wrong = "f".repeat(64)
+
+        val (_, error) = await(store.downloadFile(url("/hashbad.litertlm"), "hashbad.litertlm", "{}", wrong) {})
+
+        assertNotNull(error)
+        assertTrue(error!!.message!!.contains("sha256 mismatch: expected $wrong, got ${sha256Of(payload)}"))
+        assertFalse(File(modelsDir, "hashbad.litertlm.tmp").exists())
+        assertFalse(File(modelsDir, "hashbad.litertlm.tmp.json").exists())
+        assertFalse(File(modelsDir, "hashbad.litertlm").exists())
+    }
+
+    @Test
+    fun aCachedFileIsReturnedWithoutHashingIt() {
+        modelsDir.mkdirs()
+        File(modelsDir, "cachedsha.litertlm").writeBytes(ByteArray(128) { 1 })
+
+        val (path, error) = await(
+            store.downloadFile(url("/cachedsha.litertlm"), "cachedsha.litertlm", "{}", "0".repeat(64)) {}
+        )
+
+        assertNull(error)
+        assertEquals(File(modelsDir, "cachedsha.litertlm").absolutePath, path)
+        assertEquals(0, server.requestCount)
     }
 }

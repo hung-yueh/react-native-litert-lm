@@ -6,6 +6,7 @@
 //  Copyright © 2026 Margelo. All rights reserved.
 //
 
+import CryptoKit
 import Foundation
 import NitroModules
 
@@ -66,7 +67,7 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         var files: [ModelFile] = []
         
         for name in contents {
-            if name.hasSuffix(".tmp") { continue }
+            if name.hasSuffix(".tmp") || name.hasSuffix(ResumableDownload.recordSuffix) { continue }
             let path = (dir as NSString).appendingPathComponent(name)
             var isDir: ObjCBool = false
             if fileManager.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
@@ -89,6 +90,9 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         try sanitizeFileName(fileName)
         let filePath = (modelsDirectory as NSString).appendingPathComponent(fileName)
         let fileManager = FileManager.default
+        // A partial download of the file goes too
+        try? fileManager.removeItem(atPath: filePath + ".tmp")
+        try? fileManager.removeItem(atPath: filePath + ResumableDownload.recordSuffix)
         if fileManager.fileExists(atPath: filePath) {
             try fileManager.removeItem(atPath: filePath)
         }
@@ -98,6 +102,7 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         url: String,
         fileName: String,
         headersJson: String,
+        sha256: String,
         onProgress: @escaping (_ progress: Double) -> Void
     ) throws -> Promise<String> {
         let promise = Promise<String>()
@@ -138,77 +143,335 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
                     }
                 }
                 
-                let sessionConfig = URLSessionConfiguration.default
-                sessionConfig.timeoutIntervalForRequest = 30
-                sessionConfig.timeoutIntervalForResource = 3600
-                
-                let session = URLSession(configuration: sessionConfig)
-                var progressHandler: NSKeyValueObservation?
-                
-                var request = URLRequest(url: downloadUrl)
-                for (key, value) in customHeaders {
-                    request.addValue(value, forHTTPHeaderField: key)
-                }
-                
                 let tempDestFile = (self.modelsDirectory as NSString).appendingPathComponent("\(fileName).tmp")
-                
-                let task = session.downloadTask(with: request) { location, response, error in
-                    progressHandler?.invalidate()
-                    
+                let download = ResumableDownload(
+                    url: downloadUrl,
+                    headers: customHeaders,
+                    tempPath: tempDestFile,
+                    recordPath: destPath + ResumableDownload.recordSuffix,
+                    expectedSha256: sha256,
+                    onProgress: onProgress
+                )
+                download.start { error in
                     if let error = error {
                         promise.reject(withError: error)
                         return
                     }
-                    
-                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
-                        promise.reject(withError: NSError(domain: "LiteRTLM.ModelStore", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"]))
-                        return
-                    }
-                    
-                    guard let location = location else {
-                        promise.reject(withError: NSError(domain: "LiteRTLM.ModelStore", code: 500, userInfo: [NSLocalizedDescriptionKey: "No download location found."]))
-                        return
-                    }
-                    
                     do {
-                        // Rename/move atomically via temp file helper
-                        if fileManager.fileExists(atPath: tempDestFile) {
-                            try fileManager.removeItem(atPath: tempDestFile)
-                        }
-                        try fileManager.moveItem(at: location, to: URL(fileURLWithPath: tempDestFile))
-                        
                         if fileManager.fileExists(atPath: destPath) {
                             try fileManager.removeItem(atPath: destPath)
                         }
                         try fileManager.moveItem(at: URL(fileURLWithPath: tempDestFile), to: URL(fileURLWithPath: destPath))
-                        
+                        try? fileManager.removeItem(atPath: destPath + ResumableDownload.recordSuffix)
+
                         onProgress(1.0)
                         promise.resolve(withResult: destPath)
                     } catch {
                         promise.reject(withError: error)
                     }
                 }
-                
-                var lastUpdate = Date()
-                progressHandler = task.observe(\.countOfBytesReceived, options: [.new]) { task, _ in
-                    let expected = task.countOfBytesExpectedToReceive
-                    if expected > 0 {
-                        let now = Date()
-                        if now.timeIntervalSince(lastUpdate) > 0.1 {
-                            let progress = Double(task.countOfBytesReceived) / Double(expected)
-                            onProgress(progress)
-                            lastUpdate = now
-                        }
-                    }
-                }
-                
-                task.resume()
-                session.finishTasksAndInvalidate()
             } catch {
                 promise.reject(withError: error)
             }
         }
         
         return promise
+    }
+}
+
+/// One model download into `<file>.tmp`. When the server names the file's
+/// version (a strong ETag, else Last-Modified) and size, those and the URL are
+/// kept next to it in `<file>.tmp.json`, and a later download of the same URL
+/// continues the partial file with a Range request instead of starting over.
+/// A data task (not a download task) so the bytes land in that file as they
+/// arrive and survive the app being killed.
+final class ResumableDownload: NSObject, URLSessionDataDelegate {
+    static let recordSuffix = ".tmp.json"
+
+    private let url: URL
+    private let headers: [String: String]
+    private let tempPath: String
+    private let recordPath: String
+    private let expectedSha256: String
+    private let onProgress: (Double) -> Void
+    private var completion: ((Error?) -> Void)?
+
+    private var session: URLSession!
+    private var record: [String: Any]?
+    private var offset: Int64 = 0
+    private var totalBytes: Int64 = -1
+    private var expectedLength: Int64 = -1
+    private var received: Int64 = 0
+    private var identityEncoded = true
+    private var keepPartial = false
+    private var startOver = false
+    private var failure: Error?
+    private var file: FileHandle?
+    private var hasher: SHA256?
+    private var lastUpdate = Date.distantPast
+
+    init(url: URL, headers: [String: String], tempPath: String, recordPath: String,
+         expectedSha256: String, onProgress: @escaping (Double) -> Void) {
+        self.url = url
+        self.headers = headers
+        self.tempPath = tempPath
+        self.recordPath = recordPath
+        self.expectedSha256 = expectedSha256
+        self.onProgress = onProgress
+    }
+
+    /// Calls `completion` once: nil when `<file>.tmp` holds the whole file
+    /// (and matches the expected sha256), else the error.
+    func start(completion: @escaping (Error?) -> Void) {
+        self.completion = completion
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.timeoutIntervalForRequest = 30
+        sessionConfig.timeoutIntervalForResource = 3600
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        session = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: delegateQueue)
+
+        // A partial file left by an earlier call is continued only when it came
+        // from the same URL and that response named its version and size.
+        let size = Self.fileSize(tempPath)
+        if let data = FileManager.default.contents(atPath: recordPath),
+           let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           saved["url"] as? String == url.absoluteString,
+           saved["validator"] is String,
+           let total = (saved["totalBytes"] as? NSNumber)?.int64Value,
+           size > 0, size < total {
+            record = saved
+            offset = size
+            totalBytes = total
+            keepPartial = true
+        } else {
+            discardPartial()
+        }
+        session.dataTask(with: request()).resume()
+    }
+
+    private func request() -> URLRequest {
+        var request = URLRequest(url: url)
+        for (key, value) in headers {
+            request.addValue(value, forHTTPHeaderField: key)
+        }
+        if offset > 0, let validator = record?["validator"] as? String {
+            request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+            request.setValue(validator, forHTTPHeaderField: "If-Range")
+        }
+        return request
+    }
+
+    // The range must reach the server the URL redirects to (Hugging Face
+    // redirects to its CDN).
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        var redirected = newRequest
+        for field in ["Range", "If-Range"] {
+            if let value = task.originalRequest?.value(forHTTPHeaderField: field),
+               redirected.value(forHTTPHeaderField: field) == nil {
+                redirected.setValue(value, forHTTPHeaderField: field)
+            }
+        }
+        completionHandler(redirected)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else {
+            failure = Self.error(500, "No HTTP response.")
+            completionHandler(.cancel)
+            return
+        }
+        let code = http.statusCode
+        if offset > 0 && !continues(http) {
+            // 200 = the whole file (the server ignored the range, or the file
+            // changed); 416 or a 206 of another version = the partial file is
+            // no use. Anything else fails and keeps it for next time.
+            guard code == 200 || code == 206 || code == 416 else {
+                failure = Self.error(code, "HTTP \(code)")
+                completionHandler(.cancel)
+                return
+            }
+            NSLog("[LiteRTLM] Not continuing the partial download (HTTP %ld): starting over", code)
+            discardPartial()
+            offset = 0
+            totalBytes = -1
+            keepPartial = false
+            if code != 200 {
+                startOver = true
+                completionHandler(.cancel)
+                return
+            }
+        }
+        if offset == 0 && code >= 400 {
+            failure = Self.error(code, "HTTP \(code)")
+            completionHandler(.cancel)
+            return
+        }
+
+        do {
+            if !expectedSha256.isEmpty {
+                hasher = SHA256()
+            }
+            expectedLength = http.expectedContentLength
+            let encoding = http.value(forHTTPHeaderField: "Content-Encoding")
+            identityEncoded = encoding == nil || encoding?.lowercased() == "identity"
+            if offset > 0 {
+                NSLog("[LiteRTLM] Continuing the partial download at byte %lld of %lld", offset, totalBytes)
+                if hasher != nil {
+                    let started = Date()
+                    try hashPrefix()
+                    NSLog("[LiteRTLM] Hashed the %lld bytes already downloaded in %.0f ms",
+                          offset, Date().timeIntervalSince(started) * 1000)
+                }
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
+                try handle.truncate(atOffset: UInt64(offset))
+                try handle.seekToEnd()
+                file = handle
+                onProgress(Double(offset) / Double(totalBytes))
+            } else {
+                FileManager.default.createFile(atPath: tempPath, contents: nil)
+                file = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
+                totalBytes = expectedLength
+                // What the next call needs to continue this download
+                if let validator = Self.validator(of: http), expectedLength > 0, identityEncoded {
+                    let saved: [String: Any] = [
+                        "url": url.absoluteString, "validator": validator, "totalBytes": expectedLength,
+                    ]
+                    try JSONSerialization.data(withJSONObject: saved).write(to: URL(fileURLWithPath: recordPath))
+                    keepPartial = true
+                }
+            }
+            completionHandler(.allow)
+        } catch {
+            failure = error
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        do {
+            try file?.write(contentsOf: data)
+        } catch {
+            failure = error
+            try? file?.close()
+            file = nil
+            dataTask.cancel()
+            return
+        }
+        hasher?.update(data: data)
+        received += Int64(data.count)
+        if totalBytes > 0 {
+            let now = Date()
+            if now.timeIntervalSince(lastUpdate) > 0.1 {
+                onProgress(Double(offset + received) / Double(totalBytes))
+                lastUpdate = now
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        try? file?.close()
+        file = nil
+        if startOver {
+            startOver = false
+            received = 0
+            session.dataTask(with: request()).resume()
+            return
+        }
+        if let failure = failure ?? error {
+            finish(failure)
+            return
+        }
+        // A dropped connection can end the response early without an error —
+        // never install a truncated model file.
+        if identityEncoded && expectedLength > 0 && received != expectedLength {
+            finish(Self.error(500, "Incomplete download: got \(received) of \(expectedLength) bytes"))
+            return
+        }
+        NSLog("[LiteRTLM] Received %lld bytes from byte %lld: %lld of %lld bytes",
+              received, offset, offset + received, totalBytes)
+        if let hasher = hasher {
+            let started = Date()
+            let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            if actual != expectedSha256 {
+                keepPartial = false
+                finish(Self.error(500, "sha256 mismatch: expected \(expectedSha256), got \(actual)"))
+                return
+            }
+            NSLog("[LiteRTLM] sha256 matches (%@), final digest in %.0f ms",
+                  actual, Date().timeIntervalSince(started) * 1000)
+        }
+        finish(nil)
+    }
+
+    private func finish(_ error: Error?) {
+        if error != nil {
+            if keepPartial && Self.fileSize(tempPath) > 0 {
+                NSLog("[LiteRTLM] Kept %lld bytes of the partial download for the next call", Self.fileSize(tempPath))
+            } else {
+                discardPartial()
+            }
+        }
+        session.finishTasksAndInvalidate()
+        let done = completion
+        completion = nil
+        done?(error)
+    }
+
+    /// A 206 with the rest of the file the partial download holds. The
+    /// validator is compared here too: some servers answer a Range request
+    /// without evaluating If-Range (the Hugging Face CDN does).
+    private func continues(_ response: HTTPURLResponse) -> Bool {
+        guard response.statusCode == 206,
+              let range = response.value(forHTTPHeaderField: "Content-Range"),
+              range.hasPrefix("bytes ") else { return false }
+        let parts = range.dropFirst(6).split(whereSeparator: { $0 == "-" || $0 == "/" })
+        guard parts.count == 3,
+              let first = Int64(parts[0]), let last = Int64(parts[1]), let size = Int64(parts[2]) else { return false }
+        return first == offset && last == totalBytes - 1 && size == totalBytes
+            && Self.validator(of: response) == record?["validator"] as? String
+    }
+
+    private func hashPrefix() throws {
+        guard let input = FileHandle(forReadingAtPath: tempPath) else {
+            throw Self.error(500, "Cannot read the partial download.")
+        }
+        defer { try? input.close() }
+        var left = offset
+        while left > 0 {
+            // One pool per chunk: a multi-GB partial file is read on one delegate callback
+            let count = try autoreleasepool { () -> Int in
+                guard let chunk = try input.read(upToCount: Int(min(left, 1 << 20))), !chunk.isEmpty else {
+                    throw Self.error(500, "The partial download is shorter than \(offset) bytes.")
+                }
+                hasher?.update(data: chunk)
+                return chunk.count
+            }
+            left -= Int64(count)
+        }
+    }
+
+    private func discardPartial() {
+        try? FileManager.default.removeItem(atPath: tempPath)
+        try? FileManager.default.removeItem(atPath: recordPath)
+    }
+
+    /// The version a response is of: a strong ETag, else Last-Modified (what If-Range accepts).
+    private static func validator(of response: HTTPURLResponse) -> String? {
+        if let etag = response.value(forHTTPHeaderField: "ETag"), !etag.hasPrefix("W/") {
+            return etag
+        }
+        return response.value(forHTTPHeaderField: "Last-Modified")
+    }
+
+    private static func fileSize(_ path: String) -> Int64 {
+        ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    private static func error(_ code: Int, _ message: String) -> NSError {
+        NSError(domain: "LiteRTLM.ModelStore", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

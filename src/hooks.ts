@@ -14,6 +14,11 @@ import { LiteRTLMError, type LiteRTLMErrorCode } from "./core/errors";
 export interface UseModelConfig extends LLMConfig {
   autoLoad?: boolean;
   /**
+   * Expected SHA-256 of the downloaded model (64 hex characters) — see
+   * `ModelDownloadOptions.sha256`. Ignored for a local path.
+   */
+  sha256?: string;
+  /**
    * Enable memory tracking using native ArrayBuffers (v0.35+).
    * When enabled, memory usage is tracked after each inference call
    * using `NitroModules.createNativeArrayBuffer()` for zero-copy storage.
@@ -107,6 +112,7 @@ export function useModel(
   // This prevents infinite re-render loops when consumers pass inline config
   // objects (e.g. useModel(url, { backend: 'cpu' })) without useMemo.
   const autoLoad = config?.autoLoad ?? true;
+  const sha256 = config?.sha256;
   const enableMemoryTracking = config?.enableMemoryTracking ?? false;
   const maxMemorySnapshots = config?.maxMemorySnapshots ?? 256;
   const backend = config?.backend;
@@ -244,13 +250,12 @@ export function useModel(
         // Delegate URL handling + download to the factory's loadModel,
         // passing our progress setter as the callback (eliminates
         // duplicate download logic that was previously in this hook).
-        await modelRef.current.loadModel(
-          pathOrUrl,
-          nativeConfig,
-          (progress) => {
+        await modelRef.current.loadModel(pathOrUrl, nativeConfig, {
+          sha256,
+          onProgress: (progress) => {
             setDownloadProgress(progress);
           },
-        );
+        });
         // Surface bundle + memory intel and subscribe to OS pressure warnings
         setModelInfo(modelRef.current.getModelInfo());
         setMemoryWarning(null);
@@ -270,7 +275,7 @@ export function useModel(
       setErrorCode(e instanceof LiteRTLMError ? e.code : null);
       console.error(e);
     }
-  }, [pathOrUrl, nativeConfig]);
+  }, [pathOrUrl, nativeConfig, sha256]);
 
   useEffect(() => {
     if (autoLoad) {

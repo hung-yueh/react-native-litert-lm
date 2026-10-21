@@ -9,7 +9,17 @@ export type { ModelFile } from "./specs/LiteRTLM.nitro";
 export interface ModelDownloadOptions {
   headers?: Record<string, string>;
   onProgress?: (progress: number) => void;
+  /**
+   * Expected SHA-256 of the file: 64 hex characters, any case (for a file on
+   * the Hugging Face Hub, its LFS `oid`). The download is hashed as it is
+   * written and moved into the cache only when it matches; a mismatch deletes
+   * it and rejects with `DOWNLOAD_FAILED`. A file already in the cache is
+   * returned without hashing it again.
+   */
+  sha256?: string;
 }
+
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
 
 const nativeStore = NitroModules.createHybridObject<ModelStore>("ModelStore");
 
@@ -52,7 +62,7 @@ export const ModelRegistry = {
   },
 
   /**
-   * Delete a cached model file.
+   * Delete a cached model file, and any partial download of it.
    * Accepts a filename, local path, or HTTPS URL.
    *
    * @param pathOrUrl Filename, local path, or download URL to delete
@@ -78,8 +88,13 @@ export const ModelRegistry = {
    * cache directory (and throttles callbacks) if not already cached. If it is a
    * local path, returns it directly.
    *
+   * A download that fails or is interrupted (the app killed, the network
+   * lost) keeps what it wrote, and the next call for the same URL continues
+   * from there with an HTTP Range request when the server sent a validator
+   * (ETag or Last-Modified) and the file size.
+   *
    * @param pathOrUrl Local filepath or HTTPS download URL
-   * @param options Custom HTTP headers and progress callback
+   * @param options Custom HTTP headers, progress callback and expected SHA-256
    * @returns Promise resolving to the absolute local path of the model
    */
   async resolveModel(pathOrUrl: string, options?: ModelDownloadOptions): Promise<string> {
@@ -100,6 +115,14 @@ export const ModelRegistry = {
         throw new LiteRTLMError("INVALID_INPUT", `Invalid model URL: ${cleanPath}`);
       }
 
+      const sha256 = options?.sha256;
+      if (sha256 !== undefined && !SHA256_HEX.test(sha256)) {
+        throw new LiteRTLMError(
+          "INVALID_INPUT",
+          `Invalid sha256 (expected 64 hex characters): ${sha256}`,
+        );
+      }
+
       const headersJson = options?.headers ? JSON.stringify(options.headers) : "{}";
       
       try {
@@ -107,6 +130,7 @@ export const ModelRegistry = {
           cleanPath,
           fileName,
           headersJson,
+          sha256?.toLowerCase() ?? "",
           (progress) => {
             options?.onProgress?.(progress);
           }

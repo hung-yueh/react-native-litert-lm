@@ -128,7 +128,7 @@ function Chat() {
     <code>systemPrompt</code>, <code>tools</code>, <code>thinking</code>, …)
     is forwarded to the native load. See
     <a href="configuration.html">Configuration</a> for the full list.
-    The hook adds three fields of its own:
+    The hook adds four fields of its own:
   </p>
   <div class="tbl-wrap">
     <table>
@@ -151,6 +151,12 @@ function Chat() {
           <td><code>number</code></td>
           <td><code>256</code></td>
           <td>Maximum snapshots retained (ring buffer). Each snapshot uses 32 bytes of native memory.</td>
+        </tr>
+        <tr>
+          <td><code>sha256</code></td>
+          <td><code>string</code></td>
+          <td>—</td>
+          <td>Expected SHA-256 of the downloaded model (64 hex characters); see <code>ModelDownloadOptions.sha256</code>. Ignored for a local path.</td>
         </tr>
       </tbody>
     </table>

@@ -723,11 +723,20 @@ export interface ModelStore extends HybridObject<{
    */
   getFileSizeBytes(absolutePath: string): number;
   listCachedFiles(): ModelFile[];
+  /** Deletes the cached file and any partial download of it. */
   deleteFile(fileName: string): void;
+  /**
+   * Download `url` into the cache as `fileName`. A failed or interrupted
+   * download keeps its partial file when the server sent a validator and the
+   * size, and the next call for the same URL continues it with a Range
+   * request. `sha256` (lowercase hex, "" = no check) is checked before the
+   * file is moved into place.
+   */
   downloadFile(
     url: string,
     fileName: string,
     headersJson: string,
+    sha256: string,
     onProgress: (progress: number) => void
   ): Promise<string>;
 }

@@ -519,7 +519,8 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
   <h3 id="delete-file">deleteFile</h3>
   <div class="sig"><code>deleteFile(pathOrUrl: string): void</code></div>
   <p>
-    Delete a cached model file. Accepts a filename, local path, or HTTPS URL.
+    Delete a cached model file, and any partial download of it. Accepts a
+    filename, local path, or HTTPS URL.
   </p>
 
   <h3 id="get-file-size-bytes">getFileSizeBytes</h3>
@@ -545,8 +546,30 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     <pre><code>export interface ModelDownloadOptions {
   headers?: Record&lt;string, string&gt;;
   onProgress?: (progress: number) =&gt; void;
+  sha256?: string;
 }</code></pre>
   </div>
+  <p>
+    <strong>Resuming.</strong> A download that stops (the app is killed, the
+    network drops, an error mid-transfer) keeps what it wrote. The next call
+    for the same URL continues it with an HTTP <code>Range</code> request,
+    when the first response named the file's version (a strong
+    <code>ETag</code>, or <code>Last-Modified</code>) and its size. A
+    <code>200</code> (the server ignored the range) starts the file over; a
+    <code>416</code>, or a <code>206</code> of another version, discards the
+    partial file and fetches the whole file once; any other error keeps it
+    for the next call.
+  </p>
+  <p>
+    <strong>sha256.</strong> The file's SHA-256 as 64 hex characters (for a
+    file on the Hugging Face Hub, its LFS <code>oid</code>). The bytes are
+    hashed as they are written (on a resume, the part already on disk first),
+    and the file moves into the cache only when the hash matches. A mismatch
+    deletes the download and rejects with <code>DOWNLOAD_FAILED</code>
+    (<code>sha256 mismatch: expected …, got …</code>); a malformed value
+    rejects with <code>INVALID_INPUT</code> before any request. A file already
+    in the cache is returned without hashing it again.
+  </p>
 
   <h3 id="url-handling">URL handling</h3>
   <ul>
