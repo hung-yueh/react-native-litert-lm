@@ -204,12 +204,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     )
 
     /**
-     * What getContextTokenCount() reports: the live conversation's token count,
-     * read from the engine after a load and after each completed message, and
-     * -1 (unknown) from an unload, a reset or a new load on.
+     * What getContextTokenCount() reports: a token count read from the engine
+     * after a load and after each completed message, with the conversation it
+     * was read from. It counts only while that conversation is the live one, so
+     * a reset, unload or new load reads as -1 (unknown). Written without
+     * stateLock: a streamed message's last callback runs on the SDK's thread.
      */
-    @Volatile
-    private var contextTokens = -1.0
+    private val contextTokens = AtomicReference<Pair<Conversation, Double>?>(null)
 
     // Configuration
     private var backend: Backend = Backend.CPU
@@ -468,7 +469,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     if (isClosed || lifecycle != loadLifecycle) return@withLock false
                     engine = created
                     conversation = conv
-                    contextTokens = tokens
+                    contextTokens.set(conv to tokens)
                     ready = true
                     true
                 }
@@ -609,9 +610,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             do {
                 retireConversationLocked(timeoutMs = 2_000)
             } while (conversation != null)
-            // Unknown until the new conversation's first message: reading it
-            // here could wait on the JS thread for a cancelled message's prefill.
-            contextTokens = -1.0
+            // The count stays unknown until the new conversation's first message:
+            // reading it here could wait on the JS thread for a cancelled message's prefill.
             synchronized(history) {
                 history.clear()
                 // Mirror the replayed transcript into the wrapper's own history so
@@ -639,7 +639,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
 
     /** Tokens in the conversation's KV cache as of its last completed message (-1 when unknown). */
-    override fun getContextTokenCount(): Double = contextTokens
+    override fun getContextTokenCount(): Double {
+        val (counted, tokens) = contextTokens.get() ?: return -1.0
+        return if (counted === stateLock.withLock { conversation }) tokens else -1.0
+    }
 
     /** Reports not-ready and cancels a message still generating at once; resolves once the engine is freed. */
     override fun unload(): Promise<Unit> {
@@ -748,7 +751,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private fun markUnloaded() = stateLock.withLock {
         lifecycle++
         ready = false
-        contextTokens = -1.0
         conversation?.let { live ->
             conversation = null
             if (generationsRunning > 0) runCatching { live.cancelProcess() }
@@ -777,7 +779,6 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             try {
                 val eng = stateLock.withLock {
                     ready = false
-                    contextTokens = -1.0
                     retireConversationLocked(timeoutMs = null)
                     engine.also { engine = null }
                 }
@@ -862,10 +863,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         -1.0
     }
 
-    /** Record [conversation]'s token count, unless a reset, unload or load replaced it meanwhile. */
+    /**
+     * Record [conversation]'s token count. No lock, so an SDK callback never
+     * waits on the JS thread; getContextTokenCount() ignores it once a reset,
+     * unload or load has replaced the conversation.
+     */
     private fun recordContextTokens(conversation: Conversation) {
-        val tokens = tokenCount(conversation)
-        stateLock.withLock { if (this.conversation === conversation) contextTokens = tokens }
+        contextTokens.set(conversation to tokenCount(conversation))
     }
 
     private fun notLoaded() = LiteRTLMNativeException(

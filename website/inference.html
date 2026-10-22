@@ -567,9 +567,9 @@ export function createStreamEventParser(
   <p>
     Number of tokens currently held in the conversation KV cache (prompt +
     history + generated tokens), read from the engine. Returns
-    <code>-1</code> if unknown: no model loaded, or, on
-    <span class="pill android">Android</span>, a reset conversation before
-    its first message completes. Combine with <code>maxContextTokens</code> to
+    <code>-1</code> while unknown: no model loaded, or just after a reset (on
+    <span class="pill android">Android</span>, until the next message
+    completes). Combine with <code>maxContextTokens</code> to
     warn before the context window (and its memory) runs out — see
     <code>getMemoryForecast()</code> on the
     <a href="memory.html">Memory &amp; errors</a> page.
