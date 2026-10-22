@@ -282,7 +282,7 @@ info?.llm?.supportsFunctionCalling;</code></pre>
         </tr>
         <tr>
           <td><code>getContextTokenCount(): number</code></td>
-          <td>Tokens in the conversation KV cache (prompt + history + generated) as of the last completed message. Returns -1 if unknown: no model loaded, or, on Android, a reset conversation before its first message completes.</td>
+          <td>Tokens in the conversation KV cache (prompt + history + generated) as of the last completed message. Returns -1 while unknown: no model loaded, or just after a reset (on Android, until the next message completes).</td>
         </tr>
         <tr>
           <td><code>unload(): Promise&lt;void&gt;</code></td>
