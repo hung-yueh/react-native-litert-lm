@@ -634,6 +634,19 @@ class HybridLiteRTLMInstrumentedTest {
         assertEquals("the cancelled message must stay out of the transcript",
             listOf(Role.USER, Role.MODEL), llm.getHistory().map { it.role })
 
+        // Reset mid-stream: the context token count is unknown at once and
+        // stays so after the cancelled stream returns, until the new
+        // conversation's first message.
+        val streaming = CountDownLatch(1)
+        sent = send(llm) { token, done -> if (!done && token.isNotEmpty()) streaming.countDown() }
+        assertTrue("no streamed token", streaming.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+        ms("resetConversation mid-stream") { llm.resetConversation(null, null, null) }
+        assertEquals(-1.0, llm.getContextTokenCount(), 0.0)
+        assertCancelled("reset mid-stream", sent)
+        assertEquals(-1.0, llm.getContextTokenCount(), 0.0)
+        generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
+        assertTrue("no context token count after the next message", llm.getContextTokenCount() > 0)
+
         // close() during a blocking send: not ready at once, the message
         // cancelled, and the engine freed once it has returned.
         sent = send(llm)

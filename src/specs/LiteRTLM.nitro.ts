@@ -636,8 +636,8 @@ export interface LiteRTLM extends HybridObject<{
   /**
    * Number of tokens held in the conversation KV cache (prompt + history +
    * generated tokens) as of the last completed message — it doesn't move
-   * while one generates. Returns -1 if unavailable (always on Android: the
-   * Kotlin SDK doesn't expose it).
+   * while one generates. Returns -1 while unknown: no model loaded, or just
+   * after a reset (on Android, until the next message completes).
    *
    * Combine with `maxContextTokens` to warn before the context window
    * (and its memory) runs out — see `getMemoryForecast()` in the JS API.

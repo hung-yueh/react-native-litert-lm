@@ -5,8 +5,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.facebook.soloader.nativeloader.NativeLoader
 import com.facebook.soloader.nativeloader.SystemDelegate
 import com.margelo.nitro.JNIOnLoad
+import com.margelo.nitro.core.Promise
 import dev.litert.litertlm.LiteRTLMInitProvider
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -81,6 +83,17 @@ class HybridModelVerificationTest {
     private fun ask(llm: HybridLiteRTLM, prompt: String, opts: ExecuteOptions? = options()) =
         run(llm, arrayOf(text(prompt)), opts).first
 
+    /** Wait for a Nitro Promise on the test thread; returns its value or throws its error. */
+    private fun <T> await(promise: Promise<T>): T {
+        val settled = CountDownLatch(1)
+        var result: Result<T>? = null
+        promise
+            .then { result = Result.success(it); settled.countDown() }
+            .catch { result = Result.failure(it); settled.countDown() }
+        assertTrue("promise did not settle", settled.await(300, TimeUnit.SECONDS))
+        return result!!.getOrThrow()
+    }
+
     /** The answer with any reasoning block removed, for content checks. */
     private fun answer(reply: String) = reply.substringAfter("</think>")
 
@@ -96,15 +109,29 @@ class HybridModelVerificationTest {
             var started = System.nanoTime()
             llm.loadModelBlocking(path, config())
             println("[verify] $name loaded in ${"%.1f".format((System.nanoTime() - started) / 1e9)}s")
+            val loaded = llm.getContextTokenCount()
 
             val capital = ask(llm, "What is the capital of France? Answer with just the city name.")
+            val streamed = llm.getContextTokenCount()
             println("[verify] capital: $capital")
             assertTrue("facts: $capital", answer(capital).lowercase().contains("paris"))
+
+            // Context token count: grows with a streamed and a blocking message
+            await(llm.execute(arrayOf(text("And of Italy?")), null, options(maxOutputTokens = 16.0)))
+            val blocking = llm.getContextTokenCount()
+            println("[verify] context tokens: loaded $loaded, streamed $streamed, blocking $blocking")
+            assertTrue("context tokens after load: $loaded", loaded >= 0)
+            assertTrue("context tokens after a streamed message: $loaded -> $streamed", streamed > loaded)
+            assertTrue("context tokens after a blocking message: $streamed -> $blocking", blocking > streamed)
 
             // Multi-turn memory, from a fresh conversation (a one-word answer just
             // before primes small models to keep answering in one word)
             llm.resetConversation(null, null, null)
+            assertEquals("context tokens after a reset", -1.0, llm.getContextTokenCount(), 0.0)
             ask(llm, "My favorite color is teal. Please remember it.", options(maxOutputTokens = 48.0))
+            val afterReset = llm.getContextTokenCount()
+            println("[verify] context tokens after the reset's first message: $afterReset")
+            assertTrue("context tokens after the reset's first message: $afterReset", afterReset > 0)
             val color = ask(llm, "What is my favorite color? Answer with one word.")
             println("[verify] recall: $color")
             assertTrue("multi-turn: $color", answer(color).lowercase().contains("teal"))
@@ -133,6 +160,10 @@ class HybridModelVerificationTest {
             )
             println("[verify] reasoning (think block: ${math.contains("<think>")}): ${math.take(300)}")
             assertTrue("arithmetic: $math", answer(math).contains("6"))
+
+            val unloading = llm.unload()
+            assertEquals("context tokens after unload()", -1.0, llm.getContextTokenCount(), 0.0)
+            await(unloading)
         } finally {
             llm.close()
         }

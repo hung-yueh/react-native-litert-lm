@@ -576,10 +576,10 @@ rec.reason;     // why, including any backends it skipped</code></pre>
           <td>On Android the tool call surfaces once complete; still a typed <code>toolCall</code> event.</td>
         </tr>
         <tr>
-          <td><code>getContextTokenCount()</code> accuracy</td>
-          <td>exact</td>
-          <td>approximated</td>
-          <td>Android SDK doesn't expose tokenizer counts.</td>
+          <td><code>getContextTokenCount()</code> after <code>resetConversation()</code></td>
+          <td>-1 until the new conversation is created</td>
+          <td>-1 until the next message completes</td>
+          <td>iOS reads the count when it creates the new conversation; Android, when a message completes.</td>
         </tr>
         <tr>
           <td>GPU backend</td>
