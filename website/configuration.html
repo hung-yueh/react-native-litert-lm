@@ -577,9 +577,9 @@ rec.reason;     // why, including any backends it skipped</code></pre>
         </tr>
         <tr>
           <td><code>getContextTokenCount()</code> after <code>resetConversation()</code></td>
-          <td>the engine's count</td>
+          <td>-1 until the new conversation is created</td>
           <td>-1 until the next message completes</td>
-          <td>Android reads the count when a message completes.</td>
+          <td>iOS reads the count when it creates the new conversation; Android, when a message completes.</td>
         </tr>
         <tr>
           <td>GPU backend</td>
