@@ -11,9 +11,15 @@ import Foundation
 import NitroModules
 
 public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_protocol {
-    
-    private let queue = DispatchQueue(label: "dev.litert.modelstore", qos: .utility)
-    
+
+    /// One queue for every store in the process (HybridLiteRTLM's downloadModel
+    /// has a store of its own); `running` is read and written only on it.
+    private static let queue = DispatchQueue(label: "dev.litert.modelstore", qos: .utility)
+    /// The file names with a download running, each with the calls waiting to
+    /// start after it: one download of a file at a time, so no two write
+    /// `<file>.tmp` at once.
+    private static var running: [String: [() -> Void]] = [:]
+
     private var modelsDirectory: String {
         let cachesDir = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
         return (cachesDir as NSString).appendingPathComponent("litert_models")
@@ -90,9 +96,14 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         try sanitizeFileName(fileName)
         let filePath = (modelsDirectory as NSString).appendingPathComponent(fileName)
         let fileManager = FileManager.default
-        // A partial download of the file goes too
-        try? fileManager.removeItem(atPath: filePath + ".tmp")
-        try? fileManager.removeItem(atPath: filePath + ResumableDownload.recordSuffix)
+        // A partial download of the file goes too, unless a download is
+        // writing it right now
+        Self.queue.sync {
+            if Self.running[fileName] == nil {
+                try? fileManager.removeItem(atPath: filePath + ".tmp")
+                try? fileManager.removeItem(atPath: filePath + ResumableDownload.recordSuffix)
+            }
+        }
         if fileManager.fileExists(atPath: filePath) {
             try fileManager.removeItem(atPath: filePath)
         }
@@ -106,76 +117,124 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         onProgress: @escaping (_ progress: Double) -> Void
     ) throws -> Promise<String> {
         let promise = Promise<String>()
-        
-        queue.async {
-            do {
-                try self.sanitizeFileName(fileName)
-                let destPath = (self.modelsDirectory as NSString).appendingPathComponent(fileName)
-                let fileManager = FileManager.default
-                
-                if !fileManager.fileExists(atPath: self.modelsDirectory) {
-                    try fileManager.createDirectory(atPath: self.modelsDirectory, withIntermediateDirectories: true, attributes: nil)
-                }
-                
-                // Fast cache check
-                if fileManager.fileExists(atPath: destPath) {
-                    let attrs = try fileManager.attributesOfItem(atPath: destPath)
-                    if let fileSize = attrs[.size] as? UInt64, fileSize > 0 {
-                        onProgress(1.0)
-                        promise.resolve(withResult: destPath)
-                        return
-                    }
-                }
-                
-                guard let downloadUrl = URL(string: url), downloadUrl.scheme?.lowercased() == "https" else {
-                    promise.reject(withError: NSError(domain: "LiteRTLM.ModelStore", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid download URL: HTTPS is required for security."]))
-                    return
-                }
-                
-                onProgress(0.0)
-                
-                // Parse headers JSON
-                var customHeaders: [String: String] = [:]
-                if !headersJson.isEmpty {
-                    if let data = headersJson.data(using: .utf8),
-                       let parsed = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: String] {
-                        customHeaders = parsed
-                    }
-                }
-                
-                let tempDestFile = (self.modelsDirectory as NSString).appendingPathComponent("\(fileName).tmp")
-                let download = ResumableDownload(
-                    url: downloadUrl,
-                    headers: customHeaders,
-                    tempPath: tempDestFile,
-                    recordPath: destPath + ResumableDownload.recordSuffix,
-                    expectedSha256: sha256,
-                    onProgress: onProgress
-                )
-                download.start { error in
-                    if let error = error {
-                        promise.reject(withError: error)
-                        return
-                    }
-                    do {
-                        if fileManager.fileExists(atPath: destPath) {
-                            try fileManager.removeItem(atPath: destPath)
-                        }
-                        try fileManager.moveItem(at: URL(fileURLWithPath: tempDestFile), to: URL(fileURLWithPath: destPath))
-                        try? fileManager.removeItem(atPath: destPath + ResumableDownload.recordSuffix)
 
-                        onProgress(1.0)
-                        promise.resolve(withResult: destPath)
-                    } catch {
-                        promise.reject(withError: error)
+        Self.queue.async {
+            // One download of a file at a time in this process: a call that
+            // finds one running starts when it ends, then finds the file in the
+            // cache or continues the partial file it left.
+            Self.whenIdle(fileName) { done in
+                self.download(url: url, fileName: fileName, headersJson: headersJson,
+                              sha256: sha256, onProgress: onProgress) { result in
+                    done()
+                    switch result {
+                    case .success(let path): promise.resolve(withResult: path)
+                    case .failure(let error): promise.reject(withError: error)
                     }
                 }
-            } catch {
-                promise.reject(withError: error)
             }
         }
-        
+
         return promise
+    }
+
+    /// On `queue`: runs `start` now when no download of `fileName` is running,
+    /// else after the ones already waiting for it; `start` calls `done` when
+    /// its download ends.
+    private static func whenIdle(_ fileName: String, start: @escaping (_ done: @escaping () -> Void) -> Void) {
+        let done = {
+            Self.queue.async {
+                if let next = Self.running[fileName]?.first {
+                    Self.running[fileName]?.removeFirst()
+                    next()
+                } else {
+                    Self.running[fileName] = nil
+                }
+            }
+        }
+        if Self.running[fileName] == nil {
+            Self.running[fileName] = []
+            start(done)
+        } else {
+            NSLog("[LiteRTLM] Waiting for the download of %@ already running", fileName)
+            Self.running[fileName]?.append { start(done) }
+        }
+    }
+
+    /// One download into the cache, or the file already there; runs on `queue`
+    /// and calls `completion` once.
+    private func download(
+        url: String,
+        fileName: String,
+        headersJson: String,
+        sha256: String,
+        onProgress: @escaping (_ progress: Double) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        do {
+            try self.sanitizeFileName(fileName)
+            let destPath = (self.modelsDirectory as NSString).appendingPathComponent(fileName)
+            let fileManager = FileManager.default
+            
+            if !fileManager.fileExists(atPath: self.modelsDirectory) {
+                try fileManager.createDirectory(atPath: self.modelsDirectory, withIntermediateDirectories: true, attributes: nil)
+            }
+            
+            // Fast cache check
+            if fileManager.fileExists(atPath: destPath) {
+                let attrs = try fileManager.attributesOfItem(atPath: destPath)
+                if let fileSize = attrs[.size] as? UInt64, fileSize > 0 {
+                    onProgress(1.0)
+                    completion(.success(destPath))
+                    return
+                }
+            }
+            
+            guard let downloadUrl = URL(string: url), downloadUrl.scheme?.lowercased() == "https" else {
+                completion(.failure(NSError(domain: "LiteRTLM.ModelStore", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid download URL: HTTPS is required for security."])))
+                return
+            }
+            
+            onProgress(0.0)
+            
+            // Parse headers JSON
+            var customHeaders: [String: String] = [:]
+            if !headersJson.isEmpty {
+                if let data = headersJson.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: String] {
+                    customHeaders = parsed
+                }
+            }
+            
+            let tempDestFile = (self.modelsDirectory as NSString).appendingPathComponent("\(fileName).tmp")
+            let download = ResumableDownload(
+                url: downloadUrl,
+                headers: customHeaders,
+                tempPath: tempDestFile,
+                recordPath: destPath + ResumableDownload.recordSuffix,
+                expectedSha256: sha256,
+                onProgress: onProgress
+            )
+            download.start { error in
+                if let error = error {
+                    completion(.failure(error))
+                    return
+                }
+                do {
+                    if fileManager.fileExists(atPath: destPath) {
+                        try fileManager.removeItem(atPath: destPath)
+                    }
+                    try fileManager.moveItem(at: URL(fileURLWithPath: tempDestFile), to: URL(fileURLWithPath: destPath))
+                    try? fileManager.removeItem(atPath: destPath + ResumableDownload.recordSuffix)
+
+                    onProgress(1.0)
+                    completion(.success(destPath))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        } catch {
+            completion(.failure(error))
+        }
     }
 }
 
@@ -187,6 +246,8 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
 /// arrive and survive the app being killed.
 final class ResumableDownload: NSObject, URLSessionDataDelegate {
     static let recordSuffix = ".tmp.json"
+    /// URLProtocol classes put in front of the network (the tests' stub server).
+    static var protocolClasses: [AnyClass] = []
 
     private let url: URL
     private let headers: [String: String]
@@ -227,6 +288,9 @@ final class ResumableDownload: NSObject, URLSessionDataDelegate {
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = 30
         sessionConfig.timeoutIntervalForResource = 3600
+        if !Self.protocolClasses.isEmpty {
+            sessionConfig.protocolClasses = Self.protocolClasses + (sessionConfig.protocolClasses ?? [])
+        }
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
         session = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: delegateQueue)
@@ -386,8 +450,14 @@ final class ResumableDownload: NSObject, URLSessionDataDelegate {
             return
         }
         // A dropped connection can end the response early without an error —
-        // never install a truncated model file.
-        if identityEncoded && expectedLength > 0 && received != expectedLength {
+        // never install a truncated model file. A continued download must
+        // reach the size its first response gave: a 206 sent chunked has no
+        // Content-Length to compare with.
+        if offset > 0 && offset + received != totalBytes {
+            finish(Self.error(500, "Incomplete download: got \(offset + received) of \(totalBytes) bytes"))
+            return
+        }
+        if offset == 0 && identityEncoded && expectedLength > 0 && received != expectedLength {
             finish(Self.error(500, "Incomplete download: got \(received) of \(expectedLength) bytes"))
             return
         }

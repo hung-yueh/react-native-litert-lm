@@ -519,8 +519,9 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
   <h3 id="delete-file">deleteFile</h3>
   <div class="sig"><code>deleteFile(pathOrUrl: string): void</code></div>
   <p>
-    Delete a cached model file, and any partial download of it. Accepts a
-    filename, local path, or HTTPS URL.
+    Delete a cached model file, and any partial download of it (a partial
+    file that a download is writing right now is left to that download).
+    Accepts a filename, local path, or HTTPS URL.
   </p>
 
   <h3 id="get-file-size-bytes">getFileSizeBytes</h3>
@@ -558,7 +559,17 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     <code>200</code> (the server ignored the range) starts the file over; a
     <code>416</code>, or a <code>206</code> of another version, discards the
     partial file and fetches the whole file once; any other error keeps it
-    for the next call.
+    for the next call. A read that gets no data for 60 seconds on Android (30
+    on iOS) fails the same way, so a dead connection does not hang the call.
+  </p>
+  <p>
+    <strong>One download per file.</strong> A call made while the same file
+    is downloading joins that download when its URL, <code>sha256</code> and
+    headers are the same: it resolves with the same path, and its
+    <code>onProgress</code> gets the current progress at once, then the rest.
+    Any other call starts when that download ends, and then finds the file in
+    the cache or continues the partial file. The native store keeps to this
+    too, so a download that outlives a JS reload is not written twice.
   </p>
   <p>
     <strong>sha256.</strong> The file's SHA-256 as 64 hex characters (for a

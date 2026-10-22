@@ -12,6 +12,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 import org.json.JSONObject
 
 @DoNotStrip
@@ -19,6 +21,13 @@ import org.json.JSONObject
 class HybridModelStore : HybridModelStoreSpec() {
 
     private val tag = "HybridModelStore"
+
+    /**
+     * How long a read waits for data before the download fails and keeps its
+     * partial file for the next call. Without it a dead connection (say after
+     * a switch from Wi-Fi to cellular) blocks the read forever. Tests shorten it.
+     */
+    internal var readTimeoutMs = 60_000
 
     private val modelsDirectory: File
         get() {
@@ -83,9 +92,17 @@ class HybridModelStore : HybridModelStoreSpec() {
 
     override fun deleteFile(fileName: String) {
         sanitizeFileName(fileName)
-        // A partial download of the file goes too
-        File(modelsDirectory, "$fileName.tmp").delete()
-        File(modelsDirectory, "$fileName$RESUME_SUFFIX").delete()
+        // A partial download of the file goes too, unless a download is
+        // writing it right now
+        val lock = downloadLock(fileName)
+        if (lock.tryLock()) {
+            try {
+                File(modelsDirectory, "$fileName.tmp").delete()
+                File(modelsDirectory, "$fileName$RESUME_SUFFIX").delete()
+            } finally {
+                lock.unlock()
+            }
+        }
         val file = File(modelsDirectory, fileName)
         if (file.exists()) {
             val deleted = file.delete()
@@ -110,166 +127,195 @@ class HybridModelStore : HybridModelStoreSpec() {
                 throw IllegalArgumentException("Invalid download URL: HTTPS is required for security.")
             }
 
-            val dir = modelsDirectory
-            val modelFile = File(dir, fileName)
-            val tempFile = File(dir, "$fileName.tmp")
-            val resumeFile = File(dir, "$fileName$RESUME_SUFFIX")
-
-            // Fast cache check
-            if (modelFile.exists() && modelFile.length() > 0) {
-                Log.i(tag, "Model already exists: ${modelFile.absolutePath}")
-                onProgress(1.0)
-                return@parallel modelFile.absolutePath
+            // One download of a file at a time in this process: a second call
+            // waits here (on its own thread) for the first to end, then finds
+            // the file in the cache or continues the partial file it left.
+            val lock = downloadLock(fileName)
+            if (!lock.tryLock()) {
+                Log.i(tag, "Waiting for the download of $fileName already running")
+                lock.lock()
             }
-
-            Log.i(tag, "Downloading model to temp file: ${tempFile.absolutePath}")
-            onProgress(0.0)
-
-            // Parse headers
-            val headersMap = mutableMapOf<String, String>()
-            if (headersJson.isNotEmpty()) {
-                try {
-                    val json = JSONObject(headersJson)
-                    val keys = json.keys()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        headersMap[key] = json.getString(key)
-                    }
-                } catch (e: Exception) {
-                    Log.e(tag, "Failed to parse custom headers JSON", e)
-                }
-            }
-
-            // A partial file left by an earlier call is continued only when it
-            // came from the same URL and that response named its version (an
-            // ETag or Last-Modified) and its size.
-            val partial = readPartial(resumeFile)?.takeIf {
-                it.url == url && tempFile.length() in 1 until it.totalBytes
-            }
-            if (partial == null) discardPartial(tempFile, resumeFile)
-            var offset = if (partial != null) tempFile.length() else 0L
-            var keepPartial = partial != null
-
             try {
-                var connection = open(url, headersMap, offset, partial?.validator)
-                if (partial != null) {
-                    val code = connection.responseCode
-                    if (!continues(connection, offset, partial)) {
-                        // 200 = the whole file (the server ignored the range, or the
-                        // file changed); 416 or a 206 of another version = the partial
-                        // file is no use. Anything else fails and keeps it for next time.
-                        if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL && code != 416) {
-                            throw RuntimeException("Failed to download model: HTTP $code")
-                        }
-                        Log.i(tag, "Not continuing the partial download (HTTP $code): starting over")
-                        discardPartial(tempFile, resumeFile)
-                        keepPartial = false
-                        offset = 0L
-                        if (code != HttpURLConnection.HTTP_OK) {
-                            connection.disconnect()
-                            connection = open(url, headersMap, 0L, null)
-                        }
-                    }
-                }
+                download(url, fileName, headersJson, sha256, onProgress)
+            } finally {
+                lock.unlock()
+            }
+        }
+    }
 
-                if (offset == 0L && connection.responseCode != HttpURLConnection.HTTP_OK) {
-                    throw RuntimeException("Failed to download model: HTTP ${connection.responseCode}")
-                }
+    private fun download(
+        url: String,
+        fileName: String,
+        headersJson: String,
+        sha256: String,
+        onProgress: (progress: Double) -> Unit
+    ): String {
+        val dir = modelsDirectory
+        val modelFile = File(dir, fileName)
+        val tempFile = File(dir, "$fileName.tmp")
+        val resumeFile = File(dir, "$fileName$RESUME_SUFFIX")
 
-                val contentLength = connection.contentLengthLong
-                val totalBytes = if (offset > 0) partial!!.totalBytes else contentLength
-                if (offset == 0L) {
-                    // What the next call needs to continue this download
-                    val validator = validatorOf(connection)
-                    if (validator != null && contentLength > 0) {
-                        resumeFile.writeText(
-                            JSONObject()
-                                .put("url", url)
-                                .put("validator", validator)
-                                .put("totalBytes", contentLength)
-                                .toString()
-                        )
-                        keepPartial = true
-                    }
-                }
+        // Fast cache check
+        if (modelFile.exists() && modelFile.length() > 0) {
+            Log.i(tag, "Model already exists: ${modelFile.absolutePath}")
+            onProgress(1.0)
+            return modelFile.absolutePath
+        }
 
-                val digest = if (sha256.isNotEmpty()) MessageDigest.getInstance("SHA-256") else null
-                if (offset > 0) {
-                    Log.i(tag, "Continuing the partial download at byte $offset of $totalBytes")
-                    if (digest != null) {
-                        val started = System.currentTimeMillis()
-                        hashPrefix(digest, tempFile, offset)
-                        Log.i(tag, "Hashed the $offset bytes already downloaded in ${System.currentTimeMillis() - started} ms")
-                    }
-                    onProgress(offset.toDouble() / totalBytes.toDouble())
-                }
+        Log.i(tag, "Downloading model to temp file: ${tempFile.absolutePath}")
+        onProgress(0.0)
 
-                val input = connection.inputStream
-                val output = FileOutputStream(tempFile, offset > 0)
-
-                val buffer = ByteArray(8 * 1024)
-                var bytesRead: Int
-                var totalBytesRead = 0L
-                var lastProgressUpdate = 0L
-
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                    digest?.update(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-
-                    if (totalBytes > 0) {
-                        val currentTime = System.currentTimeMillis()
-                        // Update progress roughly every 100ms to prevent bridge flooding
-                        if (currentTime - lastProgressUpdate > 100) {
-                            val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
-                            onProgress(progress)
-                            lastProgressUpdate = currentTime
-                        }
-                    }
-                }
-
-                output.flush()
-                output.close()
-                input.close()
-                connection.disconnect()
-
-                // A dropped connection can end the read loop early without an
-                // exception — never install a truncated model file.
-                if (contentLength > 0 && totalBytesRead != contentLength) {
-                    throw RuntimeException(
-                        "Incomplete download: got $totalBytesRead of $contentLength bytes"
-                    )
-                }
-                Log.i(tag, "Received $totalBytesRead bytes from byte $offset: ${offset + totalBytesRead} of $totalBytes bytes")
-
-                if (digest != null) {
-                    val started = System.currentTimeMillis()
-                    val actual = digest.digest().joinToString("") { "%02x".format(it) }
-                    if (actual != sha256) {
-                        keepPartial = false
-                        throw RuntimeException("sha256 mismatch: expected $sha256, got $actual")
-                    }
-                    Log.i(tag, "sha256 matches ($actual), final digest in ${System.currentTimeMillis() - started} ms")
-                }
-
-                // Atomic rename
-                if (tempFile.renameTo(modelFile)) {
-                    resumeFile.delete()
-                    Log.i(tag, "Download complete and verified at: ${modelFile.absolutePath}")
-                    onProgress(1.0)
-                    modelFile.absolutePath
-                } else {
-                    throw RuntimeException("Failed to rename temporary file to model file")
+        // Parse headers
+        val headersMap = mutableMapOf<String, String>()
+        if (headersJson.isNotEmpty()) {
+            try {
+                val json = JSONObject(headersJson)
+                val keys = json.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    headersMap[key] = json.getString(key)
                 }
             } catch (e: Exception) {
-                Log.e(tag, "Download failed", e)
-                if (keepPartial && tempFile.length() > 0) {
-                    Log.i(tag, "Kept ${tempFile.length()} bytes of the partial download for the next call")
-                } else {
-                    discardPartial(tempFile, resumeFile)
-                }
-                throw RuntimeException("Download failed: ${e.message}", e)
+                Log.e(tag, "Failed to parse custom headers JSON", e)
             }
+        }
+
+        // A partial file left by an earlier call is continued only when it
+        // came from the same URL and that response named its version (an
+        // ETag or Last-Modified) and its size.
+        val partial = readPartial(resumeFile)?.takeIf {
+            it.url == url && tempFile.length() in 1 until it.totalBytes
+        }
+        if (partial == null) discardPartial(tempFile, resumeFile)
+        var offset = if (partial != null) tempFile.length() else 0L
+        var keepPartial = partial != null
+
+        return try {
+            var connection = open(url, headersMap, offset, partial?.validator)
+            if (partial != null) {
+                val code = connection.responseCode
+                if (!continues(connection, offset, partial)) {
+                    // 200 = the whole file (the server ignored the range, or the
+                    // file changed); 416 or a 206 of another version = the partial
+                    // file is no use. Anything else fails and keeps it for next time.
+                    if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL && code != 416) {
+                        throw RuntimeException("Failed to download model: HTTP $code")
+                    }
+                    Log.i(tag, "Not continuing the partial download (HTTP $code): starting over")
+                    discardPartial(tempFile, resumeFile)
+                    keepPartial = false
+                    offset = 0L
+                    if (code != HttpURLConnection.HTTP_OK) {
+                        connection.disconnect()
+                        connection = open(url, headersMap, 0L, null)
+                    }
+                }
+            }
+
+            if (offset == 0L && connection.responseCode != HttpURLConnection.HTTP_OK) {
+                throw RuntimeException("Failed to download model: HTTP ${connection.responseCode}")
+            }
+
+            val contentLength = connection.contentLengthLong
+            val totalBytes = if (offset > 0) partial!!.totalBytes else contentLength
+            if (offset == 0L) {
+                // What the next call needs to continue this download
+                val validator = validatorOf(connection)
+                if (validator != null && contentLength > 0) {
+                    resumeFile.writeText(
+                        JSONObject()
+                            .put("url", url)
+                            .put("validator", validator)
+                            .put("totalBytes", contentLength)
+                            .toString()
+                    )
+                    keepPartial = true
+                }
+            }
+
+            val digest = if (sha256.isNotEmpty()) MessageDigest.getInstance("SHA-256") else null
+            if (offset > 0) {
+                Log.i(tag, "Continuing the partial download at byte $offset of $totalBytes")
+                if (digest != null) {
+                    val started = System.currentTimeMillis()
+                    hashPrefix(digest, tempFile, offset)
+                    Log.i(tag, "Hashed the $offset bytes already downloaded in ${System.currentTimeMillis() - started} ms")
+                }
+                onProgress(offset.toDouble() / totalBytes.toDouble())
+            }
+
+            val input = connection.inputStream
+            val output = FileOutputStream(tempFile, offset > 0)
+
+            val buffer = ByteArray(8 * 1024)
+            var bytesRead: Int
+            var totalBytesRead = 0L
+            var lastProgressUpdate = 0L
+
+            while (input.read(buffer).also { bytesRead = it } != -1) {
+                output.write(buffer, 0, bytesRead)
+                digest?.update(buffer, 0, bytesRead)
+                totalBytesRead += bytesRead
+
+                if (totalBytes > 0) {
+                    val currentTime = System.currentTimeMillis()
+                    // Update progress roughly every 100ms to prevent bridge flooding
+                    if (currentTime - lastProgressUpdate > 100) {
+                        val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
+                        onProgress(progress)
+                        lastProgressUpdate = currentTime
+                    }
+                }
+            }
+
+            output.flush()
+            output.close()
+            input.close()
+            connection.disconnect()
+
+            // A dropped connection can end the read loop early without an
+            // exception — never install a truncated model file. A continued
+            // download must reach the size its first response gave: a 206
+            // sent chunked has no Content-Length to compare with.
+            if (offset > 0 && offset + totalBytesRead != totalBytes) {
+                throw RuntimeException(
+                    "Incomplete download: got ${offset + totalBytesRead} of $totalBytes bytes"
+                )
+            }
+            if (offset == 0L && contentLength > 0 && totalBytesRead != contentLength) {
+                throw RuntimeException(
+                    "Incomplete download: got $totalBytesRead of $contentLength bytes"
+                )
+            }
+            Log.i(tag, "Received $totalBytesRead bytes from byte $offset: ${offset + totalBytesRead} of $totalBytes bytes")
+
+            if (digest != null) {
+                val started = System.currentTimeMillis()
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                if (actual != sha256) {
+                    keepPartial = false
+                    throw RuntimeException("sha256 mismatch: expected $sha256, got $actual")
+                }
+                Log.i(tag, "sha256 matches ($actual), final digest in ${System.currentTimeMillis() - started} ms")
+            }
+
+            // Atomic rename
+            if (tempFile.renameTo(modelFile)) {
+                resumeFile.delete()
+                Log.i(tag, "Download complete and verified at: ${modelFile.absolutePath}")
+                onProgress(1.0)
+                modelFile.absolutePath
+            } else {
+                throw RuntimeException("Failed to rename temporary file to model file")
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Download failed", e)
+            if (keepPartial && tempFile.length() > 0) {
+                Log.i(tag, "Kept ${tempFile.length()} bytes of the partial download for the next call")
+            } else {
+                discardPartial(tempFile, resumeFile)
+            }
+            throw RuntimeException("Download failed: ${e.message}", e)
         }
     }
 
@@ -298,7 +344,8 @@ class HybridModelStore : HybridModelStoreSpec() {
     ): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15000 // 15s
-        connection.readTimeout = 0 // Infinite read timeout for large files
+        // A stalled read fails like a dropped connection: the partial file stays
+        connection.readTimeout = readTimeoutMs
         connection.doInput = true
 
         // Apply headers
@@ -354,5 +401,14 @@ class HybridModelStore : HybridModelStoreSpec() {
         /** Next to `<file>.tmp`: the URL, validator and size a partial download continues from. */
         const val RESUME_SUFFIX = ".tmp.json"
         val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""")
+
+        /**
+         * One lock per file name for the whole process (HybridLiteRTLM's
+         * downloadModel has a store of its own): a download holds it from the
+         * cache check to the rename, so no two write `<file>.tmp` at once.
+         */
+        private val downloadLocks = ConcurrentHashMap<String, ReentrantLock>()
+
+        fun downloadLock(fileName: String): ReentrantLock = downloadLocks.getOrPut(fileName) { ReentrantLock() }
     }
 }

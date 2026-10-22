@@ -3,10 +3,13 @@ package com.margelo.nitro.dev.litert.litertlm
 import dev.litert.litertlm.LiteRTLMInitProvider
 import java.io.File
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
+import kotlin.concurrent.thread
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -26,7 +29,8 @@ import org.robolectric.RuntimeEnvironment
  * covered elsewhere; these tests cover what happens when the network answers:
  * success + atomic rename, progress reporting, HTTP errors, mid-stream
  * disconnects (no half-written files), the cached-file short-circuit,
- * continuing a partial download with a Range request, and the sha256 check.
+ * continuing a partial download with a Range request, a stalled read, two
+ * downloads of one file at once, and the sha256 check.
  *
  * Uses a local MockWebServer over TLS since the store only accepts https URLs.
  */
@@ -340,6 +344,178 @@ class HybridModelStoreDownloadTest {
 
         assertFalse(File(modelsDir, "gone.litertlm.tmp").exists())
         assertFalse(File(modelsDir, "gone.litertlm.tmp.json").exists())
+    }
+
+    @Test
+    fun aContinuationShortOfTheWholeFileIsNotInstalled() {
+        leavePartial("short.litertlm", cut = 100 * 1024)
+        // A 206 sent chunked (no Content-Length to check) that ends 50 KiB in
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(206)
+                .setChunkedBody(Buffer().write(payload, 100 * 1024, 50 * 1024), 16 * 1024)
+                .setHeader("Content-Range", "bytes ${100 * 1024}-${payload.size - 1}/${payload.size}")
+                .setHeader("ETag", "\"v1\"")
+        )
+
+        val (_, error) = await(store.downloadFile(url("/short.litertlm"), "short.litertlm", "{}", "") {})
+
+        assertNotNull("A continuation short of the whole file must reject", error)
+        assertTrue(error!!.message!!, error.message!!.contains("Incomplete download: got ${150 * 1024} of ${payload.size} bytes"))
+        assertFalse(File(modelsDir, "short.litertlm").exists())
+        // What it got stays for the next call, which continues from there
+        assertEquals(150L * 1024, File(modelsDir, "short.litertlm.tmp").length())
+        assertTrue(File(modelsDir, "short.litertlm.tmp.json").exists())
+        server.enqueue(rest(150 * 1024))
+
+        val (path, error2) = await(store.downloadFile(url("/short.litertlm"), "short.litertlm", "{}", "") {})
+
+        assertNull("got: $error2", error2)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        server.takeRequest() // the 206 that ended early
+        assertEquals("bytes=${150 * 1024}-", server.takeRequest().getHeader("Range"))
+    }
+
+    // ── A stalled read ──────────────────────────────────────────────────────
+
+    @Test
+    fun aStalledReadFailsAndKeepsThePartialFileForTheNextCall() {
+        assertEquals(60_000, store.readTimeoutMs)
+        store.readTimeoutMs = 1_000
+        // 200 KiB, then the server goes quiet for 3 s before the rest
+        server.enqueue(
+            MockResponse()
+                .setBody(Buffer().write(payload))
+                .setHeader("ETag", "\"v1\"")
+                .throttleBody(200L * 1024, 3, TimeUnit.SECONDS)
+        )
+
+        val (_, error) = await(store.downloadFile(url("/stall.litertlm"), "stall.litertlm", "{}", "") {})
+
+        assertNotNull("A stalled read must reject", error)
+        assertTrue("got: $error", error!!.cause is SocketTimeoutException)
+        // It failed in the quiet time, and kept what it got
+        assertEquals(200L * 1024, File(modelsDir, "stall.litertlm.tmp").length())
+        assertTrue(File(modelsDir, "stall.litertlm.tmp.json").exists())
+        server.enqueue(rest(200 * 1024))
+
+        val (path, error2) = await(store.downloadFile(url("/stall.litertlm"), "stall.litertlm", "{}", "") {})
+
+        assertNull("got: $error2", error2)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        server.takeRequest()
+        assertEquals("bytes=${200 * 1024}-", server.takeRequest().getHeader("Range"))
+    }
+
+    // ── Two downloads of one file ───────────────────────────────────────────
+
+    /**
+     * Starts a call on a thread of its own, as Nitro's Promise.parallel does
+     * (the test Promise runs it on the caller's thread): its result once it returns.
+     */
+    private fun <T> onThread(call: () -> com.margelo.nitro.core.Promise<T>): () -> Pair<T?, Throwable?> {
+        var promise: com.margelo.nitro.core.Promise<T>? = null
+        val worker = thread { promise = call() }
+        return {
+            worker.join(10_000)
+            assertFalse("The call did not return within 10s", worker.isAlive)
+            Pair(promise!!.result, promise!!.error)
+        }
+    }
+
+    private fun waitFor(what: String, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!condition() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10)
+        }
+        assertTrue(what, condition())
+    }
+
+    /** The whole payload from a slow server: [bytes] every 300 ms. */
+    private fun slowly(bytes: Long = 64L * 1024): MockResponse =
+        MockResponse()
+            .setBody(Buffer().write(payload))
+            .setHeader("ETag", "\"v1\"")
+            .throttleBody(bytes, 300, TimeUnit.MILLISECONDS)
+
+    @Test
+    fun twoDownloadsOfTheSameFileRunOneAfterTheOther() {
+        server.enqueue(slowly())
+
+        val first = onThread { store.downloadFile(url("/twice.litertlm"), "twice.litertlm", "{}", "") {} }
+        server.takeRequest()
+        waitFor("the first download writes its partial file") { File(modelsDir, "twice.litertlm.tmp").length() > 0 }
+        val second = onThread { store.downloadFile(url("/twice.litertlm"), "twice.litertlm", "{}", "") {} }
+
+        val (path1, error1) = first()
+        val (path2, error2) = second()
+        assertNull("got: $error1", error1)
+        assertNull("got: $error2", error2)
+        assertEquals(path1, path2)
+        assertArrayEquals(payload, File(path1!!).readBytes())
+        // The second waited for the first and found the file in the cache
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun aCallThatWaitedContinuesWhatAFailedDownloadLeft() {
+        // The version and size, 192 KiB slowly, then the connection drops
+        server.enqueue(
+            MockResponse()
+                .setBody(Buffer().write(payload, 0, 192 * 1024))
+                .setHeader("Content-Length", payload.size)
+                .setHeader("ETag", "\"v1\"")
+                .throttleBody(64L * 1024, 300, TimeUnit.MILLISECONDS)
+                .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
+        )
+        server.enqueue(rest(192 * 1024))
+
+        val first = onThread { store.downloadFile(url("/again.litertlm"), "again.litertlm", "{}", "") {} }
+        server.takeRequest()
+        waitFor("the first download writes its partial file") { File(modelsDir, "again.litertlm.tmp").length() > 0 }
+        val second = onThread { store.downloadFile(url("/again.litertlm"), "again.litertlm", "{}", "") {} }
+
+        val (_, error1) = first()
+        val (path2, error2) = second()
+        assertNotNull("The dropped download must reject", error1)
+        assertNull("got: $error2", error2)
+        assertArrayEquals(payload, File(path2!!).readBytes())
+        assertEquals("bytes=${192 * 1024}-", server.takeRequest().getHeader("Range"))
+    }
+
+    @Test
+    fun deleteFileLeavesThePartialFileOfARunningDownload() {
+        server.enqueue(slowly())
+
+        val running = onThread { store.downloadFile(url("/writing.litertlm"), "writing.litertlm", "{}", "") {} }
+        server.takeRequest()
+        waitFor("the download writes its partial file") { File(modelsDir, "writing.litertlm.tmp").length() > 0 }
+        store.deleteFile("writing.litertlm")
+
+        assertTrue(File(modelsDir, "writing.litertlm.tmp").exists())
+        assertTrue(File(modelsDir, "writing.litertlm.tmp.json").exists())
+        val (path, error) = running()
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+    }
+
+    @Test
+    fun aDownloadOfAnotherFileDoesNotWait() {
+        server.enqueue(slowly(bytes = 32L * 1024))
+
+        val first = onThread { store.downloadFile(url("/slow.litertlm"), "slow.litertlm", "{}", "") {} }
+        server.takeRequest()
+        val waiting = onThread { store.downloadFile(url("/slow.litertlm"), "slow.litertlm", "{}", "") {} }
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)))
+
+        val (other, error) = await(store.downloadFile(url("/other.litertlm"), "other.litertlm", "{}", "") {})
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(other!!).readBytes())
+        assertFalse("The slow download is still running", File(modelsDir, "slow.litertlm").exists())
+        assertNull(first().second)
+        assertNull(waiting().second)
+        assertEquals(2, server.requestCount)
     }
 
     // ── sha256 ──────────────────────────────────────────────────────────────
