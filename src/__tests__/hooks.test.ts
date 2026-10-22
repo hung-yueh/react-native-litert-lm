@@ -2,7 +2,7 @@
 (global as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { useModel } from '../hooks';
-import { mockLiteRTLM } from '../__mocks__/react-native-nitro-modules';
+import { mockLiteRTLM, mockModelStore } from '../__mocks__/react-native-nitro-modules';
 import TestRenderer from 'react-test-renderer';
 import React from 'react';
 
@@ -79,6 +79,41 @@ describe('useModel React Hook Unit Tests', () => {
 
     expect(hookResult.result.current.isReady).toBe(true);
     expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
+  });
+
+  it('should pass sha256 to the download and keep it out of the native config', async () => {
+    const sha256 = 'cd'.repeat(32);
+    let hookResult: any;
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', { sha256, backend: 'cpu' }));
+    });
+
+    expect(hookResult.result.current.isReady).toBe(true);
+    expect(mockModelStore.downloadFile).toHaveBeenCalledWith(
+      'https://example.com/model.litertlm',
+      'model.litertlm',
+      '{}',
+      sha256,
+      expect.any(Function),
+    );
+    const nativeConfig = mockLiteRTLM.loadModel.mock.calls[0][1];
+    expect(nativeConfig).toMatchObject({ backend: 'cpu' });
+    expect(nativeConfig).not.toHaveProperty('sha256');
+  });
+
+  it('should surface an invalid sha256 as INVALID_INPUT without downloading', async () => {
+    let hookResult: any;
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', { sha256: 'xyz' }));
+    });
+
+    expect(hookResult.result.current.isReady).toBe(false);
+    expect(hookResult.result.current.errorCode).toBe('INVALID_INPUT');
+    expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
   it('should handle model load failure gracefully', async () => {

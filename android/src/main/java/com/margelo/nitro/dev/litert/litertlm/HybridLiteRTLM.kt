@@ -549,7 +549,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
-        return modelStore.downloadFile(url, fileName, "{}", onProgress ?: {})
+        return modelStore.downloadFile(url, fileName, "{}", "", onProgress ?: {})
     }
 
     override fun deleteModel(fileName: String): Promise<Unit> {

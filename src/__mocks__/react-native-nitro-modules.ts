@@ -118,6 +118,7 @@ export const mockModelStore = {
       url: string,
       fileName: string,
       headersJson: string,
+      sha256: string,
       onProgress: (progress: number) => void,
     ) => mockLiteRTLM.downloadModel(url, fileName, onProgress),
   ),

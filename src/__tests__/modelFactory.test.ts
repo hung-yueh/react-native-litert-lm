@@ -1,5 +1,5 @@
 import { createLLM } from '../modelFactory';
-import { mockLiteRTLM } from '../__mocks__/react-native-nitro-modules';
+import { mockLiteRTLM, mockModelStore } from '../__mocks__/react-native-nitro-modules';
 
 describe('modelFactory Security & Proxy Unit Tests', () => {
   let llm: ReturnType<typeof createLLM>;
@@ -23,6 +23,47 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
       expect.any(Function)
     );
     expect(mockLiteRTLM.loadModel).toHaveBeenCalledWith('/mock/path/model.litertlm', undefined);
+  });
+
+  it('should pass download options (sha256, headers, onProgress) through to the native download', async () => {
+    const onProgress = jest.fn();
+    await llm.loadModel('https://example.com/model.litertlm', undefined, {
+      sha256: 'AB'.repeat(32),
+      headers: { Authorization: 'Bearer t' },
+      onProgress,
+    });
+
+    expect(mockModelStore.downloadFile).toHaveBeenCalledWith(
+      'https://example.com/model.litertlm',
+      'model.litertlm',
+      JSON.stringify({ Authorization: 'Bearer t' }),
+      'ab'.repeat(32),
+      expect.any(Function),
+    );
+    expect(onProgress).toHaveBeenCalledWith(1.0);
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledWith('/mock/path/model.litertlm', undefined);
+  });
+
+  it('should still accept a progress callback as the third argument', async () => {
+    const onProgress = jest.fn();
+    await llm.loadModel('https://example.com/model.litertlm', undefined, onProgress);
+
+    expect(mockModelStore.downloadFile).toHaveBeenCalledWith(
+      'https://example.com/model.litertlm',
+      'model.litertlm',
+      '{}',
+      '',
+      expect.any(Function),
+    );
+    expect(onProgress).toHaveBeenCalledWith(1.0);
+  });
+
+  it('should refuse an invalid sha256 before downloading or loading', async () => {
+    await expect(
+      llm.loadModel('https://example.com/model.litertlm', undefined, { sha256: 'abc' }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
+    expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
   });
 
   it('should throw an error for invalid model URL', async () => {
