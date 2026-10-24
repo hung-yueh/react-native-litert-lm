@@ -40,7 +40,7 @@ git clone https://github.com/hung-yueh/react-native-litert-lm && cd react-native
 - 💬 **Multiple conversations, one engine** — independent chats without loading the model twice.
 - 🏎️ **GPU acceleration** — Metal (iOS), OpenCL delegate (Android), with automatic CPU fallback.
 - 🧠 **Speculative decoding** — multi-token prediction, per engine or per conversation.
-- 📥 **Automatic model download** — HTTPS download with progress and local caching.
+- 📥 **Automatic model download** — HTTPS download with progress and local caching. An interrupted download continues where it stopped, and an optional `sha256` is checked before the file is used.
 
 ## Why not react-native-executorch or llama.cpp?
 

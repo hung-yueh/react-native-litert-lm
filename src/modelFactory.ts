@@ -7,7 +7,7 @@ import {
   ExecuteOptions,
 } from "./specs/LiteRTLM.nitro";
 import { createMemoryTracker, MemoryTracker } from "./memoryTracker";
-import { ModelRegistry } from "./modelRegistry";
+import { ModelRegistry, type ModelDownloadOptions } from "./modelRegistry";
 import {
   isLegacyInferenceMethod,
   routeLegacyInference,
@@ -88,10 +88,14 @@ export interface ConversationHandle {
  */
 export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
   memoryTracker?: MemoryTracker;
+  /**
+   * The third argument is a download progress callback, or the options of
+   * `ModelRegistry.resolveModel()` (`onProgress`, `headers`, `sha256`).
+   */
   loadModel: (
     pathOrUrl: string,
     config?: LLMConfig,
-    onDownloadProgress?: (progress: number) => void,
+    download?: ((progress: number) => void) | ModelDownloadOptions,
   ) => Promise<void>;
   /**
    * Pre-flight memory estimate for the most recently loaded (or a given)
@@ -245,14 +249,15 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   const augmentedLoadModel = async (
     pathOrUrl: string,
     config?: LLMConfig,
-    onDownloadProgress?: (progress: number) => void,
+    download?: ((progress: number) => void) | ModelDownloadOptions,
   ) => {
     if (config?.maxTokens !== undefined) {
       warnDeprecated("LLMConfig.maxTokens", "maxContextTokens and maxOutputTokens");
     }
-    const modelPath = await ModelRegistry.resolveModel(pathOrUrl, {
-      onProgress: onDownloadProgress,
-    });
+    const modelPath = await ModelRegistry.resolveModel(
+      pathOrUrl,
+      typeof download === "object" ? download : { onProgress: download },
+    );
 
     // Bundle pre-flight (LiteRT-LM 0.18 model info, header only): refuse the
     // wrong model type or a bundle needing a newer runtime, pick the backend

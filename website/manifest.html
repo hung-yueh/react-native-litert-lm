@@ -234,7 +234,7 @@ if (resolution) {
   await llm.loadModel(resolution.url, {
     ...resolution.config, // backend + session_defaults from the manifest
     maxContextTokens: 4096, // your own overrides win
-  });
+  }, { sha256: resolution.sha256 }); // the download is checked against it
 } else {
   // No manifest, or nothing it could resolve — your existing path.
   const llm = createLLM();
@@ -379,7 +379,7 @@ if (resolution) {
         <tr><td><code>backend</code></td><td><code>Backend</code></td><td>The backend chosen for that variant — always one the variant's <code>backends</code> list verifies.</td></tr>
         <tr><td><code>config</code></td><td><code>LLMConfig</code></td><td><code>LLMConfig</code> fragment derived from the manifest: chosen backend plus mapped <code>session_defaults</code> (sampler hints; <code>max_output_tokens_min</code> applied as a floor). Spread it under your own overrides: <code>{ ...resolution.config, ...userConfig }</code>.</td></tr>
         <tr><td><code>streamChannels</code></td><td><code>StreamChannel[]</code></td><td>Complete channel array for <code>createLLM({ streamChannels })</code> — the manifest's channels merged over <code>DEFAULT_CHANNELS</code>, so passing it can never silently drop tool-call parsing.</td></tr>
-        <tr><td><code>sha256?</code></td><td><code>string</code></td><td>Verify the download against this (from HF LFS metadata).</td></tr>
+        <tr><td><code>sha256?</code></td><td><code>string</code></td><td>The file's SHA-256 from HF LFS metadata. Pass it to the download to check the file: <code>loadModel(resolution.url, config, { sha256: resolution.sha256 })</code>.</td></tr>
         <tr><td><code>sizeBytes?</code></td><td><code>number</code></td><td>Expected file size, from the same LFS metadata.</td></tr>
         <tr><td><code>contextLength?</code></td><td><code>number</code></td><td>The manifest's <code>model.context_length</code>. Deliberately <em>not</em> applied to <code>config.maxContextTokens</code> — see <a href="#not-derived">what is not derived</a>.</td></tr>
         <tr><td><code>sessionDefaults?</code></td><td><code>Record&lt;string, unknown&gt;</code></td><td>The manifest's raw <code>session_defaults</code> — an open object (the schema declares <code>max_output_tokens_min</code>, <code>temperature</code>, <code>top_k</code>, <code>top_p</code>, <code>notes</code>). <code>config</code> maps the keys it knows; any key a later 0.1.x adds is reachable here without a re-fetch.</td></tr>

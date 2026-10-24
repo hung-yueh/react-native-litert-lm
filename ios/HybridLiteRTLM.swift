@@ -616,6 +616,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             url: url,
             fileName: fileName,
             headersJson: "{}",
+            sha256: "",
             onProgress: { progress in
                 onProgress?(progress)
             }
