@@ -121,15 +121,17 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
   <div class="sig">loadModel: (
   pathOrUrl: string,
   config?: LLMConfig,
-  onDownloadProgress?: (progress: number) =&gt; void,
+  download?: ((progress: number) =&gt; void) | ModelDownloadOptions,
 ) =&gt; Promise&lt;void&gt;</div>
   <p>
     The augmented three-argument replacement for the native
     <code>loadModel(modelPath, config?)</code>. It resolves the URL via
     <code>ModelRegistry.resolveModel</code> — HTTPS URLs are downloaded to the
-    native cache with progress reported through
-    <code>onDownloadProgress</code> (0–1) — then checks the bundle and the
-    memory budget before touching the engine:
+    native cache with progress reported through the callback (0–1); pass the
+    options of <code>ModelRegistry.resolveModel()</code> instead
+    (<code>onProgress</code>, <code>headers</code>, <code>sha256</code>) to
+    send headers or check the file — then checks the bundle and the memory
+    budget before touching the engine:
   </p>
   <ol>
     <li><strong>Bundle pre-flight.</strong> It reads the bundle's metadata and refuses the wrong model type (<code>MODEL_TYPE_MISMATCH</code>), a bundle that needs a newer engine (<code>RUNTIME_TOO_OLD</code>), or one this device can't run (<code>UNSUPPORTED</code>). It fills an omitted <code>backend</code> from the bundle and clamps <code>maxContextTokens</code> to the bundle's maximum — see <a href="models.html#load-pre-flight">the load pre-flight</a>.</li>
