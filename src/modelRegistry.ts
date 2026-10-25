@@ -106,7 +106,10 @@ export const ModelRegistry = {
    * A download that fails or is interrupted (the app killed, the network
    * lost) keeps what it wrote, and the next call for the same URL continues
    * from there with an HTTP Range request when the server sent a validator
-   * (ETag or Last-Modified) and the file size.
+   * (ETag or Last-Modified) and the file size. A partial file that nothing
+   * has written to for 7 days is deleted the next time any download starts,
+   * unless that file is downloading at the time; `deleteFile()` deletes one
+   * at once.
    *
    * One download of a file runs at a time. A call while one is running joins
    * it when the URL, sha256 and headers are the same (its `onProgress` gets

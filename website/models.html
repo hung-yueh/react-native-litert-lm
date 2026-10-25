@@ -561,6 +561,10 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     partial file and fetches the whole file once; any other error keeps it
     for the next call. A read that gets no data for 60 seconds on Android (30
     on iOS) fails the same way, so a dead connection does not hang the call.
+    A partial file that nothing has written to for 7 days is deleted the next
+    time any download starts, unless that file is downloading at the time.
+    <a href="#delete-file"><code>deleteFile(url)</code></a> deletes one at
+    once.
   </p>
   <p>
     <strong>One download per file.</strong> A call made while the same file

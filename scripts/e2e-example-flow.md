@@ -27,7 +27,7 @@ download (needs ~3 GB free disk + Wi-Fi).
 | 1 | Launch app | Model picker renders; **pre-flight verdict chip** shows `safe`/`tight`/`critical` *before any download* (estimate path works with no model present) |
 | 2 | Open the **Memory** tab | Live RSS value > 0 and updating ~1 Hz (`getMemoryUsage` polling); no crash on repeated tab switches |
 | 3 | Start model download | Progress bar advances monotonically 0→100 % (`ModelRegistry` progress callback); app remains responsive while downloading |
-| 4 | Kill the app mid-download, relaunch, start again | Download restarts cleanly; **no corrupt partial file is loaded** (`.tmp` staging) |
+| 4 | Kill the app mid-download, relaunch, start again | Download continues where it stopped (an HTTP `Range` request, when the server named the file's version and size); **no corrupt partial file is loaded** (`.tmp` staging) |
 | 5 | Let load complete | `isReady`; memory panel shows post-load estimate + forecast (`memoryEstimate`, `memoryForecast` populated via the hook) |
 | 6 | Send a text prompt | Tokens **stream incrementally** (not one blob); UI stays interactive during generation (JSI thread not blocked) |
 | 7 | Send 3–4 more prompts | Context forecast (`remainingTokens`) decreases; RSS sparkline records new snapshots after each turn (ring-buffer tracker) |

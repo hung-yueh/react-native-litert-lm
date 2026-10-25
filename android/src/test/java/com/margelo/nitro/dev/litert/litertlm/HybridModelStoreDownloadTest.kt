@@ -5,24 +5,29 @@ import java.io.File
 import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.thread
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import okio.Buffer
 import org.junit.After
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.shadows.ShadowLog
 
 /**
  * Exercises HybridModelStore's real download machinery — HTTPS enforcement is
@@ -30,7 +35,8 @@ import org.robolectric.RuntimeEnvironment
  * success + atomic rename, progress reporting, HTTP errors, mid-stream
  * disconnects (no half-written files), the cached-file short-circuit,
  * continuing a partial download with a Range request, a stalled read, two
- * downloads of one file at once, and the sha256 check.
+ * downloads of one file at once, the sha256 check, old partial downloads
+ * deleted when another download starts, and what a failed download leaves open.
  *
  * Uses a local MockWebServer over TLS since the store only accepts https URLs.
  */
@@ -585,5 +591,201 @@ class HybridModelStoreDownloadTest {
         assertNull(error)
         assertEquals(File(modelsDir, "cachedsha.litertlm").absolutePath, path)
         assertEquals(0, server.requestCount)
+    }
+
+    // ── Partial downloads nothing has written to for a week ─────────────────
+
+    private val day = 24L * 60 * 60 * 1000
+
+    private fun age(name: String, daysAgo: Int) {
+        assertTrue(File(modelsDir, name).setLastModified(System.currentTimeMillis() - daysAgo * day))
+    }
+
+    /** A file in the models dir, last written [daysAgo] days ago. */
+    private fun place(name: String, daysAgo: Int) {
+        modelsDir.mkdirs()
+        File(modelsDir, name).writeBytes(ByteArray(64) { 7 })
+        age(name, daysAgo)
+    }
+
+    @Test
+    fun partialDownloadsNotWrittenForAWeekGoWhenAnotherDownloadStarts() {
+        place("old.litertlm.tmp", 8)
+        place("old.litertlm.tmp.json", 8)
+        place("lone.litertlm.tmp", 8)
+        place("record.litertlm.tmp.json", 8)
+        // A pair is as old as its newer file: the record is written once, the
+        // .tmp with every chunk
+        place("recent.litertlm.tmp", 6)
+        place("recent.litertlm.tmp.json", 8)
+        // A model is never a partial download, however old
+        place("model.litertlm", 30)
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)))
+
+        val (path, error) = await(store.downloadFile(url("/other.litertlm"), "other.litertlm", "{}", "") {})
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        assertEquals(
+            listOf("model.litertlm", "other.litertlm", "recent.litertlm.tmp", "recent.litertlm.tmp.json"),
+            modelsDir.list()!!.sorted()
+        )
+    }
+
+    @Test
+    fun aWeekOldPartialDownloadOfTheFileItselfIsContinued() {
+        leavePartial("aged.litertlm", cut = 100 * 1024)
+        age("aged.litertlm.tmp", 8)
+        age("aged.litertlm.tmp.json", 8)
+        server.enqueue(rest(100 * 1024))
+
+        val (path, error) = await(
+            store.downloadFile(url("/aged.litertlm"), "aged.litertlm", "{}", sha256Of(payload)) {}
+        )
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(path!!).readBytes())
+        assertEquals("bytes=${100 * 1024}-", server.takeRequest().getHeader("Range"))
+    }
+
+    @Test
+    fun aWeekOldPartialDownloadThatIsDownloadingStays() {
+        leavePartial("held.litertlm", cut = 100 * 1024)
+        age("held.litertlm.tmp", 8)
+        age("held.litertlm.tmp.json", 8)
+        // Its download continues it, but the server takes 2 s to answer: the
+        // download holds the file's lock while the partial file is a week old
+        server.enqueue(rest(100 * 1024).setHeadersDelay(2, TimeUnit.SECONDS))
+        val running = onThread { store.downloadFile(url("/held.litertlm"), "held.litertlm", "{}", "") {} }
+        server.takeRequest()
+        server.enqueue(MockResponse().setBody(Buffer().write(payload)))
+
+        val (other, error) = await(store.downloadFile(url("/other.litertlm"), "other.litertlm", "{}", "") {})
+
+        assertNull("got: $error", error)
+        assertArrayEquals(payload, File(other!!).readBytes())
+        // The partial file was still there to continue: the whole file, not just its rest
+        val (path, error2) = running()
+        assertNull("got: $error2", error2)
+        assertArrayEquals(payload, File(path!!).readBytes())
+    }
+
+    @Test
+    fun aCallThatWaitsDeletesOldPartialDownloadsOnlyWhenItsTurnComes() {
+        // The server answers only once the gate opens: until then the first
+        // download holds the file's lock
+        val gate = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                gate.await(10, TimeUnit.SECONDS)
+                return MockResponse().setBody(Buffer().write(payload))
+            }
+        }
+        val first = onThread { store.downloadFile(url("/turn.litertlm"), "turn.litertlm", "{}", "") {} }
+        server.takeRequest()
+        // A week-old partial download placed after the first call cleaned up
+        place("stale.litertlm.tmp", 8)
+        place("stale.litertlm.tmp.json", 8)
+        val second = onThread { store.downloadFile(url("/turn.litertlm"), "turn.litertlm", "{}", "") {} }
+        val keptWhileWaiting = try {
+            waitFor("the second call waits for the first") {
+                ShadowLog.getLogsForTag("HybridModelStore").any {
+                    it.msg == "Waiting for the download of turn.litertlm already running"
+                }
+            }
+            File(modelsDir, "stale.litertlm.tmp").exists() && File(modelsDir, "stale.litertlm.tmp.json").exists()
+        } finally {
+            gate.countDown()
+        }
+
+        val (path1, error1) = first()
+        val (path2, error2) = second()
+        assertTrue("The waiting call cleaned up before it held the file's lock", keptWhileWaiting)
+        assertNull("got: $error1", error1)
+        assertNull("got: $error2", error2)
+        assertEquals(path1, path2)
+        assertArrayEquals(payload, File(path1!!).readBytes())
+        // Once its turn came it cleaned up, and found the file in the cache
+        assertFalse(File(modelsDir, "stale.litertlm.tmp").exists())
+        assertFalse(File(modelsDir, "stale.litertlm.tmp.json").exists())
+        assertEquals(1, server.requestCount)
+    }
+
+    // ── What a failed download leaves open ──────────────────────────────────
+
+    // The test JVM's own counts, through reflection: java.lang.management is not
+    // in android.jar, which the unit tests compile against
+    private val system = runCatching {
+        Class.forName("java.lang.management.ManagementFactory").getMethod("getOperatingSystemMXBean").invoke(null)
+    }.getOrNull()
+    private val fdCount = runCatching {
+        Class.forName("com.sun.management.UnixOperatingSystemMXBean").getMethod("getOpenFileDescriptorCount")
+    }.getOrNull()
+
+    private fun openFileDescriptors(): Long = fdCount!!.invoke(system) as Long
+
+    private fun collections(): Long {
+        val management = Class.forName("java.lang.management.ManagementFactory")
+        val count = Class.forName("java.lang.management.GarbageCollectorMXBean").getMethod("getCollectionCount")
+        return (management.getMethod("getGarbageCollectorMXBeans").invoke(null) as List<*>).sumOf { count.invoke(it) as Long }
+    }
+
+    /**
+     * Runs [download] (a download that fails) 10 times and checks that no file
+     * descriptor stays open. A stream or socket left open is closed only when
+     * a garbage collection finds it, so the count is taken again when a
+     * collection ran in between.
+     */
+    private fun assertFailuresLeaveNothingOpen(download: (Int) -> Unit) {
+        assumeTrue("needs a JVM that counts open file descriptors", system != null && fdCount?.declaringClass?.isInstance(system) == true)
+        download(0) // the classes and the TLS session it needs, before counting
+        repeat(3) { attempt ->
+            val collected = collections()
+            val before = openFileDescriptors()
+            repeat(10) { download(1 + attempt * 10 + it) }
+            // The server closes its side of a connection once the client has
+            val deadline = System.currentTimeMillis() + 5_000
+            var left = openFileDescriptors() - before
+            while (left > 3 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50)
+                left = openFileDescriptors() - before
+            }
+            assertTrue("10 failed downloads left $left more file descriptors open", left <= 3)
+            if (collections() == collected) return
+        }
+    }
+
+    @Test
+    fun aConnectionDroppedMidReadLeavesNoFileOrSocketOpen() {
+        assertFailuresLeaveNothingOpen { i ->
+            // Chunked, so a body that stops short fails the read itself
+            server.enqueue(
+                MockResponse()
+                    .setChunkedBody(Buffer().write(payload, 0, 64 * 1024), 8 * 1024)
+                    .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+            )
+            val (_, error) = await(store.downloadFile(url("/drop$i.litertlm"), "drop$i.litertlm", "{}", "") {})
+            assertNotNull("A dropped download must reject", error)
+        }
+    }
+
+    @Test
+    fun anHttpErrorLeavesNoSocketOpen() {
+        assertFailuresLeaveNothingOpen { i ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("Not here"))
+            val (_, error) = await(store.downloadFile(url("/none$i.litertlm"), "none$i.litertlm", "{}", "") {})
+            assertTrue("got: $error", error!!.message!!.contains("HTTP 404"))
+        }
+    }
+
+    @Test
+    fun aServerErrorOnTheContinuationLeavesNoSocketOpen() {
+        leavePartial("again503.litertlm", cut = 100 * 1024)
+        assertFailuresLeaveNothingOpen {
+            server.enqueue(MockResponse().setResponseCode(503).setBody("Busy"))
+            val (_, error) = await(store.downloadFile(url("/again503.litertlm"), "again503.litertlm", "{}", "") {})
+            assertTrue("got: $error", error!!.message!!.contains("HTTP 503"))
+            assertEquals(100L * 1024, File(modelsDir, "again503.litertlm.tmp").length())
+        }
     }
 }
