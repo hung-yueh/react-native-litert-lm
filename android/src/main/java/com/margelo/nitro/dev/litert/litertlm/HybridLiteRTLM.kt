@@ -17,6 +17,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
 import androidx.annotation.Keep
+import androidx.annotation.VisibleForTesting
 import com.facebook.proguard.annotations.DoNotStrip
 import dev.litert.litertlm.LiteRTLMInitProvider
 import com.google.ai.edge.litertlm.Engine
@@ -165,8 +166,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private val stateLock = ReentrantLock()
     private val generationEnded = stateLock.newCondition()
     private var engine: Engine? = null
+    /** Written under stateLock; volatile so getContextTokenCount() can read it without the lock. */
+    @Volatile
     private var conversation: Conversation? = null
     private var generationsRunning = 0
+    /** The conversation the latest message started in; a reset's count read records nothing once one has. */
+    private var messageStartedIn: Conversation? = null
     /**
      * Out of service but maybe still generating (a cancelled message returning).
      * Closed once no generation runs: the SDK's close() frees native state at
@@ -205,10 +210,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
     /**
      * What getContextTokenCount() reports: a token count read from the engine
-     * after a load and after each completed message, with the conversation it
-     * was read from. It counts only while that conversation is the live one, so
-     * a reset, unload or new load reads as -1 (unknown). Written without
-     * stateLock: a streamed message's last callback runs on the SDK's thread.
+     * after a load, after a reset and after each completed message, with the
+     * conversation it was read from. It counts only while that conversation is
+     * the live one, so a reset reads as -1 (unknown) until the new
+     * conversation's count lands, and an unload or new load as -1. Written
+     * without stateLock: a streamed message's last callback runs on the SDK's thread.
      */
     private val contextTokens = AtomicReference<Pair<Conversation, Double>?>(null)
 
@@ -602,7 +608,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Boolean?) {
-        stateLock.withLock {
+        val transcript = parseTranscript(historyJson)
+        val fresh = stateLock.withLock {
             // A message still generating is cancelled and given up to 2 s to
             // return, so its last history write lands before the reset below.
             // (A load finishing during that wait installs its own conversation;
@@ -610,23 +617,26 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             do {
                 retireConversationLocked(timeoutMs = 2_000)
             } while (conversation != null)
-            // The count stays unknown until the new conversation's first message:
-            // reading it here could wait on the JS thread for a cancelled message's prefill.
             synchronized(history) {
                 history.clear()
                 // Mirror the replayed transcript into the wrapper's own history so
                 // getHistory() stays truthful for the restored conversation.
-                history.addAll(parseTranscript(historyJson))
+                history.addAll(transcript)
             }
             // Not ready: nothing loaded, a load still running, or unload()/close() called.
             val eng = engine?.takeIf { ready } ?: throw notLoaded()
-            conversation = newConversation(
+            newConversation(
                 eng,
                 initialMessagesJson = historyJson,
                 systemPromptOverride = systemPrompt,
                 speculativeDecoding = speculativeDecoding,
-            )
+            ).also { conversation = it }
         }
+        // The engine prefills a replayed transcript with the next message, so it
+        // would count 0 until then: the count stays unknown (-1) until that
+        // message completes. Without one, read it off the JS thread, as the
+        // engine answers only while no message is prefilling or decoding.
+        if (transcript.isEmpty()) readContextTokensInBackground(fresh)
     }
 
     override fun isReady(): Boolean = ready
@@ -641,7 +651,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     /** Tokens in the conversation's KV cache as of its last completed message (-1 when unknown). */
     override fun getContextTokenCount(): Double {
         val (counted, tokens) = contextTokens.get() ?: return -1.0
-        return if (counted === stateLock.withLock { conversation }) tokens else -1.0
+        return if (counted === conversation) tokens else -1.0
     }
 
     /** Reports not-ready and cancels a message still generating at once; resolves once the engine is freed. */
@@ -798,12 +808,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // -------------------------------------------------------------------------
 
     /**
-     * Claim [target] for one message. False if it left service since the
-     * message was sent — a reset, unload() or close() came first.
+     * Claim [target] for one message or token-count read. False if it left
+     * service since the message was sent — a reset, unload() or close() came first.
      */
-    private fun beginGeneration(target: Conversation): Boolean = stateLock.withLock {
+    private fun beginGeneration(target: Conversation, message: Boolean = true): Boolean = stateLock.withLock {
         if (conversation !== target) return@withLock false
         generationsRunning++
+        if (message) messageStartedIn = target
         true
     }
 
@@ -870,6 +881,36 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
      */
     private fun recordContextTokens(conversation: Conversation) {
         contextTokens.set(conversation to tokenCount(conversation))
+    }
+
+    /** How [readContextTokensInBackground] reads a count; on-device tests wrap it to hold a read. */
+    @VisibleForTesting
+    internal var readContextTokens: (Conversation) -> Double = { tokenCount(it) }
+
+    /**
+     * Read the count of the conversation a reset just installed, on a thread of
+     * its own, claimed like a message so a close can't free the conversation
+     * mid-read. Recorded only while that conversation is still the live one, no
+     * message has started in it (that message records its own count when it
+     * completes, so the count doesn't move while one generates), and no count
+     * has landed since the read began.
+     */
+    private fun readContextTokensInBackground(target: Conversation) {
+        thread(name = "LiteRTLM-context-tokens") {
+            if (!beginGeneration(target, message = false)) return@thread
+            try {
+                if (stateLock.withLock { messageStartedIn === target }) return@thread
+                val before = contextTokens.get()
+                val tokens = readContextTokens(target)
+                stateLock.withLock {
+                    if (conversation === target && messageStartedIn !== target) {
+                        contextTokens.compareAndSet(before, target to tokens)
+                    }
+                }
+            } finally {
+                endGeneration()
+            }
+        }
     }
 
     private fun notLoaded() = LiteRTLMNativeException(

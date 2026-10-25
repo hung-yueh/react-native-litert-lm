@@ -29,7 +29,9 @@ import org.junit.runners.MethodSorters
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
  * On-device integration tests that run REAL inference through the Kotlin
@@ -236,6 +238,17 @@ class HybridLiteRTLMInstrumentedTest {
         prompt: String,
         options: ExecuteOptions? = null,
     ): Pair<String, List<String>> = generateParts(llm, arrayOf(textPart(prompt)), options)
+
+    /** The context token count once it is known (a reset reads it in the background), or -1 after 10 s. */
+    private fun knownContextTokens(llm: HybridLiteRTLM): Double {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        var tokens = llm.getContextTokenCount()
+        while (tokens < 0 && System.nanoTime() < deadline) {
+            Thread.sleep(50)
+            tokens = llm.getContextTokenCount()
+        }
+        return tokens
+    }
 
     /** [generate] for any parts (e.g. tool results). */
     private fun generateParts(
@@ -634,18 +647,22 @@ class HybridLiteRTLMInstrumentedTest {
         assertEquals("the cancelled message must stay out of the transcript",
             listOf(Role.USER, Role.MODEL), llm.getHistory().map { it.role })
 
-        // Reset mid-stream: the context token count is unknown at once and
-        // stays so after the cancelled stream returns, until the new
-        // conversation's first message.
+        // Reset mid-stream: the old conversation's count is gone at once, and
+        // the new conversation's is read in the background, without waiting
+        // for its first message.
+        val beforeReset = llm.getContextTokenCount()
         val streaming = CountDownLatch(1)
         sent = send(llm) { token, done -> if (!done && token.isNotEmpty()) streaming.countDown() }
         assertTrue("no streamed token", streaming.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
         ms("resetConversation mid-stream") { llm.resetConversation(null, null, null) }
-        assertEquals(-1.0, llm.getContextTokenCount(), 0.0)
+        val atOnce = llm.getContextTokenCount()
         assertCancelled("reset mid-stream", sent)
-        assertEquals(-1.0, llm.getContextTokenCount(), 0.0)
+        val read = knownContextTokens(llm)
+        println("[android-int][nonblocking] context tokens before the reset $beforeReset, at once $atOnce, read $read")
+        assertTrue("no context token count after the reset: $read", read >= 0)
+        assertTrue("the old conversation's count after a reset: $atOnce", atOnce == -1.0 || atOnce == read)
         generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
-        assertTrue("no context token count after the next message", llm.getContextTokenCount() > 0)
+        assertTrue("no context token count after the next message", llm.getContextTokenCount() > read)
 
         // close() during a blocking send: not ready at once, the message
         // cancelled, and the engine freed once it has returned.
@@ -674,6 +691,210 @@ class HybridLiteRTLMInstrumentedTest {
         assertCancelled("close mid-stream", sent)
         // A cancel is a deliberate stop: the stream ends without error text.
         assertEquals("a cancelled stream must end with an empty done token", "", lastToken.get())
+        Teardowns.await(Teardowns.mark())
+    }
+
+    /**
+     * A reset reads the new conversation's count on a background thread,
+     * claimed like a message. Holding that read (through readContextTokens)
+     * puts a message, a second reset, close() or unload() inside it.
+     */
+    @Test
+    fun testJb_resetReadsTheCountInTheBackground() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        Teardowns.await(Teardowns.mark())
+        val short = options(maxOutputTokens = 16.0)
+
+        fun ms(label: String, call: () -> Unit): Double {
+            val start = System.nanoTime()
+            call()
+            val elapsed = (System.nanoTime() - start) / 1e6
+            println("[android-int][reset-count] $label took ${"%.2f".format(elapsed)} ms")
+            return elapsed
+        }
+
+        /** Holds the [n]-th background read (counting from 1) before or after it reads the engine. */
+        class HeldRead(llm: HybridLiteRTLM, private val n: Int, private val afterEngine: Boolean) {
+            val reached = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            @Volatile var engineMs = -1.0
+            private val calls = AtomicInteger()
+            init {
+                val read = llm.readContextTokens
+                llm.readContextTokens = { conversation ->
+                    val held = calls.incrementAndGet() == n
+                    if (held && !afterEngine) { reached.countDown(); release.await(60, TimeUnit.SECONDS) }
+                    val start = System.nanoTime()
+                    read(conversation).also {
+                        if (held) engineMs = (System.nanoTime() - start) / 1e6
+                        if (held && afterEngine) { reached.countDown(); release.await(60, TimeUnit.SECONDS) }
+                    }
+                }
+            }
+        }
+
+        val llm = HybridLiteRTLM()
+        llm.loadModelBlocking(model!!.absolutePath, llmConfig())
+        val read = llm.readContextTokens
+        try {
+            // Without a transcript the count is read at once, system prompt or not.
+            llm.resetConversation(null, null, null)
+            val empty = knownContextTokens(llm)
+            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null)
+            val prompted = knownContextTokens(llm)
+            println("[android-int][reset-count] after a reset $empty, with a system prompt $prompted")
+            assertTrue("no count after a reset: $empty", empty >= 0)
+            assertTrue("no count after a reset with a system prompt: $prompted", prompted >= 0)
+
+            // A message sent right after a reset ends with its own count, 20 times.
+            fun hello(): Pair<String, Double> {
+                val (reply, _) = generate(llm, "Say hello.", short)
+                Thread.sleep(1_000)
+                return reply to llm.getContextTokenCount()
+            }
+            llm.resetConversation(null, null, null)
+            knownContextTokens(llm)
+            val (firstReply, firstCount) = hello()
+            println("[android-int][reset-count] reference: $firstCount, '$firstReply'")
+            var compared = 0
+            repeat(20) { i ->
+                val started = System.nanoTime()
+                llm.resetConversation(null, null, null)
+                val (reply, count) = hello()
+                Thread.sleep(1_000)
+                val later = llm.getContextTokenCount()
+                val sec = (System.nanoTime() - started) / 1e9
+                println("[android-int][reset-count] message right after a reset #${i + 1}: $count, 1 s later $later, ${"%.1f".format(sec)} s" +
+                    if (reply == firstReply) "" else ", reply differs: '$reply'")
+                assertTrue("#${i + 1} took $sec s", sec < 60)
+                assertTrue("#${i + 1}: no count after the message: $count", count > 0)
+                assertEquals("#${i + 1}: the count moved after the message", count, later, 0.0)
+                if (reply == firstReply) {
+                    assertEquals("#${i + 1}: not the message's own count", firstCount, count, 0.0)
+                    compared++
+                }
+            }
+            println("[android-int][reset-count] $compared of 20 had the reference reply")
+
+            // The read has its number, then a message finishes: the message's count stays.
+            run {
+                val hold = HeldRead(llm, 1, afterEngine = true)
+                llm.resetConversation(null, null, null)
+                assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
+                generate(llm, "Say hello.", short)
+                val message = llm.getContextTokenCount()
+                hold.release.countDown()
+                Thread.sleep(1_000)
+                val after = llm.getContextTokenCount()
+                println("[android-int][reset-count] read held after the engine: message $message, after the read $after")
+                assertTrue("no count after the message: $message", message > 0)
+                assertEquals("a stale read replaced the message's count", message, after, 0.0)
+                llm.readContextTokens = read
+            }
+
+            // A message starts while the read is held, before or after it reads the
+            // engine, and the read is let go mid-decode: it records nothing, so the
+            // count stays -1 while the message generates and is then the message's own.
+            for (afterEngine in listOf(false, true)) {
+                val hold = HeldRead(llm, 1, afterEngine)
+                llm.resetConversation(null, null, null)
+                assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
+                val firstToken = CountDownLatch(1)
+                val done = CountDownLatch(1)
+                llm.execute(arrayOf(textPart("Write two sentences about the ocean.")), { token, isDone ->
+                    if (!isDone && token.isNotEmpty()) firstToken.countDown()
+                    if (isDone) done.countDown()
+                }, options(maxOutputTokens = 96.0))
+                assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+                hold.release.countDown()
+                Thread.sleep(300)
+                val generating = llm.getContextTokenCount()
+                val stillGenerating = done.count == 1L
+                assertTrue("the message never finished", done.await(60, TimeUnit.SECONDS))
+                val message = llm.getContextTokenCount()
+                Thread.sleep(1_000)
+                val after = llm.getContextTokenCount()
+                println("[android-int][reset-count] read held ${if (afterEngine) "after" else "before"} the engine, let go mid-decode: " +
+                    "the engine answered it in ${"%.1f".format(hold.engineMs)} ms; count while generating $generating, " +
+                    "after the message $message, 1 s later $after")
+                assertTrue("the message finished before the check", stillGenerating)
+                assertEquals("the count moved while the message generated", -1.0, generating, 0.0)
+                assertTrue("no count after the message: $message", message > 0)
+                assertEquals("the read changed the message's count", message, after, 0.0)
+                llm.readContextTokens = read
+            }
+
+            // A second reset while the first read holds its claim: the second count lands.
+            run {
+                val hold = HeldRead(llm, 1, afterEngine = true)
+                llm.resetConversation(null, null, null)
+                assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
+                ms("resetConversation while the first read is held") { llm.resetConversation(null, null, null) }
+                val second = knownContextTokens(llm)
+                hold.release.countDown()
+                Thread.sleep(1_000)
+                val after = llm.getContextTokenCount()
+                println("[android-int][reset-count] second reset: $second, after the first read returned $after")
+                assertTrue("the second reset's count never landed: $second", second >= 0)
+                assertEquals("the first read changed the second reset's count", second, after, 0.0)
+                llm.readContextTokens = read
+            }
+
+            // Both reads held; the first one is let go between the second's start and its write.
+            run {
+                val first = HeldRead(llm, 1, afterEngine = true)
+                val second = HeldRead(llm, 2, afterEngine = true)
+                llm.resetConversation(null, null, null)
+                assertTrue("the first read never ran", first.reached.await(10, TimeUnit.SECONDS))
+                llm.resetConversation(null, null, null)
+                assertTrue("the second read never ran", second.reached.await(10, TimeUnit.SECONDS))
+                first.release.countDown()
+                Thread.sleep(500)
+                second.release.countDown()
+                val landed = knownContextTokens(llm)
+                println("[android-int][reset-count] first read let go before the second wrote: $landed")
+                assertTrue("the first read kept the second reset's count out: $landed", landed >= 0)
+                llm.readContextTokens = read
+            }
+        } finally {
+            llm.close()
+        }
+        Teardowns.await(Teardowns.mark())
+
+        // close() during the read: not ready at once, and the engine is freed
+        // only after the read has returned.
+        val closing = HybridLiteRTLM()
+        closing.loadModelBlocking(model.absolutePath, llmConfig())
+        val heldForClose = HeldRead(closing, 1, afterEngine = false)
+        closing.resetConversation(null, null, null)
+        assertTrue("the read never ran", heldForClose.reached.await(10, TimeUnit.SECONDS))
+        assertTrue(ms("close during the read") { closing.close() } < 50.0)
+        assertFalse(closing.isReady())
+        val ticket = Teardowns.mark()
+        val freed = CountDownLatch(1)
+        thread { Teardowns.await(ticket); freed.countDown() }
+        assertFalse("close() freed the engine under the read", freed.await(2, TimeUnit.SECONDS))
+        heldForClose.release.countDown()
+        assertTrue("the engine was never freed", freed.await(30, TimeUnit.SECONDS))
+        assertEquals(-1.0, closing.getContextTokenCount(), 0.0)
+
+        // unload() during the read: it settles only after the read has returned.
+        val unloading = HybridLiteRTLM()
+        unloading.loadModelBlocking(model.absolutePath, llmConfig())
+        val heldForUnload = HeldRead(unloading, 1, afterEngine = false)
+        unloading.resetConversation(null, null, null)
+        assertTrue("the read never ran", heldForUnload.reached.await(10, TimeUnit.SECONDS))
+        val settled = CountDownLatch(1)
+        unloading.unload().then { settled.countDown() }.catch { settled.countDown() }
+        assertFalse(unloading.isReady())
+        assertFalse("unload() freed the engine under the read", settled.await(2, TimeUnit.SECONDS))
+        heldForUnload.release.countDown()
+        assertTrue("unload() never settled", settled.await(30, TimeUnit.SECONDS))
+        assertEquals(-1.0, unloading.getContextTokenCount(), 0.0)
+        unloading.close()
         Teardowns.await(Teardowns.mark())
     }
 

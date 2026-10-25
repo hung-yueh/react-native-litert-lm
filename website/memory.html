@@ -302,7 +302,9 @@ try {
       Token counts are read from the engine on both platforms.
       <code>getMemoryForecast()</code> returns <code>null</code> while the count
       is unknown: just after <code>resetConversation()</code> (on
-      <span class="pill android">Android</span>, until the next message completes).
+      <span class="pill android">Android</span>, until the next message completes
+      when the reset replays a transcript, as a <code>createConversation()</code>
+      switch back to a conversation with history does).
     </p>
   </div>
   <div class="code">
