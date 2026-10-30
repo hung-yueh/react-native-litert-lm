@@ -136,10 +136,54 @@ class HybridModelStore : HybridModelStoreSpec() {
                 lock.lock()
             }
             try {
+                // Week-old partial downloads go while this call holds its lock, so another
+                // call's clean-up never deletes the partial file this call continues.
+                expireStalePartials(fileName)
                 download(url, fileName, headersJson, sha256, onProgress)
             } finally {
                 lock.unlock()
             }
+        }
+    }
+
+    /**
+     * Deletes the partial downloads (`<file>.tmp` and `<file>.tmp.json`) that
+     * nothing has written to for [PARTIAL_MAX_AGE_MS], except [fileName]'s own
+     * (its download continues it, or starts over when the server's version
+     * changed) and those of downloads running or waiting (their lock is held).
+     * A pair is as old as the newer of its files: `.tmp` changes with every
+     * write, `.tmp.json` only when its download starts. A failure here is
+     * logged and does not stop the download.
+     */
+    private fun expireStalePartials(fileName: String) {
+        try {
+            val dir = modelsDirectory
+            val names = (dir.list() ?: return).mapNotNull {
+                when {
+                    it.endsWith(RESUME_SUFFIX) -> it.removeSuffix(RESUME_SUFFIX)
+                    it.endsWith(".tmp") -> it.removeSuffix(".tmp")
+                    else -> null
+                }
+            }.toSet() - fileName
+            val now = System.currentTimeMillis()
+            for (name in names) {
+                val lock = downloadLock(name)
+                if (!lock.tryLock()) continue
+                try {
+                    // Read under the lock: a download may have written it since the listing
+                    val files = listOf(File(dir, "$name.tmp"), File(dir, "$name$RESUME_SUFFIX")).filter { it.isFile }
+                    val age = now - (files.maxOfOrNull { it.lastModified() } ?: continue)
+                    if (age < PARTIAL_MAX_AGE_MS) continue
+                    for (file in files) {
+                        if (!file.delete()) Log.w(tag, "Could not delete ${file.absolutePath}")
+                    }
+                    Log.i(tag, "Deleted the partial download of $name: last written ${age / DAY_MS} days ago")
+                } finally {
+                    lock.unlock()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Could not delete old partial downloads", e)
         }
     }
 
@@ -190,8 +234,12 @@ class HybridModelStore : HybridModelStoreSpec() {
         var offset = if (partial != null) tempFile.length() else 0L
         var keepPartial = partial != null
 
+        // However the download ends, its streams are closed and the connection
+        // it has open is disconnected (one is disconnected before a second
+        // opens): a failed download must not hold a socket or a file until a GC.
+        var connection: HttpURLConnection? = null
         return try {
-            var connection = open(url, headersMap, offset, partial?.validator)
+            connection = open(url, headersMap, offset, partial?.validator)
             if (partial != null) {
                 val code = connection.responseCode
                 if (!continues(connection, offset, partial)) {
@@ -244,34 +292,32 @@ class HybridModelStore : HybridModelStoreSpec() {
                 onProgress(offset.toDouble() / totalBytes.toDouble())
             }
 
-            val input = connection.inputStream
-            val output = FileOutputStream(tempFile, offset > 0)
-
-            val buffer = ByteArray(8 * 1024)
-            var bytesRead: Int
             var totalBytesRead = 0L
-            var lastProgressUpdate = 0L
+            connection.inputStream.use { input ->
+                FileOutputStream(tempFile, offset > 0).use { output ->
+                    val buffer = ByteArray(8 * 1024)
+                    var bytesRead: Int
+                    var lastProgressUpdate = 0L
 
-            while (input.read(buffer).also { bytesRead = it } != -1) {
-                output.write(buffer, 0, bytesRead)
-                digest?.update(buffer, 0, bytesRead)
-                totalBytesRead += bytesRead
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        output.write(buffer, 0, bytesRead)
+                        digest?.update(buffer, 0, bytesRead)
+                        totalBytesRead += bytesRead
 
-                if (totalBytes > 0) {
-                    val currentTime = System.currentTimeMillis()
-                    // Update progress roughly every 100ms to prevent bridge flooding
-                    if (currentTime - lastProgressUpdate > 100) {
-                        val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
-                        onProgress(progress)
-                        lastProgressUpdate = currentTime
+                        if (totalBytes > 0) {
+                            val currentTime = System.currentTimeMillis()
+                            // Update progress roughly every 100ms to prevent bridge flooding
+                            if (currentTime - lastProgressUpdate > 100) {
+                                val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
+                                onProgress(progress)
+                                lastProgressUpdate = currentTime
+                            }
+                        }
                     }
+
+                    output.flush()
                 }
             }
-
-            output.flush()
-            output.close()
-            input.close()
-            connection.disconnect()
 
             // A dropped connection can end the read loop early without an
             // exception — never install a truncated model file. A continued
@@ -316,6 +362,8 @@ class HybridModelStore : HybridModelStoreSpec() {
                 discardPartial(tempFile, resumeFile)
             }
             throw RuntimeException("Download failed: ${e.message}", e)
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -401,6 +449,10 @@ class HybridModelStore : HybridModelStoreSpec() {
         /** Next to `<file>.tmp`: the URL, validator and size a partial download continues from. */
         const val RESUME_SUFFIX = ".tmp.json"
         val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""")
+
+        const val DAY_MS = 24L * 60 * 60 * 1000
+        /** A partial download nothing has written to for this long goes when another download starts. */
+        const val PARTIAL_MAX_AGE_MS = 7 * DAY_MS
 
         /**
          * One lock per file name for the whole process (HybridLiteRTLM's

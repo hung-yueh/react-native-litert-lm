@@ -19,6 +19,9 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
     /// start after it: one download of a file at a time, so no two write
     /// `<file>.tmp` at once.
     private static var running: [String: [() -> Void]] = [:]
+    /// A partial download nothing has written to for this long goes when
+    /// another download starts.
+    private static let partialMaxAge: TimeInterval = 7 * 24 * 60 * 60
 
     private var modelsDirectory: String {
         let cachesDir = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
@@ -119,6 +122,9 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         let promise = Promise<String>()
 
         Self.queue.async {
+            // A partial download that is never retried would stay on disk for
+            // good: the ones nobody has written to for a week go now.
+            self.expireStalePartials(except: fileName)
             // One download of a file at a time in this process: a call that
             // finds one running starts when it ends, then finds the file in the
             // cache or continues the partial file it left.
@@ -157,6 +163,50 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         } else {
             NSLog("[LiteRTLM] Waiting for the download of %@ already running", fileName)
             Self.running[fileName]?.append { start(done) }
+        }
+    }
+
+    /// On `queue`: deletes the partial downloads (`<file>.tmp` and
+    /// `<file>.tmp.json`) that nothing has written to for `partialMaxAge`,
+    /// except `fileName`'s own (its download continues it, or starts over when
+    /// the server's version changed) and those of downloads running or waiting
+    /// (`running` has them). A pair is as old as the newer of its files: `.tmp`
+    /// changes with every write, `.tmp.json` only when its download starts. A
+    /// failure here is logged and does not stop the download.
+    private func expireStalePartials(except fileName: String) {
+        let fileManager = FileManager.default
+        let dir = modelsDirectory
+        guard let names = try? fileManager.contentsOfDirectory(atPath: dir) else { return }
+        var lastWritten: [String: Date] = [:]
+        var paths: [String: [String]] = [:]
+        for name in names {
+            let base: String
+            if name.hasSuffix(ResumableDownload.recordSuffix) {
+                base = String(name.dropLast(ResumableDownload.recordSuffix.count))
+            } else if name.hasSuffix(".tmp") {
+                base = String(name.dropLast(".tmp".count))
+            } else {
+                continue
+            }
+            let path = (dir as NSString).appendingPathComponent(name)
+            guard base != fileName, Self.running[base] == nil,
+                  let attrs = try? fileManager.attributesOfItem(atPath: path),
+                  attrs[.type] as? FileAttributeType == .typeRegular,
+                  let modified = attrs[.modificationDate] as? Date else { continue }
+            paths[base, default: []].append(path)
+            lastWritten[base] = max(lastWritten[base] ?? .distantPast, modified)
+        }
+        for (base, written) in lastWritten {
+            let age = Date().timeIntervalSince(written)
+            guard age >= Self.partialMaxAge else { continue }
+            for path in paths[base] ?? [] {
+                do {
+                    try fileManager.removeItem(atPath: path)
+                } catch {
+                    NSLog("[LiteRTLM] Could not delete %@: %@", path, error.localizedDescription)
+                }
+            }
+            NSLog("[LiteRTLM] Deleted the partial download of %@: last written %ld days ago", base, Int(age / 86_400))
         }
     }
 
@@ -369,7 +419,9 @@ final class ResumableDownload: NSObject, URLSessionDataDelegate {
                 return
             }
         }
-        if offset == 0 && code >= 400 {
+        // A new download takes a 200 only: a 206 to a request without a Range
+        // (or any other answer) is not the whole file.
+        if offset == 0 && code != 200 {
             failure = Self.error(code, "HTTP \(code)")
             completionHandler(.cancel)
             return

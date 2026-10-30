@@ -9,7 +9,8 @@ import NitroModules
 /// continued with a Range request; the answers that start it over or keep it
 /// (a server that ignores the range, a 416, a 206 of another version, a 503);
 /// a continuation short of the whole file; two downloads of one file at once;
-/// and the sha256 check.
+/// the sha256 check; old partial downloads deleted when another download
+/// starts; and a new download that takes a 200 only.
 final class HybridModelStoreDownloadTests: XCTestCase {
     private var store: HybridModelStore!
     private var names: [String] = []
@@ -399,6 +400,130 @@ final class HybridModelStoreDownloadTests: XCTestCase {
 
         XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
     }
+
+    // MARK: - Partial downloads nothing has written to for a week
+
+    private func age(_ name: String, _ suffix: String, daysAgo: Double) throws {
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -daysAgo * 86_400)],
+                                              ofItemAtPath: path(name, suffix))
+    }
+
+    /// A file in the models dir, last written `daysAgo` days ago.
+    private func place(_ name: String, _ suffix: String, daysAgo: Double) throws {
+        try FileManager.default.createDirectory(atPath: (path(name) as NSString).deletingLastPathComponent,
+                                                withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: path(name, suffix), contents: Data(repeating: 7, count: 64)))
+        try age(name, suffix, daysAgo: daysAgo)
+    }
+
+    func testPartialDownloadsNotWrittenForAWeekGoWhenAnotherDownloadStarts() throws {
+        let old = fileName("old"), lone = fileName("lone"), record = fileName("record")
+        let recent = fileName("recent"), model = fileName("model"), other = fileName("other")
+        try place(old, ".tmp", daysAgo: 8)
+        try place(old, ".tmp.json", daysAgo: 8)
+        try place(lone, ".tmp", daysAgo: 8)
+        try place(record, ".tmp.json", daysAgo: 8)
+        // A pair is as old as its newer file: the record is written once, the
+        // .tmp with every chunk
+        try place(recent, ".tmp", daysAgo: 6)
+        try place(recent, ".tmp.json", daysAgo: 8)
+        // A model is never a partial download, however old
+        try place(model, "", daysAgo: 30)
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(other))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertNil(size(old, ".tmp"))
+        XCTAssertNil(size(old, ".tmp.json"))
+        XCTAssertNil(size(lone, ".tmp"))
+        XCTAssertNil(size(record, ".tmp.json"))
+        XCTAssertEqual(size(recent, ".tmp"), 64)
+        XCTAssertEqual(size(recent, ".tmp.json"), 64)
+        XCTAssertEqual(size(model), 64)
+    }
+
+    func testAWeekOldPartialDownloadOfTheFileItselfIsContinued() throws {
+        let name = fileName("aged")
+        try leavePartial(name, cut: 100 * 1024)
+        try age(name, ".tmp", daysAgo: 8)
+        try age(name, ".tmp.json", daysAgo: 8)
+        StubServer.enqueue(rest(from: 100 * 1024))
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(StubServer.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=\(100 * 1024)-")
+    }
+
+    func testAWeekOldPartialDownloadThatIsDownloadingStays() throws {
+        let held = fileName("held")
+        let other = fileName("other")
+        try leavePartial(held, cut: 100 * 1024)
+        try age(held, ".tmp", daysAgo: 8)
+        try age(held, ".tmp.json", daysAgo: 8)
+        // Its download continues it, but the server holds the answer back: the
+        // download is running while its partial file is a week old
+        let answer = DispatchSemaphore(value: 0)
+        var slowRest = rest(from: 100 * 1024)
+        slowRest.answerAfter = answer
+        StubServer.enqueue(slowRest)
+        let running = try download(held)
+        waitUntil("the continuation reaches the server") { StubServer.requests.count == 1 }
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(other))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(size(held, ".tmp"), 100 * 1024)
+        XCTAssertNotNil(size(held, ".tmp.json"))
+        answer.signal()
+        // The partial file was still there to continue: the whole file, not just its rest
+        XCTAssertEqual(FileManager.default.contents(atPath: try resolved(running)), payload)
+    }
+
+    // MARK: - A new download takes a 200 only
+
+    /// The download rejects with `HTTP 206` and leaves nothing in the models dir.
+    private func assertRejectedWith206(_ name: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        guard case .failure(let error) = settle(try download(name)) else {
+            return XCTFail("A 206 to a request without a Range must reject", file: file, line: line)
+        }
+        XCTAssertTrue(error.localizedDescription.contains("HTTP 206"), "\(error as NSError)", file: file, line: line)
+        XCTAssertNil(StubServer.requests.last?.value(forHTTPHeaderField: "Range"), file: file, line: line)
+        XCTAssertNil(size(name), file: file, line: line)
+        XCTAssertNil(size(name, ".tmp"), file: file, line: line)
+        XCTAssertNil(size(name, ".tmp.json"), file: file, line: line)
+    }
+
+    func testA206ToARequestWithoutARangeIsRejected() throws {
+        let name = fileName("unasked")
+        StubServer.enqueue(rest(from: 0))
+
+        try assertRejectedWith206(name)
+        XCTAssertEqual(StubServer.requests.count, 1)
+    }
+
+    func testA206WithoutAContentRangeIsRejected() throws {
+        // What https://httpbin.org/status/206 answers: no Content-Range, no body
+        let name = fileName("bare206")
+        StubServer.enqueue(StubAnswer(status: 206, headers: ["Content-Length": "0"]))
+
+        try assertRejectedWith206(name)
+        XCTAssertEqual(StubServer.requests.count, 1)
+    }
+
+    func testAStartOverThatGetsA206IsRejected() throws {
+        let name = fileName("over206")
+        try leavePartial(name, cut: 100 * 1024)
+        StubServer.enqueue(StubAnswer(status: 416, headers: ["Content-Range": "bytes */\(payload.count)"]))
+        StubServer.enqueue(rest(from: 0))
+
+        try assertRejectedWith206(name)
+        let requests = StubServer.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNotNil(requests.first?.value(forHTTPHeaderField: "Range"))
+    }
 }
 
 /// Where a callback on another thread leaves a promise's result.
@@ -434,6 +559,8 @@ private struct StubAnswer {
     var resume: DispatchSemaphore?
     /// After this many bytes of `body` the connection drops with a network error.
     var dropAfter: Int?
+    /// The server waits for this before it answers at all (a server slow to answer).
+    var answerAfter: DispatchSemaphore?
 }
 
 /// The stub server: answers each request with the next queued answer (599
@@ -505,6 +632,7 @@ private final class StubServer: URLProtocol {
     }
 
     private func send(_ answer: StubAnswer) {
+        answer.answerAfter?.wait()
         let response = HTTPURLResponse(url: request.url!, statusCode: answer.status, httpVersion: "HTTP/1.1",
                                        headerFields: answer.headers)!
         onClientThread { self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed) }
