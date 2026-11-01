@@ -302,7 +302,12 @@ try {
       Token counts are read from the engine on both platforms.
       <code>getMemoryForecast()</code> returns <code>null</code> while the count
       is unknown: just after <code>resetConversation()</code> (on
-      <span class="pill android">Android</span>, until the next message completes).
+      <span class="pill android">Android</span>, until the next message completes
+      when the reset replays a transcript, as a <code>createConversation()</code>
+      switch back to a conversation with history does, or gives up waiting for a
+      message it cancelled). The engine prefills the system prompt and tool
+      schemas with the first message, so the count includes them from then on:
+      right after <code>loadModel()</code> or a reset, the forecast leaves them out.
     </p>
   </div>
   <div class="code">

@@ -569,7 +569,11 @@ export function createStreamEventParser(
     history + generated tokens), read from the engine. Returns
     <code>-1</code> while unknown: no model loaded, or just after a reset (on
     <span class="pill android">Android</span>, until the next message
-    completes). Combine with <code>maxContextTokens</code> to
+    completes when the reset replays a transcript or gives up waiting for a
+    message it cancelled). The engine prefills the system prompt and tool
+    schemas with the first message, so the count includes them from then on:
+    right after <code>loadModel()</code> or a reset, it leaves them out.
+    Combine with <code>maxContextTokens</code> to
     warn before the context window (and its memory) runs out — see
     <code>getMemoryForecast()</code> on the
     <a href="memory.html">Memory &amp; errors</a> page.
