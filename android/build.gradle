@@ -74,6 +74,7 @@ android {
             // libraries — take the first instead of failing the merge.
             pickFirsts.add("**/libc++_shared.so")
             pickFirsts.add("**/libfbjni.so")
+            pickFirsts.add("**/liblitert_jni.so")
         }
     }
     
@@ -115,6 +116,9 @@ dependencies {
     
     // LiteRT-LM Kotlin API
     implementation "com.google.ai.edge.litertlm:litertlm-android:${litertLmVersion}"
+    
+    // LiteRT (TensorFlow Lite successor) Kotlin API for classification/metric models
+    implementation "com.google.ai.edge.litert:litert:2.1.6"
     
     // Testing Dependencies
     testImplementation 'junit:junit:4.13.2'

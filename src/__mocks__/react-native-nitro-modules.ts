@@ -123,6 +123,38 @@ export const mockModelStore = {
   ),
 };
 
+export const mockMetricModel = {
+  isReady: jest.fn(() => false),
+  loadModel: jest.fn().mockResolvedValue(undefined),
+  evaluate: jest.fn(async () => {
+    const rawValues = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const values = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+    const scores: Record<string, number> = {
+      Warmth: 0.5,
+      Sentiment: 0.5,
+      Directness: 0.5,
+      "Passive-Aggressive": 0.5,
+      Chemistry: 0.5,
+      "Professional Impression": 0.5,
+      Urgency: 0.5,
+      Formality: 0.5,
+      Tension: 0.5,
+      Empathy: 0.5,
+      Clarity: 0.5,
+      Assertiveness: 0.5,
+      Playfulness: 0.5,
+    };
+    return {
+      scores,
+      values,
+      rawValues,
+      latencyMs: 1.5,
+    };
+  }),
+  unload: jest.fn().mockResolvedValue(undefined),
+  close: jest.fn(),
+};
+
 export const NitroModules = {
   createHybridObject: jest.fn((name: string) => {
     if (name === "LiteRTLM") {
@@ -130,6 +162,9 @@ export const NitroModules = {
     }
     if (name === "ModelStore") {
       return mockModelStore;
+    }
+    if (name === "MetricModel") {
+      return mockMetricModel;
     }
     throw new Error(`Mock not implemented for hybrid object: ${name}`);
   }),

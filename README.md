@@ -418,7 +418,7 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 | --- | --- |
 | React Native | 0.76+ |
 | react-native-nitro-modules | 0.37.1+ |
-| LiteRT-LM engine | 0.15.0 |
+| LiteRT-LM engine | 0.16.0 |
 | Android | API 26+, arm64-v8a — CPU (all), GPU (where OpenCL is present), NPU |
 | iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |
 
@@ -432,6 +432,51 @@ Models over ~2 GB need **Extended Virtual Addressing** or iOS caps virtual memor
 <key>com.apple.developer.kernel.extended-virtual-addressing</key>
 <true/>
 ```
+
+## Metric Classification Model
+
+For low-latency, non-generative language classification tasks (such as evaluating emotional tone, relational dynamics, or sentiment across multiple dimensions), `react-native-litert-lm` provides a dedicated `MetricModel` runtime powered by LiteRT.
+
+The metric model is a language encoder with a task-specific head that classifies input text along 13 distinct axes. Quantized int8 outputs (`-128` to `128`) are rescaled into calibrated `0.0` to `1.0` float scores in under 15ms.
+
+```typescript
+import { createMetricModel, METRIC_AXES } from "react-native-litert-lm";
+
+const metricModel = createMetricModel();
+await metricModel.loadModel("/path/to/metrics_model_int8.tflite", { numThreads: 2 });
+
+// Classify raw text (with automatic subword tokenization):
+const result = await metricModel.classify("Thank you so much for your help today!");
+
+console.log(result.scores.Warmth); // e.g. 0.92
+console.log(result.scores.Directness); // e.g. 0.78
+console.log(result.values); // 13 normalized [0.0, 1.0] float values
+console.log(result.latencyMs); // e.g. 8.4ms
+
+// Or pass pre-tokenized IDs directly:
+const customResult = await metricModel.evaluate({
+  tokenIds: [1, 45, 128, 2],
+  attentionMask: [1, 1, 1, 1],
+});
+
+metricModel.unload(); // Free model weights while keeping instance reusable
+metricModel.close();
+```
+
+### Canonical 13 Metric Axes
+1. `Warmth`
+2. `Sentiment`
+3. `Directness`
+4. `Passive-Aggressive`
+5. `Chemistry`
+6. `Professional Impression`
+7. `Urgency`
+8. `Formality`
+9. `Tension`
+10. `Empathy`
+11. `Clarity`
+12. `Assertiveness`
+13. `Playfulness`
 
 ## Architecture
 

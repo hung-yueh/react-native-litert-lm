@@ -104,6 +104,9 @@ export function useModel(
   const multimodal = config?.multimodal;
   const tools = config?.tools;
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
+  const speculativeDecodingMode = config?.speculativeDecodingMode;
+  const maxCachedProducts = config?.maxCachedProducts;
+  const cacheDir = config?.cacheDir;
   const enableStructuredOutput = config?.enableStructuredOutput;
   const streamToolCalls = config?.streamToolCalls;
   const toolCallChannelName = config?.toolCallChannelName;
@@ -134,6 +137,11 @@ export function useModel(
       ...(enableSpeculativeDecoding !== undefined && {
         enableSpeculativeDecoding,
       }),
+      ...(speculativeDecodingMode !== undefined && {
+        speculativeDecodingMode,
+      }),
+      ...(maxCachedProducts !== undefined && { maxCachedProducts }),
+      ...(cacheDir !== undefined && { cacheDir }),
       ...(enableStructuredOutput !== undefined && { enableStructuredOutput }),
       ...(streamToolCalls !== undefined && { streamToolCalls }),
       ...(toolCallChannelName !== undefined && { toolCallChannelName }),
@@ -160,6 +168,9 @@ export function useModel(
       multimodal,
       toolsKey,
       enableSpeculativeDecoding,
+      speculativeDecodingMode,
+      maxCachedProducts,
+      cacheDir,
       enableStructuredOutput,
       streamToolCalls,
       toolCallChannelName,

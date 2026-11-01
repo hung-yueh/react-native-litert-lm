@@ -26,6 +26,9 @@
     "@types/react": "~19.2.10",
     "typescript": "~5.9.2"
   },
+  "resolutions": {
+    "hermes-compiler": "250829098.0.4"
+  },
   "overrides": {
     "hermes-compiler": "250829098.0.4"
   },

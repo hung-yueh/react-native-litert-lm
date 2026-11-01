@@ -5,6 +5,7 @@ node_modules/
 lib/
 build/
 *.tsbuildinfo
+*.tgz
 
 # Test coverage reports
 coverage/
@@ -48,6 +49,7 @@ ios/Frameworks/
 .ios-frameworks-tmp.zip
 # Bazel build cache for LiteRT-LM source compilation
 .litert-lm-build/
+scripts/LiteRT-LM/
 *.pte
 *.bin
 *.gguf

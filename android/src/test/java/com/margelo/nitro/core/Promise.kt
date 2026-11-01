@@ -7,6 +7,11 @@ import com.facebook.proguard.annotations.DoNotStrip
 @DoNotStrip
 class Promise<T> {
     companion object {
+        /** Mirrors Nitro's Promise.async (used by the product/tuning APIs); runs inline for tests. */
+        @JvmStatic
+        fun <T> async(block: suspend () -> T): Promise<T> =
+            parallel { kotlinx.coroutines.runBlocking { block() } }
+
         @JvmStatic
         fun <T> parallel(block: () -> T): Promise<T> {
             val promise = Promise<T>()

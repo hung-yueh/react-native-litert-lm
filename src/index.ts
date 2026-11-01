@@ -23,6 +23,25 @@ export type {
   ToolDefinition,
 } from "./specs/LiteRTLM.nitro";
 
+// 13-Dimension Language Metric Classifier
+export type {
+  MetricModel,
+  MetricEvaluationInput,
+  MetricEvaluationResult,
+  MetricModelConfig,
+  MetricAxis,
+  MetricModelInstance,
+} from "./metricModel";
+export {
+  createMetricModel,
+  METRIC_AXES,
+  METRIC_DIMENSION_COUNT,
+  rescaleInt8ToFloat,
+  hashMetricToken,
+  tokenizeMetricText,
+  defaultMetricTokenizer,
+} from "./metricModel";
+
 
 // Re-export memory tracking utilities (uses NitroModules.createNativeArrayBuffer v0.35+)
 export type {

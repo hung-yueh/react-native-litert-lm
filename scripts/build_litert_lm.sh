@@ -28,12 +28,24 @@ check_prerequisites() {
     # Check Bazel
     if ! command -v bazel &> /dev/null && ! command -v bazelisk &> /dev/null; then
         echo "❌ Bazel not found. Install via:"
-        echo "   brew install bazelisk"
+        echo "   brew install bazelisk          # macOS"
+        echo "   npm install -g @bazel/bazelisk # Linux / Node"
         exit 1
     fi
     echo "✅ Bazel found"
     
     # Check Android NDK
+    if [ -z "$ANDROID_NDK_HOME" ]; then
+        for search_dir in "$ANDROID_HOME/ndk" "$HOME/Android/Sdk/ndk"; do
+            if [ -d "$search_dir" ]; then
+                LATEST_NDK=$(find "$search_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
+                if [ -n "$LATEST_NDK" ] && [ -d "$LATEST_NDK" ]; then
+                    export ANDROID_NDK_HOME="$LATEST_NDK"
+                    break
+                fi
+            fi
+        done
+    fi
     if [ -z "$ANDROID_NDK_HOME" ]; then
         echo "❌ ANDROID_NDK_HOME not set. Install NDK r28b+ and set:"
         echo "   export ANDROID_NDK_HOME=/path/to/ndk"
@@ -143,7 +155,9 @@ main() {
     clone_repo
     build_android_arm64
     # build_android_arm32  # Optional
-    build_macos
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        build_macos
+    fi
     print_summary
 }
 

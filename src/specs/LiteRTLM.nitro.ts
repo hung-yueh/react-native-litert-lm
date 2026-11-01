@@ -13,6 +13,15 @@ import type { HybridObject } from "react-native-nitro-modules";
 export type Backend = "cpu" | "gpu" | "npu";
 
 /**
+ * MTP speculative decoding mode (LiteRT-LM 0.19+).
+ * - 'off': never speculate (also skips loading the ~45 MB drafter).
+ * - 'on': draft every decode step.
+ * - 'adaptive': draft only while it's measured to be faster.
+ * Lossless: output matches non-speculative decoding.
+ */
+export type SpeculativeDecodingMode = "off" | "on" | "adaptive";
+
+/**
  * Message roles for conversation.
  */
 export type Role = "user" | "model" | "system";
@@ -85,6 +94,11 @@ export interface LLMConfig {
    * Total engine KV-cache budget in tokens (prompt + history + output combined).
    * Must be ≥ the total number of input tokens + desired output tokens.
    * For compiled bundles, should not exceed the bundle's compiled cache_length.
+   *
+   * Keep it as small as your largest request allows: the KV cache is
+   * allocated at this size and every decode step attends over all of it.
+   * Measured on Gemma 4 E2B: 32K decodes 4.6x slower than 2K for the same
+   * output. Use `contextTokensFor()` to size it.
    * @default 4096
    */
   maxContextTokens?: number;
@@ -140,9 +154,34 @@ export interface LLMConfig {
 
   /**
    * Whether to enable speculative decoding (multi-token prediction) if supported by the model.
+   * @deprecated Use `speculativeDecodingMode`. `true` maps to 'on'.
    * @default false
    */
   enableSpeculativeDecoding?: boolean;
+
+  /**
+   * MTP speculative decoding for this engine (Android: LiteRT-LM 0.19+).
+   * Takes precedence over `enableSpeculativeDecoding`. Products can override
+   * it per product via `registerProduct()`.
+   * @default 'off' (or 'on' when enableSpeculativeDecoding is true)
+   */
+  speculativeDecodingMode?: SpeculativeDecodingMode;
+
+  /**
+   * Products whose prefilled system prompt stays in memory (LRU beyond this).
+   * Each costs one full KV cache (maxContextTokens x ~9 KB for Gemma 4 E2B).
+   * @default sized from device RAM (1-4)
+   */
+  maxCachedProducts?: number;
+
+  /**
+   * Directory for LiteRT-LM's compiled kernel and weight caches. A warm cache
+   * turns a multi-second first load into ~1 s, so it should survive across
+   * launches. `context.cacheDir` can be wiped by the OS under storage
+   * pressure; the default can't.
+   * @default `noBackupFilesDir/litertlm-cache` on Android
+   */
+  cacheDir?: string;
 
   /**
    * Initialize the constraint provider (LLGuidance) so structured output can
@@ -161,9 +200,10 @@ export interface LLMConfig {
 
   /**
    * Number of CPU threads for text generation (CPU backend).
-   * Lower values reduce peak memory bandwidth pressure at some speed cost.
+   * Use the performance-core count; little cores slow decoding down.
    *
-   * @remarks **iOS only** — the Android Kotlin SDK does not expose thread control.
+   * @remarks Android: LiteRT-LM 0.19+ (`Backend.CPU(threadCount)`). Defaults
+   * to the device's performance-core count, capped at 4.
    */
   numThreads?: number;
 
@@ -334,7 +374,7 @@ export interface ExecuteOptions {
    * their logits are forced to -inf.
    *
    * @remarks **iOS only.** Ignored (with a warning) on Android: LiteRT-LM
-   * 0.15.0's `SuppressTokensConfig` JNI binding looks up a Kotlin-mangled
+   * 0.15.0/0.16.0's `SuppressTokensConfig` JNI binding looks up a Kotlin-mangled
    * `internal` accessor and aborts the process, so the library refuses to
    * use it there until upstream fixes the mismatch.
    */
@@ -396,6 +436,69 @@ export interface MemoryUsage {
   availableMemoryBytes: number;
   /** Whether the system considers memory low */
   isLowMemory: boolean;
+}
+
+/**
+ * Per-product settings for `registerProduct()`.
+ */
+export interface ProductOptions {
+  /**
+   * Overrides `LLMConfig.speculativeDecodingMode` for this product. 'on'
+   * tends to win for summarize/rewrite products; 'adaptive' is safer for code.
+   */
+  speculativeDecodingMode?: SpeculativeDecodingMode;
+}
+
+/**
+ * Per-request options for `executeProduct()`.
+ */
+export interface ProductExecuteOptions {
+  /**
+   * Stop generating once this many characters have been produced. Not
+   * generating text you won't show is the cheapest speed-up there is.
+   */
+  maxChars?: number;
+}
+
+/**
+ * Counters for the product path, including LiteRT-LM's MTP drafter
+ * workaround. Worth sending to telemetry.
+ */
+export interface ProductStats {
+  requests: number;
+  /** Drafter failures seen (each is retried before any output reaches JS). */
+  drafterFailures: number;
+  /** Requests that hit a drafter failure and still succeeded. */
+  recoveredByRetry: number;
+  /** Products where MTP was turned off after failing twice in a row. */
+  productsWithMtpOff: string[];
+  /** Products whose system prompt is currently prefilled, least recently used first. */
+  residentProducts: string[];
+}
+
+/**
+ * The fastest setup `tune()` found on this device. Pass its fields to
+ * `loadModel()` (`backend`, `numThreads`, `speculativeDecodingMode`).
+ */
+export interface TunedConfig {
+  backend: Backend;
+  numThreads: number;
+  speculativeDecodingMode: SpeculativeDecodingMode;
+  /** Time to first token + time for a ~400-character reply, as measured. */
+  expectedLatencyMs: number;
+}
+
+/**
+ * One candidate measured by `tune()`.
+ */
+export interface TuneMeasurement {
+  backend: Backend;
+  numThreads: number;
+  speculativeDecodingMode: SpeculativeDecodingMode;
+  initMs: number;
+  timeToFirstTokenMs: number;
+  charsPerSecond: number;
+  scoreMs: number;
 }
 
 /**
@@ -600,6 +703,91 @@ export interface LiteRTLM extends HybridObject<{
     onToken?: (token: string, done: boolean) => void,
     options?: ExecuteOptions,
   ): Promise<string>;
+
+  // ---------------------------------------------------------------------------
+  // Products: static system prompts prefilled once and reused.
+  //
+  // `resetConversation(…, systemPrompt)` re-prefills the system prompt on every
+  // switch. A product's system prompt is prefilled once into a template; each
+  // request clones it (copy-on-write) and prefills only the user's text.
+  // Measured on Gemma 4 E2B: 0.6-0.8 s to first token instead of 10-12 s for a
+  // 1,875-token system prompt. Products share the loaded engine with the
+  // conversation API and don't disturb its history. They are text-only and
+  // stateless: each request sees only the system prompt and that request.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register (or replace) a product. Cheap; the system prompt is prefilled
+   * by `prewarmProducts()` or on first use. Registrations survive
+   * `loadModel()`/`unload()`.
+   */
+  registerProduct(
+    productId: string,
+    systemPrompt: string,
+    options?: ProductOptions,
+  ): Promise<void>;
+
+  /**
+   * Prefill these products' system prompts now, most important first. Do it
+   * right after `loadModel()`: first answers are fast and it avoids the
+   * LiteRT-LM drafter bug's trigger. Products beyond `maxCachedProducts` are
+   * prefilled and then evicted, so pass only the hot ones.
+   */
+  prewarmProducts(productIds: string[]): Promise<void>;
+
+  /**
+   * Answer `text` under a product's system prompt. Streams through `onToken`
+   * like `execute()` when given, and resolves with the full response.
+   * Requests run one at a time.
+   */
+  executeProduct(
+    productId: string,
+    text: string,
+    onToken?: (token: string, done: boolean) => void,
+    options?: ProductExecuteOptions,
+  ): Promise<string>;
+
+  /** Cancel the running `executeProduct()`, if any. Resolves it with what was produced. */
+  cancelProduct(): void;
+
+  /**
+   * Drop prefilled system prompts to free memory (all when `productIds` is
+   * omitted). They're rebuilt on next use; registrations are kept.
+   */
+  evictProducts(productIds?: string[]): Promise<void>;
+
+  getProductStats(): Promise<ProductStats>;
+
+  /**
+   * Smallest `maxContextTokens` that fits your largest product request
+   * (system prompt + user text + reply, in characters; 3 chars/token margin,
+   * rounded up to 1K).
+   */
+  contextTokensFor(
+    longestSystemPromptChars: number,
+    maxUserChars: number,
+    maxOutputChars: number,
+  ): number;
+
+  // ---------------------------------------------------------------------------
+  // Per-device tuning
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Measure GPU vs CPU, CPU thread counts and MTP modes on this device and
+   * return the fastest. The result is stored per device and model file, so
+   * later launches read it with `getTunedConfig()`. Unloads the current
+   * model first (only one engine fits in memory) and loads one engine per
+   * candidate, so run it once, e.g. right after the model download.
+   */
+  tune(
+    modelPath: string,
+    maxContextTokens: number,
+    onProgress?: (measurement: TuneMeasurement) => void,
+  ): Promise<TunedConfig>;
+
+  /** The stored `tune()` result for this device and model file, if any. */
+  getTunedConfig(modelPath: string): TunedConfig | undefined;
 
   /**
    * Release all native resources.

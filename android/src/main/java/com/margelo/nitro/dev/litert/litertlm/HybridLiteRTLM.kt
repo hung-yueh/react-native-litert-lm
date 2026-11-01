@@ -46,6 +46,18 @@ import com.google.ai.edge.litertlm.ToolProvider
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
 import java.io.File
+import android.os.Build
+import com.google.ai.edge.litertlm.SpeculativeDecodingConfig
+import com.google.ai.edge.litertlm.SpeculativeDecodingMode as SdkSpeculativeMode
+import com.margelo.nitro.dev.litert.litertlm.product.Autotuner
+import com.margelo.nitro.dev.litert.litertlm.product.DeviceProfile
+import com.margelo.nitro.dev.litert.litertlm.product.ProductRuntime
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 
 
 
@@ -147,8 +159,20 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
+    private var speculativeMode: SpeculativeDecodingMode = SpeculativeDecodingMode.OFF
+    private var numThreads: Int? = null
+    private var maxCachedProducts: Int? = null
+    private var cacheDirOverride: String? = null
     private var loraPath: String? = null
     private var audioLoraPath: String? = null
+
+    // Products: system prompts prefilled once into templates (see ProductRuntime).
+    // Registrations live here so they survive loadModel()/unload().
+    private val products = LinkedHashMap<String, Pair<String, SpeculativeDecodingMode?>>()
+    @Volatile private var productRuntime: ProductRuntime? = null
+    private val productScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Volatile private var activeProduct: Deferred<Unit>? = null
+    @Volatile private var productCancelRequested = false
 
     /** Size of the loaded model file in bytes (0 when unloaded). */
     @Volatile
@@ -197,12 +221,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.systemPrompt?.let { systemPrompt = it }
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                    speculativeMode = cfg.speculativeDecodingMode
+                        ?: if (enableSpeculativeDecoding) SpeculativeDecodingMode.ON else SpeculativeDecodingMode.OFF
+                    numThreads = cfg.numThreads?.toInt()?.takeIf { it > 0 }
+                    maxCachedProducts = cfg.maxCachedProducts?.toInt()?.takeIf { it > 0 }
+                    cacheDirOverride = cfg.cacheDir
                     enableStructuredOutput = cfg.enableStructuredOutput ?: false
                     sessionThinking = cfg.thinking
                     loraPath = cfg.loraPath
                     audioLoraPath = cfg.audioLoraPath
-                    // numThreads / prefillChunkSize / activationDataType / loraRank are
-                    // iOS-only: the Kotlin SDK does not expose them (see LLMConfig docs).
+                    // prefillChunkSize / activationDataType / loraRank are iOS-only here.
+                    // numThreads maps to Backend.CPU(threadCount) (LiteRT-LM 0.19+).
                     if (cfg.streamToolCalls == true) {
                         Log.w(TAG, "streamToolCalls (mid-generation channel streaming) is not " +
                             "wired on Android yet. Completed tool calls ARE surfaced as typed " +
@@ -255,14 +284,20 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     val modelFileName = modelPath.substringAfterLast("/").lowercase()
                     val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
     
-                    // Get cache directory from application context
-                    val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
+                    // Compiled-kernel/weight cache. A warm cache turns a slow first load
+                    // into ~1 s, so it must survive: context.cacheDir can be wiped by
+                    // the OS under storage pressure, noBackupFilesDir can't.
+                    val cacheDirectory = engineCacheDir()
                     Log.i(TAG, "Using cache directory: $cacheDirectory")
 
-                    if (enableSpeculativeDecoding) {
-                        @OptIn(ExperimentalApi::class)
-                        ExperimentalFlags.enableSpeculativeDecoding = true
-                    }
+                    // Explicit per-engine config. (The old ExperimentalFlags switch was
+                    // process-global and never reset, so one MTP load left it on for
+                    // every later load.)
+                    val speculativeConfig = SpeculativeDecodingConfig(mode = speculativeMode.toSdk())
+                    val cpuThreads = numThreads
+                        ?: LiteRTLMInitProvider.applicationContext?.let { DeviceProfile.read(it).suggestedCpuThreads }
+                        ?: 4
+                    fun cpuBackend() = com.google.ai.edge.litertlm.Backend.CPU(threadCount = cpuThreads)
 
                     // Helper: attempt engine creation with given backends, return null on failure
                     fun tryCreateEngine(
@@ -278,14 +313,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                     visionBackend = visionBackend,
                                     audioBackend = audioBackend,
                                     maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory
+                                    cacheDir = cacheDirectory,
+                                    speculativeDecodingConfig = speculativeConfig,
                                 )
                             } else {
                                 EngineConfig(
                                     modelPath = modelPath,
                                     backend = mainBackend,
                                     maxNumTokens = maxContextTokens,
-                                    cacheDir = cacheDirectory
+                                    cacheDir = cacheDirectory,
+                                    speculativeDecodingConfig = speculativeConfig,
                                 )
                             }
                             Engine(cfg).also { it.initialize() }
@@ -302,7 +339,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             Log.i(TAG, "NPU backend requested - requires hardware support")
                             com.google.ai.edge.litertlm.Backend.NPU()
                         }
-                        else -> com.google.ai.edge.litertlm.Backend.CPU()
+                        else -> cpuBackend()
                     }
 
                     val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
@@ -322,7 +359,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                         // Fallback 1: CPU main + GPU vision + CPU audio
                         eng = tryCreateEngine(
-                            com.google.ai.edge.litertlm.Backend.CPU(),
+                            cpuBackend(),
                             if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
                             if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
                         )
@@ -330,7 +367,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         // Fallback 2: Full CPU for all modalities
                         if (eng == null) {
                             eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
+                                cpuBackend(),
                                 if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
                                 if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
                             )
@@ -339,7 +376,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         // Fallback 3: Text-only CPU (no vision/audio executors)
                         if (eng == null) {
                             eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
+                                cpuBackend(),
                                 null,
                                 null
                             )
@@ -359,6 +396,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // Create Conversation
                     createNewConversation()
                     Log.i(TAG, "Conversation created successfully")
+                    attachProducts(engine!!)
                     loadedModelPath = modelPath
                     loadedModelSizeBytes = try { File(modelPath).length() } catch (_: Exception) { 0L }
     
@@ -691,6 +729,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 cancelInFlightGeneration()
                 conversation?.close()
                 conversation = null
+                // Product templates are sessions on this engine: close them first.
+                activeProduct?.cancel()
+                productRuntime?.close()
+                productRuntime = null
                 engine?.close()        // Direct call
                 engine = null
                 loadedModelPath = null
@@ -951,7 +993,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 // Upstream: https://github.com/google-ai-edge/LiteRT-LM/issues/3229
                 if (options?.suppressTokens != null) {
                     Log.w(TAG, "suppressTokens is ignored on Android: LiteRT-LM " +
-                        "0.15.0's SuppressTokensConfig JNI binding is broken upstream " +
+                        "0.16.0's SuppressTokensConfig JNI binding is broken upstream " +
                         "(mangled internal accessor) and would abort the process.")
                 }
                 val suppressTokensConfig: SuppressTokensConfig? = null
@@ -1056,7 +1098,203 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun countTokens(text: String): Double {
         return -1.0
     }
+
+    // -------------------------------------------------------------------------
+    // Products
+    // -------------------------------------------------------------------------
+
+    private fun engineCacheDir(): String? =
+        cacheDirOverride
+            ?: LiteRTLMInitProvider.applicationContext?.noBackupFilesDir
+                ?.let { File(it, "litertlm-cache").apply { mkdirs() } }?.absolutePath
+
+    /** Runs products on the conversation's engine (one engine, not two). */
+    private fun attachProducts(eng: Engine) {
+        val context = LiteRTLMInitProvider.applicationContext
+        val profile = context?.let { DeviceProfile.read(it) }
+        val rt = ProductRuntime.attach(
+            eng,
+            ProductRuntime.Options(
+                maxNumTokens = maxContextTokens.coerceIn(256, 32768),
+                maxCachedProducts = maxCachedProducts ?: profile?.suggestedCachedProducts ?: 2,
+                cpuThreads = numThreads ?: profile?.suggestedCpuThreads ?: 4,
+                speculativeDecoding = speculativeMode.toSdk(),
+                sampler = SamplerConfig(topK = topK, topP = topP, temperature = temperature),
+            ),
+            backend = if (backend == Backend.GPU) "GPU" else if (backend == Backend.NPU) "NPU" else "CPU",
+        )
+        val registered = synchronized(products) { products.toList() }
+        runBlocking { registered.forEach { (id, v) -> rt.registerProduct(id, v.first, v.second?.toSdk()) } }
+        productRuntime = rt
+    }
+
+    private fun requireProducts(): ProductRuntime =
+        productRuntime ?: throw RuntimeException("LiteRTLM: No model loaded. Call loadModel() first.")
+
+    override fun registerProduct(productId: String, systemPrompt: String, options: ProductOptions?): Promise<Unit> =
+        Promise.async {
+            val mode = options?.speculativeDecodingMode
+            synchronized(products) { products[productId] = systemPrompt to mode }
+            productRuntime?.registerProduct(productId, systemPrompt, mode?.toSdk())
+            Unit
+        }
+
+    override fun prewarmProducts(productIds: Array<String>): Promise<Unit> =
+        Promise.async {
+            val rt = requireProducts()
+            productIds.forEach { rt.prewarm(it) }
+        }
+
+    override fun executeProduct(
+        productId: String,
+        text: String,
+        onToken: ((token: String, done: Boolean) -> Unit)?,
+        options: ProductExecuteOptions?,
+    ): Promise<String> = Promise.async {
+        val rt = requireProducts()
+        val out = StringBuilder()
+        val start = System.nanoTime()
+        var first = 0L
+        productCancelRequested = false
+        val job = productScope.async {
+            rt.generate(productId, text, options?.maxChars?.toInt()).collect { chunk ->
+                if (first == 0L) first = System.nanoTime()
+                out.append(chunk)
+                onToken?.invoke(chunk, false)
+            }
+        }
+        activeProduct = job
+        try {
+            job.await()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // cancelProduct() resolves with the partial text; anything else rethrows.
+            if (!productCancelRequested) throw e
+        } finally {
+            if (activeProduct === job) activeProduct = null
+        }
+        val elapsedMs = (System.nanoTime() - start) / 1e6
+        val completion = out.length / 4.0
+        lastStats = GenerationStats(
+            promptTokens = text.length / 4.0,
+            completionTokens = completion,
+            totalTokens = text.length / 4.0 + completion,
+            timeToFirstToken = if (first > 0) (first - start) / 1e6 else 0.0,
+            totalTime = elapsedMs,
+            tokensPerSecond = if (elapsedMs > 0) completion / (elapsedMs / 1000.0) else 0.0,
+        )
+        onToken?.invoke("", true)
+        out.toString()
+    }
+
+    override fun cancelProduct() {
+        productCancelRequested = true
+        activeProduct?.cancel()
+    }
+
+    override fun evictProducts(productIds: Array<String>?): Promise<Unit> =
+        Promise.async {
+            val rt = productRuntime ?: return@async
+            if (productIds == null) rt.evictAll() else productIds.forEach { rt.evictProduct(it) }
+        }
+
+    override fun getProductStats(): Promise<ProductStats> =
+        Promise.async {
+            val rt = productRuntime
+                ?: return@async ProductStats(0.0, 0.0, 0.0, emptyArray(), emptyArray())
+            val st = rt.stats()
+            ProductStats(
+                requests = st.requests.toDouble(),
+                drafterFailures = st.drafterFailures.toDouble(),
+                recoveredByRetry = st.recoveredByRetry.toDouble(),
+                productsWithMtpOff = st.productsWithMtpOff.toTypedArray(),
+                residentProducts = rt.residentProducts().toTypedArray(),
+            )
+        }
+
+    override fun contextTokensFor(
+        longestSystemPromptChars: Double,
+        maxUserChars: Double,
+        maxOutputChars: Double,
+    ): Double = ProductRuntime.contextFor(
+        longestSystemPromptChars.toInt(), maxUserChars.toInt(), maxOutputChars.toInt(),
+    ).toDouble()
+
+    // -------------------------------------------------------------------------
+    // Per-device tuning
+    // -------------------------------------------------------------------------
+
+    private fun tuner(modelPath: String): Autotuner {
+        val context = LiteRTLMInitProvider.applicationContext
+            ?: throw RuntimeException("LiteRTLM: application context not available")
+        val prefs = context.getSharedPreferences("litertlm_autotune", Context.MODE_PRIVATE)
+        return Autotuner(
+            modelPath,
+            engineCacheDir()?.let { File(it) },
+            object : Autotuner.KeyValueStore {
+                override fun get(key: String) = prefs.getString(key, null)
+                override fun put(key: String, value: String) { prefs.edit().putString(key, value).apply() }
+            },
+            deviceId = Build.FINGERPRINT,
+        )
+    }
+
+    override fun tune(
+        modelPath: String,
+        maxContextTokens: Double,
+        onProgress: ((measurement: TuneMeasurement) -> Unit)?,
+    ): Promise<TunedConfig> = Promise.async {
+        // Only one engine fits in memory: release ours while candidates load.
+        synchronized(initLock) { cleanupInternal() }
+        val context = LiteRTLMInitProvider.applicationContext
+            ?: throw RuntimeException("LiteRTLM: application context not available")
+        val profile = DeviceProfile.read(context)
+        val candidates = buildList {
+            add(Autotuner.Candidate(ProductRuntime.BackendChoice.GPU))
+            profile.cpuThreadCandidates.forEach { add(Autotuner.Candidate(ProductRuntime.BackendChoice.CPU, it)) }
+        }
+        val base = ProductRuntime.Options(
+            maxNumTokens = maxContextTokens.toInt().coerceIn(256, 32768),
+            sampler = SamplerConfig(topK = topK, topP = topP, temperature = temperature),
+        )
+        val choice = tuner(modelPath).tune(candidates, base) { m ->
+            onProgress?.invoke(TuneMeasurement(
+                backend = m.candidate.backend.toNitro(),
+                numThreads = m.candidate.cpuThreads.toDouble(),
+                speculativeDecodingMode = m.mode.toNitro(),
+                initMs = m.initSeconds * 1000,
+                timeToFirstTokenMs = m.ttftSeconds * 1000,
+                charsPerSecond = m.charsPerSecond,
+                scoreMs = m.scoreSeconds * 1000,
+            ))
+        }
+        choice.toNitro()
+    }
+
+    override fun getTunedConfig(modelPath: String): TunedConfig? =
+        tuner(modelPath).cached()?.toNitro()
 }
+
+private fun SpeculativeDecodingMode.toSdk(): SdkSpeculativeMode = when (this) {
+    SpeculativeDecodingMode.OFF -> SdkSpeculativeMode.OFF
+    SpeculativeDecodingMode.ON -> SdkSpeculativeMode.ON
+    SpeculativeDecodingMode.ADAPTIVE -> SdkSpeculativeMode.ADAPTIVE
+}
+
+private fun SdkSpeculativeMode.toNitro(): SpeculativeDecodingMode = when (this) {
+    SdkSpeculativeMode.OFF -> SpeculativeDecodingMode.OFF
+    SdkSpeculativeMode.ON -> SpeculativeDecodingMode.ON
+    SdkSpeculativeMode.ADAPTIVE -> SpeculativeDecodingMode.ADAPTIVE
+}
+
+private fun ProductRuntime.BackendChoice.toNitro(): Backend =
+    if (this == ProductRuntime.BackendChoice.CPU) Backend.CPU else Backend.GPU
+
+private fun Autotuner.Choice.toNitro() = TunedConfig(
+    backend = backend.toNitro(),
+    numThreads = cpuThreads.toDouble(),
+    speculativeDecodingMode = speculativeDecoding.toNitro(),
+    expectedLatencyMs = expectedLatencySeconds * 1000,
+)
 
 /** Map the Nitro ThinkingOptions to the LiteRT-LM SDK config (engine defaults: enabled, unlimited budget). */
 private fun ThinkingOptions.toSdkThinkingConfig(): ThinkingConfig =
