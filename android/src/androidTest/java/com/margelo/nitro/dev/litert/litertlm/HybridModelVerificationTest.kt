@@ -7,6 +7,7 @@ import com.facebook.soloader.nativeloader.SystemDelegate
 import com.margelo.nitro.JNIOnLoad
 import com.margelo.nitro.core.Promise
 import dev.litert.litertlm.LiteRTLMInitProvider
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -97,6 +98,22 @@ class HybridModelVerificationTest {
     /** The answer with any reasoning block removed, for content checks. */
     private fun answer(reply: String) = reply.substringAfter("</think>")
 
+    /** getHistory() as the JSON resetConversation() replays. */
+    private fun transcriptJson(history: Array<Message>) = JSONArray().apply {
+        history.forEach { put(JSONObject().put("role", it.role.name.lowercase()).put("content", it.content)) }
+    }.toString()
+
+    /** The context token count once it is known (a reset reads it in the background), or -1 after 10 s. */
+    private fun knownContextTokens(llm: HybridLiteRTLM): Double {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        var tokens = llm.getContextTokenCount()
+        while (tokens < 0 && System.nanoTime() < deadline) {
+            Thread.sleep(50)
+            tokens = llm.getContextTokenCount()
+        }
+        return tokens
+    }
+
     @Test
     fun verifyModel() {
         val path = modelPath()
@@ -127,14 +144,26 @@ class HybridModelVerificationTest {
             // Multi-turn memory, from a fresh conversation (a one-word answer just
             // before primes small models to keep answering in one word)
             llm.resetConversation(null, null, null)
-            assertEquals("context tokens after a reset", -1.0, llm.getContextTokenCount(), 0.0)
+            val reset = knownContextTokens(llm)
+            assertTrue("context tokens after a reset: $reset", reset >= 0)
             ask(llm, "My favorite color is teal. Please remember it.", options(maxOutputTokens = 48.0))
             val afterReset = llm.getContextTokenCount()
-            println("[verify] context tokens after the reset's first message: $afterReset")
-            assertTrue("context tokens after the reset's first message: $afterReset", afterReset > 0)
+            println("[verify] context tokens after a reset $reset, after its first message $afterReset")
+            assertTrue("context tokens after the reset's first message: $reset -> $afterReset", afterReset > reset)
             val color = ask(llm, "What is my favorite color? Answer with one word.")
             println("[verify] recall: $color")
             assertTrue("multi-turn: $color", answer(color).lowercase().contains("teal"))
+
+            // A reset that replays the transcript: the engine prefills it with the
+            // next message, so the count stays unknown until that one completes.
+            llm.resetConversation(transcriptJson(llm.getHistory()), null, null)
+            Thread.sleep(1_000)
+            val replayed = llm.getContextTokenCount()
+            val again = ask(llm, "What is my favorite color? Answer with one word.")
+            val afterReplay = llm.getContextTokenCount()
+            println("[verify] context tokens after a replaying reset $replayed, after its first message $afterReplay: $again")
+            assertEquals("context tokens after a reset that replays a transcript", -1.0, replayed, 0.0)
+            assertTrue("context tokens after the replaying reset's first message: $afterReplay", afterReplay > 0)
 
             llm.resetConversation(null, null, null)
             started = System.nanoTime()
