@@ -14,12 +14,24 @@ export interface ModelDownloadOptions {
    * the Hugging Face Hub, its LFS `oid`). The download is hashed as it is
    * written and moved into the cache only when it matches; a mismatch deletes
    * it and rejects with `DOWNLOAD_FAILED`. A file already in the cache is
-   * returned without hashing it again.
+   * returned at once when a download checked it against this sha256. One that
+   * wasn't checked (cached before 0.8.2, or downloaded without a sha256) is
+   * hashed once, which takes seconds for a multi-GB model, and another
+   * revision under the same name is downloaded again.
    */
   sha256?: string;
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+/** Calls an app's progress callback: one that throws is logged, and the download goes on. */
+function report(listener: (progress: number) => void, progress: number): void {
+  try {
+    listener(progress);
+  } catch (e) {
+    console.warn("[react-native-litert-lm] An onProgress callback threw:", e);
+  }
+}
 
 const nativeStore = NitroModules.createHybridObject<ModelStore>("ModelStore");
 
@@ -104,12 +116,17 @@ export const ModelRegistry = {
    * local path, returns it directly.
    *
    * A download that fails or is interrupted (the app killed, the network
-   * lost) keeps what it wrote, and the next call for the same URL continues
-   * from there with an HTTP Range request when the server sent a validator
-   * (ETag or Last-Modified) and the file size. A partial file that nothing
-   * has written to for 7 days is deleted the next time any download starts,
-   * unless that file is downloading at the time; `deleteFile()` deletes one
-   * at once.
+   * lost) keeps what it wrote, and the next call for the same URL (its query
+   * aside, so a signed URL resumes too) continues from there with an HTTP
+   * Range request when the server sent a validator (ETag or Last-Modified)
+   * and the file size. A partial file is synced to disk every 64 MB and
+   * continued from the last sync, so an app kill or a power cut costs at most
+   * that much of it, and never corrupts it. One is deleted when its URL
+   * answers 404 or 410, when it hasn't grown for 7 days and its download
+   * fails again, and the next time any download starts once nothing has
+   * written to it for 7 days (unless that file is downloading at the time);
+   * `deleteFile()` deletes one at once. A download fails before it writes a
+   * byte when it would leave the device with less than 64 MB free.
    *
    * One download of a file runs at a time. A call while one is running joins
    * it when the URL, sha256 and headers are the same (its `onProgress` gets
@@ -163,8 +180,8 @@ export const ModelRegistry = {
         if (running.key === key) {
           const onProgress = options?.onProgress;
           if (onProgress) {
+            if (running.progress !== undefined) report(onProgress, running.progress);
             running.listeners.push(onProgress);
-            if (running.progress !== undefined) onProgress(running.progress);
           }
           return running.result;
         }
@@ -182,7 +199,7 @@ export const ModelRegistry = {
         try {
           return await nativeStore.downloadFile(cleanPath, fileName, headersJson, expectedSha256, (progress) => {
             download.progress = progress;
-            for (const listener of download.listeners) listener(progress);
+            for (const listener of download.listeners) report(listener, progress);
           });
         } catch (e) {
           const message = cleanNativeMessage(e instanceof Error ? e.message : String(e));

@@ -1,5 +1,7 @@
 package com.margelo.nitro.dev.litert.litertlm
 
+import android.system.ErrnoException
+import android.system.OsConstants
 import android.util.Log
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
@@ -9,10 +11,12 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import org.json.JSONObject
 
@@ -29,9 +33,19 @@ class HybridModelStore : HybridModelStoreSpec() {
      */
     internal var readTimeoutMs = 60_000
 
+    /**
+     * A partial download is synced to disk, and its record updated, every
+     * this many bytes: a power cut loses what came after, never corrupts it.
+     * Tests shorten it.
+     */
+    internal var syncBytes = 64L * 1024 * 1024
+
+    /** Free bytes on the volume of a directory. Tests replace it. */
+    internal var usableSpace: (File) -> Long = { it.usableSpace }
+
     private val modelsDirectory: File
         get() {
-            val context = LiteRTLMInitProvider.applicationContext 
+            val context = LiteRTLMInitProvider.applicationContext
                 ?: throw RuntimeException("Android Application Context is not available")
             val modelsDir = File(context.filesDir, "models")
             if (!modelsDir.exists()) {
@@ -43,6 +57,12 @@ class HybridModelStore : HybridModelStoreSpec() {
     private fun sanitizeFileName(fileName: String) {
         if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
             throw IllegalArgumentException("Invalid filename: path traversal or directory separators are not allowed.")
+        }
+        // The cache keeps partial downloads and verified hashes next to the models under these suffixes
+        if (fileName.isEmpty() || fileName == "." || RESERVED_SUFFIXES.any { fileName.endsWith(it) }) {
+            throw IllegalArgumentException(
+                "Invalid filename \"$fileName\": the cache reserves names ending in ${RESERVED_SUFFIXES.joinToString()}."
+            )
         }
     }
 
@@ -72,7 +92,7 @@ class HybridModelStore : HybridModelStoreSpec() {
             val files = dir.listFiles() ?: return emptyArray()
             val result = mutableListOf<ModelFile>()
             for (f in files) {
-                if (f.isFile && !f.name.endsWith(".tmp") && !f.name.endsWith(RESUME_SUFFIX)) {
+                if (f.isFile && RESERVED_SUFFIXES.none { f.name.endsWith(it) }) {
                     result.add(
                         ModelFile(
                             fileName = f.name,
@@ -94,7 +114,7 @@ class HybridModelStore : HybridModelStoreSpec() {
         sanitizeFileName(fileName)
         // A partial download of the file goes too, unless a download is
         // writing it right now
-        val lock = downloadLock(fileName)
+        val lock = downloadsOf(fileName).lock
         if (lock.tryLock()) {
             try {
                 File(modelsDirectory, "$fileName.tmp").delete()
@@ -103,6 +123,7 @@ class HybridModelStore : HybridModelStoreSpec() {
                 lock.unlock()
             }
         }
+        File(modelsDirectory, "$fileName$VERIFIED_SUFFIX").delete()
         val file = File(modelsDirectory, fileName)
         if (file.exists()) {
             val deleted = file.delete()
@@ -129,19 +150,25 @@ class HybridModelStore : HybridModelStoreSpec() {
 
             // One download of a file at a time in this process: a second call
             // waits here (on its own thread) for the first to end, then finds
-            // the file in the cache or continues the partial file it left.
-            val lock = downloadLock(fileName)
-            if (!lock.tryLock()) {
-                Log.i(tag, "Waiting for the download of $fileName already running")
-                lock.lock()
-            }
+            // the file in the cache or continues the partial file it left. The
+            // count keeps other calls' clean-up off the file meanwhile.
+            val downloads = downloadsOf(fileName)
+            downloads.calls.incrementAndGet()
             try {
-                // Week-old partial downloads go while this call holds its lock, so another
-                // call's clean-up never deletes the partial file this call continues.
-                expireStalePartials(fileName)
-                download(url, fileName, headersJson, sha256, onProgress)
+                if (!downloads.lock.tryLock()) {
+                    Log.i(tag, "Waiting for the download of $fileName already running")
+                    downloads.lock.lock()
+                }
+                try {
+                    // Week-old partial downloads go while this call holds its lock, so another
+                    // call's clean-up never deletes the partial file this call continues.
+                    expireStalePartials(fileName)
+                    download(url, fileName, headersJson, sha256, onProgress)
+                } finally {
+                    downloads.lock.unlock()
+                }
             } finally {
-                lock.unlock()
+                downloads.calls.decrementAndGet()
             }
         }
     }
@@ -150,10 +177,10 @@ class HybridModelStore : HybridModelStoreSpec() {
      * Deletes the partial downloads (`<file>.tmp` and `<file>.tmp.json`) that
      * nothing has written to for [PARTIAL_MAX_AGE_MS], except [fileName]'s own
      * (its download continues it, or starts over when the server's version
-     * changed) and those of downloads running or waiting (their lock is held).
-     * A pair is as old as the newer of its files: `.tmp` changes with every
-     * write, `.tmp.json` only when its download starts. A failure here is
-     * logged and does not stop the download.
+     * changed) and those of files a call is downloading or waiting to
+     * download. A pair is as old as the newer of its files: `.tmp` changes
+     * with every write, `.tmp.json` with every sync. A failure here is logged
+     * and does not stop the download.
      */
     private fun expireStalePartials(fileName: String) {
         try {
@@ -167,9 +194,11 @@ class HybridModelStore : HybridModelStoreSpec() {
             }.toSet() - fileName
             val now = System.currentTimeMillis()
             for (name in names) {
-                val lock = downloadLock(name)
-                if (!lock.tryLock()) continue
+                val downloads = downloadsOf(name)
+                if (!downloads.lock.tryLock()) continue
                 try {
+                    // A call waiting for the lock is about to continue this partial file
+                    if (downloads.calls.get() > 0) continue
                     // Read under the lock: a download may have written it since the listing
                     val files = listOf(File(dir, "$name.tmp"), File(dir, "$name$RESUME_SUFFIX")).filter { it.isFile }
                     val age = now - (files.maxOfOrNull { it.lastModified() } ?: continue)
@@ -179,7 +208,7 @@ class HybridModelStore : HybridModelStoreSpec() {
                     }
                     Log.i(tag, "Deleted the partial download of $name: last written ${age / DAY_MS} days ago")
                 } finally {
-                    lock.unlock()
+                    downloads.lock.unlock()
                 }
             }
         } catch (e: Exception) {
@@ -198,12 +227,17 @@ class HybridModelStore : HybridModelStoreSpec() {
         val modelFile = File(dir, fileName)
         val tempFile = File(dir, "$fileName.tmp")
         val resumeFile = File(dir, "$fileName$RESUME_SUFFIX")
+        val verifiedFile = File(dir, "$fileName$VERIFIED_SUFFIX")
 
-        // Fast cache check
+        // Fast cache check. With a sha256 the cached file must be the one it
+        // names: another revision under the same name is downloaded again.
         if (modelFile.exists() && modelFile.length() > 0) {
-            Log.i(tag, "Model already exists: ${modelFile.absolutePath}")
-            onProgress(1.0)
-            return modelFile.absolutePath
+            if (sha256.isEmpty() || matchesSha256(modelFile, verifiedFile, sha256)) {
+                Log.i(tag, "Model already exists: ${modelFile.absolutePath}")
+                onProgress(1.0)
+                return modelFile.absolutePath
+            }
+            Log.i(tag, "The cached $fileName is not the file sha256 $sha256 names: downloading it again")
         }
 
         Log.i(tag, "Downloading model to temp file: ${tempFile.absolutePath}")
@@ -225,14 +259,45 @@ class HybridModelStore : HybridModelStoreSpec() {
         }
 
         // A partial file left by an earlier call is continued only when it
-        // came from the same URL and that response named its version (an
-        // ETag or Last-Modified) and its size.
-        val partial = readPartial(resumeFile)?.takeIf {
-            it.url == url && tempFile.length() in 1 until it.totalBytes
+        // came from the same URL (its query aside: a signed URL changes with
+        // every call) and that response named its version (an ETag or
+        // Last-Modified) and its size. Only the bytes synced to disk count:
+        // after a power cut the ones after them may never have been written.
+        val source = withoutQuery(url)
+        var partial = readPartial(resumeFile)?.takeIf {
+            it.url == source && it.syncedBytes in 1 until it.totalBytes && tempFile.length() >= it.syncedBytes
         }
-        if (partial == null) discardPartial(tempFile, resumeFile)
-        var offset = if (partial != null) tempFile.length() else 0L
+        // Before anything writes to the pair: a partial that nothing could add
+        // to for a week goes when its continuation fails
+        val stale = partial != null &&
+            System.currentTimeMillis() - maxOf(tempFile.lastModified(), resumeFile.lastModified()) >= PARTIAL_MAX_AGE_MS
+        if (partial == null) {
+            discardPartial(tempFile, resumeFile)
+        } else if (tempFile.length() > partial.syncedBytes) {
+            RandomAccessFile(tempFile, "rw").use { it.setLength(partial.syncedBytes) }
+        }
+        var offset = partial?.syncedBytes ?: 0L
         var keepPartial = partial != null
+
+        val digest = if (sha256.isNotEmpty()) MessageDigest.getInstance("SHA-256") else null
+        if (partial != null) {
+            onProgress(offset.toDouble() / partial.totalBytes.toDouble())
+            // Hashed before the request, so the response doesn't wait on it
+            if (digest != null) {
+                try {
+                    val started = System.currentTimeMillis()
+                    hashPrefix(digest, tempFile, offset)
+                    Log.i(tag, "Hashed the $offset bytes already downloaded in ${System.currentTimeMillis() - started} ms")
+                } catch (e: IOException) {
+                    Log.w(tag, "Could not read the partial download: starting over", e)
+                    discardPartial(tempFile, resumeFile)
+                    digest.reset()
+                    partial = null
+                    offset = 0L
+                    keepPartial = false
+                }
+            }
+        }
 
         // However the download ends, its streams are closed and the connection
         // it has open is disconnected (one is disconnected before a second
@@ -245,12 +310,20 @@ class HybridModelStore : HybridModelStoreSpec() {
                 if (!continues(connection, offset, partial)) {
                     // 200 = the whole file (the server ignored the range, or the
                     // file changed); 416 or a 206 of another version = the partial
-                    // file is no use. Anything else fails and keeps it for next time.
+                    // file is no use. Anything else fails and keeps it for next
+                    // time, unless the file is gone (404, 410) or the partial has
+                    // gone a week without growing: in an app with one model, no
+                    // other download's clean-up would ever delete it.
                     if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL && code != 416) {
+                        if (code == HttpURLConnection.HTTP_NOT_FOUND || code == HttpURLConnection.HTTP_GONE || stale) {
+                            keepPartial = false
+                        }
                         throw RuntimeException("Failed to download model: HTTP $code")
                     }
                     Log.i(tag, "Not continuing the partial download (HTTP $code): starting over")
                     discardPartial(tempFile, resumeFile)
+                    digest?.reset()
+                    partial = null
                     keepPartial = false
                     offset = 0L
                     if (code != HttpURLConnection.HTTP_OK) {
@@ -266,30 +339,23 @@ class HybridModelStore : HybridModelStoreSpec() {
 
             val contentLength = connection.contentLengthLong
             val totalBytes = if (offset > 0) partial!!.totalBytes else contentLength
+            // Not one byte is written without room for the rest of the file:
+            // a download that fills the disk would leave it full
+            if (totalBytes > 0) requireFreeSpace(dir, totalBytes - offset)
+
+            // What the next call needs to continue this download
+            var record = partial
             if (offset == 0L) {
-                // What the next call needs to continue this download
                 val validator = validatorOf(connection)
                 if (validator != null && contentLength > 0) {
-                    resumeFile.writeText(
-                        JSONObject()
-                            .put("url", url)
-                            .put("validator", validator)
-                            .put("totalBytes", contentLength)
-                            .toString()
-                    )
+                    record = Partial(source, validator, contentLength, 0L)
+                    writePartial(resumeFile, record)
                     keepPartial = true
                 }
             }
 
-            val digest = if (sha256.isNotEmpty()) MessageDigest.getInstance("SHA-256") else null
             if (offset > 0) {
                 Log.i(tag, "Continuing the partial download at byte $offset of $totalBytes")
-                if (digest != null) {
-                    val started = System.currentTimeMillis()
-                    hashPrefix(digest, tempFile, offset)
-                    Log.i(tag, "Hashed the $offset bytes already downloaded in ${System.currentTimeMillis() - started} ms")
-                }
-                onProgress(offset.toDouble() / totalBytes.toDouble())
             }
 
             var totalBytesRead = 0L
@@ -298,24 +364,40 @@ class HybridModelStore : HybridModelStoreSpec() {
                     val buffer = ByteArray(8 * 1024)
                     var bytesRead: Int
                     var lastProgressUpdate = 0L
+                    var synced = offset
 
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        digest?.update(buffer, 0, bytesRead)
-                        totalBytesRead += bytesRead
+                    try {
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            digest?.update(buffer, 0, bytesRead)
+                            totalBytesRead += bytesRead
 
-                        if (totalBytes > 0) {
-                            val currentTime = System.currentTimeMillis()
-                            // Update progress roughly every 100ms to prevent bridge flooding
-                            if (currentTime - lastProgressUpdate > 100) {
-                                val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
-                                onProgress(progress)
-                                lastProgressUpdate = currentTime
+                            if (record != null && offset + totalBytesRead - synced >= syncBytes) {
+                                output.fd.sync()
+                                synced = offset + totalBytesRead
+                                writePartial(resumeFile, record.copy(syncedBytes = synced))
+                            }
+
+                            if (totalBytes > 0) {
+                                val currentTime = System.currentTimeMillis()
+                                // Update progress roughly every 100ms to prevent bridge flooding
+                                if (currentTime - lastProgressUpdate > 100) {
+                                    val progress = (offset + totalBytesRead).toDouble() / totalBytes.toDouble()
+                                    onProgress(progress)
+                                    lastProgressUpdate = currentTime
+                                }
                             }
                         }
+                    } finally {
+                        // However the transfer ends, what it wrote reaches the disk
+                        // before the record says so, or before the file is installed
+                        try {
+                            output.fd.sync()
+                            if (record != null) writePartial(resumeFile, record.copy(syncedBytes = offset + totalBytesRead))
+                        } catch (e: IOException) {
+                            Log.w(tag, "Could not sync the download to disk", e)
+                        }
                     }
-
-                    output.flush()
                 }
             }
 
@@ -337,7 +419,7 @@ class HybridModelStore : HybridModelStoreSpec() {
 
             if (digest != null) {
                 val started = System.currentTimeMillis()
-                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                val actual = hex(digest.digest())
                 if (actual != sha256) {
                     keepPartial = false
                     throw RuntimeException("sha256 mismatch: expected $sha256, got $actual")
@@ -345,9 +427,12 @@ class HybridModelStore : HybridModelStoreSpec() {
                 Log.i(tag, "sha256 matches ($actual), final digest in ${System.currentTimeMillis() - started} ms")
             }
 
+            // An old hash must never vouch for the new file
+            verifiedFile.delete()
             // Atomic rename
             if (tempFile.renameTo(modelFile)) {
                 resumeFile.delete()
+                if (digest != null) writeVerified(verifiedFile, modelFile, sha256)
                 Log.i(tag, "Download complete and verified at: ${modelFile.absolutePath}")
                 onProgress(1.0)
                 modelFile.absolutePath
@@ -356,6 +441,8 @@ class HybridModelStore : HybridModelStoreSpec() {
             }
         } catch (e: Exception) {
             Log.e(tag, "Download failed", e)
+            // A disk the download filled must not stay full
+            if (isOutOfSpace(e)) keepPartial = false
             if (keepPartial && tempFile.length() > 0) {
                 Log.i(tag, "Kept ${tempFile.length()} bytes of the partial download for the next call")
             } else {
@@ -367,21 +454,96 @@ class HybridModelStore : HybridModelStoreSpec() {
         }
     }
 
-    /** Where a partial download came from, as its first response described it. */
-    private class Partial(val url: String, val validator: String, val totalBytes: Long)
+    /**
+     * Where a partial download came from, as its first response described it,
+     * and how many of its bytes are synced to disk.
+     */
+    private data class Partial(val url: String, val validator: String, val totalBytes: Long, val syncedBytes: Long)
 
     private fun readPartial(file: File): Partial? = try {
         if (!file.exists()) null
         else JSONObject(file.readText()).let {
-            Partial(it.getString("url"), it.getString("validator"), it.getLong("totalBytes"))
+            Partial(it.getString("url"), it.getString("validator"), it.getLong("totalBytes"), it.optLong("syncedBytes", -1))
         }
     } catch (e: Exception) {
         null
     }
 
+    private fun writePartial(file: File, partial: Partial) {
+        file.writeText(
+            JSONObject()
+                .put("url", partial.url)
+                .put("validator", partial.validator)
+                .put("totalBytes", partial.totalBytes)
+                .put("syncedBytes", partial.syncedBytes)
+                .toString()
+        )
+    }
+
     private fun discardPartial(tempFile: File, resumeFile: File) {
         tempFile.delete()
         resumeFile.delete()
+    }
+
+    /**
+     * Whether [model] is the file [sha256] names. The hash a download checked
+     * is kept in [verified] with the file's size and modification time. A file
+     * without one (cached before 0.8.2, or installed without a sha256), or one
+     * changed since, is hashed once and the result kept.
+     */
+    private fun matchesSha256(model: File, verified: File, sha256: String): Boolean {
+        val size = model.length()
+        val modified = model.lastModified()
+        try {
+            val record = JSONObject(verified.readText())
+            if (record.getLong("size") == size && record.getLong("modified") == modified) {
+                return record.getString("sha256") == sha256
+            }
+        } catch (e: Exception) {
+            // No record, or an unreadable one: hash the file
+        }
+        val actual = try {
+            val started = System.currentTimeMillis()
+            val digest = MessageDigest.getInstance("SHA-256")
+            hashPrefix(digest, model, size)
+            hex(digest.digest()).also {
+                Log.i(tag, "Hashed the cached ${model.name} in ${System.currentTimeMillis() - started} ms")
+            }
+        } catch (e: IOException) {
+            Log.w(tag, "Could not hash the cached ${model.name}", e)
+            return false
+        }
+        writeVerified(verified, model, actual)
+        return actual == sha256
+    }
+
+    private fun writeVerified(verified: File, model: File, sha256: String) {
+        try {
+            verified.writeText(
+                JSONObject()
+                    .put("sha256", sha256)
+                    .put("size", model.length())
+                    .put("modified", model.lastModified())
+                    .toString()
+            )
+        } catch (e: IOException) {
+            Log.w(tag, "Could not record the sha256 of ${model.name}", e)
+        }
+    }
+
+    private fun requireFreeSpace(dir: File, needed: Long) {
+        val free = usableSpace(dir)
+        if (free < needed + FREE_SPACE_MARGIN_BYTES) {
+            throw IOException(
+                "Not enough free storage: ${needed / MIB} MB left to download, ${free / MIB} MB free"
+            )
+        }
+    }
+
+    private fun isOutOfSpace(e: Throwable): Boolean = generateSequence(e) { it.cause }.any {
+        (it is ErrnoException && it.errno == OsConstants.ENOSPC) ||
+            it.message?.contains("ENOSPC") == true ||
+            it.message?.contains("No space left on device") == true
     }
 
     private fun open(
@@ -438,29 +600,47 @@ class HybridModelStore : HybridModelStoreSpec() {
             var left = length
             while (left > 0) {
                 val n = input.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
-                if (n < 0) throw IOException("The partial download is shorter than $length bytes")
+                if (n < 0) throw IOException("${file.name} is shorter than $length bytes")
                 digest.update(buffer, 0, n)
                 left -= n
             }
         }
     }
 
-    private companion object {
-        /** Next to `<file>.tmp`: the URL, validator and size a partial download continues from. */
+    private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    /** The URL a partial download is recorded under: a signed URL's query changes with every call. */
+    private fun withoutQuery(url: String): String = url.substringBefore('#').substringBefore('?')
+
+    internal companion object {
+        /** Next to `<file>.tmp`: the URL, validator, size and synced bytes a partial download continues from. */
         const val RESUME_SUFFIX = ".tmp.json"
+        /** Next to a model: the sha256 a download checked it against, with its size and modification time. */
+        const val VERIFIED_SUFFIX = ".sha256"
+        val RESERVED_SUFFIXES = listOf(".tmp", RESUME_SUFFIX, VERIFIED_SUFFIX)
         val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""")
 
         const val DAY_MS = 24L * 60 * 60 * 1000
         /** A partial download nothing has written to for this long goes when another download starts. */
         const val PARTIAL_MAX_AGE_MS = 7 * DAY_MS
 
-        /**
-         * One lock per file name for the whole process (HybridLiteRTLM's
-         * downloadModel has a store of its own): a download holds it from the
-         * cache check to the rename, so no two write `<file>.tmp` at once.
-         */
-        private val downloadLocks = ConcurrentHashMap<String, ReentrantLock>()
+        const val MIB = 1024L * 1024
+        /** Room a download leaves free on top of the file. */
+        const val FREE_SPACE_MARGIN_BYTES = 64 * MIB
 
-        fun downloadLock(fileName: String): ReentrantLock = downloadLocks.getOrPut(fileName) { ReentrantLock() }
+        /** A file's download lock, and how many calls are downloading it or waiting to. */
+        class FileDownloads {
+            val lock = ReentrantLock()
+            val calls = AtomicInteger()
+        }
+
+        /**
+         * One entry per file name for the whole process (HybridLiteRTLM's
+         * downloadModel has a store of its own): a download holds the lock from
+         * the cache check to the rename, so no two write `<file>.tmp` at once.
+         */
+        private val fileDownloads = ConcurrentHashMap<String, FileDownloads>()
+
+        fun downloadsOf(fileName: String): FileDownloads = fileDownloads.getOrPut(fileName) { FileDownloads() }
     }
 }

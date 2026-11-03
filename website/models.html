@@ -555,14 +555,25 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     network drops, an error mid-transfer) keeps what it wrote. The next call
     for the same URL continues it with an HTTP <code>Range</code> request,
     when the first response named the file's version (a strong
-    <code>ETag</code>, or <code>Last-Modified</code>) and its size. A
-    <code>200</code> (the server ignored the range) starts the file over; a
-    <code>416</code>, or a <code>206</code> of another version, discards the
-    partial file and fetches the whole file once; any other error keeps it
-    for the next call. A read that gets no data for 60 seconds on Android (30
-    on iOS) fails the same way, so a dead connection does not hang the call.
-    A partial file that nothing has written to for 7 days is deleted the next
-    time any download starts, unless that file is downloading at the time.
+    <code>ETag</code>, or <code>Last-Modified</code>) and its size. The URL's
+    query doesn't count, so a signed URL that changes with every call resumes
+    too. A <code>200</code> (the server ignored the range) starts the file
+    over; a <code>416</code>, or a <code>206</code> of another version,
+    discards the partial file and fetches the whole file once; a
+    <code>404</code> or <code>410</code> discards it and fails; any other
+    error keeps it for the next call. A read that gets no data for 60 seconds
+    on Android (30 on iOS) fails the same way, so a dead connection does not
+    hang the call.
+  </p>
+  <p>
+    The partial file is synced to disk every 64 MB, and a resume starts from
+    the last sync: an app kill or a power cut costs at most that much of it,
+    and never leaves a corrupt file to continue. A download that would leave
+    the device with less than 64 MB free fails before it writes a byte
+    (<code>Not enough free storage: …</code>), and one that fills the disk
+    anyway deletes its partial file. A partial file that nothing has written
+    to for 7 days is deleted the next time any download starts, unless that
+    file is downloading at the time, and when its own download fails again.
     <a href="#delete-file"><code>deleteFile(url)</code></a> deletes one at
     once.
   </p>
@@ -582,8 +593,14 @@ export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
     and the file moves into the cache only when the hash matches. A mismatch
     deletes the download and rejects with <code>DOWNLOAD_FAILED</code>
     (<code>sha256 mismatch: expected …, got …</code>); a malformed value
-    rejects with <code>INVALID_INPUT</code> before any request. A file already
-    in the cache is returned without hashing it again.
+    rejects with <code>INVALID_INPUT</code> before any request. The checked
+    hash is kept next to the file with its size and modification time, so a
+    file already in the cache is returned at once when a download checked it
+    against this <code>sha256</code>. One that wasn't checked (cached before
+    0.8.2, or downloaded without a <code>sha256</code>) is hashed once, which
+    takes seconds for a multi-GB model, and another revision under the same
+    name is downloaded again; the old file stays in use until the new one is
+    verified.
   </p>
 
   <h3 id="url-handling">URL handling</h3>

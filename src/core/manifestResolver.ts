@@ -512,13 +512,24 @@ export function resolutionFor(
     backend: r.backend,
     config,
     streamChannels: mergeStreamChannels(manifest),
-    sha256: r.variant.sha256,
+    sha256: downloadSha256(r.variant.sha256),
     sizeBytes: r.variant.size_bytes,
     contextLength: r.contextLength,
     sessionDefaults: r.sessionDefaults,
     notes: typeof sd.notes === "string" && sd.notes !== "" ? [...r.notes, sd.notes] : r.notes,
     reason: r.reason,
   };
+}
+
+/**
+ * A variant's sha256 as a download takes it: a manifest that writes null, ""
+ * or a `sha256:` prefix (as OCI digests do) would otherwise fail the load
+ * with INVALID_INPUT. Anything else malformed still does, so it gets fixed.
+ */
+function downloadSha256(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const hex = value.trim().replace(/^sha256:/i, "");
+  return hex === "" ? undefined : hex;
 }
 
 /**

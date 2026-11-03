@@ -214,6 +214,41 @@ describe('ModelRegistry Unit Tests', () => {
     expect(mockModelStore.downloadFile).toHaveBeenCalledTimes(1);
   });
 
+  it('resolveModel should keep reporting progress to the other calls when one onProgress throws', async () => {
+    const native = holdNativeDownload();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const second: number[] = [];
+    const a = ModelRegistry.resolveModel('https://example.com/model.bin', {
+      onProgress: () => {
+        throw new Error('app bug');
+      },
+    });
+    native.report(0.25);
+    // Joins with a callback that throws on the progress it is sent at once
+    const b = ModelRegistry.resolveModel('https://example.com/model.bin', {
+      onProgress: (p) => {
+        if (p === 0.25) throw new Error('app bug');
+        second.push(p);
+      },
+    });
+    native.report(0.5);
+    native.finish('/downloaded/model.bin');
+
+    await expect(Promise.all([a, b])).resolves.toEqual(['/downloaded/model.bin', '/downloaded/model.bin']);
+    expect(second).toEqual([0.5]);
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
+  });
+
+  it('resolveModel should treat sha256s that differ only in case as the same download', async () => {
+    const native = holdNativeDownload();
+    const a = ModelRegistry.resolveModel('https://example.com/model.bin', { sha256: 'AB'.repeat(32) });
+    const b = ModelRegistry.resolveModel('https://example.com/model.bin', { sha256: 'ab'.repeat(32) });
+    native.finish('/downloaded/model.bin');
+    await Promise.all([a, b]);
+    expect(mockModelStore.downloadFile).toHaveBeenCalledTimes(1);
+  });
+
   it('resolveModel should treat the same headers in another order as the same download', async () => {
     const native = holdNativeDownload();
     const a = ModelRegistry.resolveModel('https://example.com/model.bin', { headers: { A: '1', B: '2' } });

@@ -727,14 +727,17 @@ export interface ModelStore extends HybridObject<{
    */
   getFileSizeBytes(absolutePath: string): number;
   listCachedFiles(): ModelFile[];
-  /** Deletes the cached file and any partial download of it. */
+  /** Deletes the cached file, any partial download of it, and the sha256 kept for it. */
   deleteFile(fileName: string): void;
   /**
    * Download `url` into the cache as `fileName`. A failed or interrupted
-   * download keeps its partial file when the server sent a validator and the
-   * size, and the next call for the same URL continues it with a Range
-   * request. `sha256` (lowercase hex, "" = no check) is checked before the
-   * file is moved into place.
+   * download keeps its partial file, synced to disk every 64 MB, when the
+   * server sent a validator and the size, and the next call for the same URL
+   * (its query aside) continues it from the last sync with a Range request.
+   * `sha256` (lowercase hex, "" = no check) is checked before the file is
+   * moved into place, and kept next to it: a cached file is returned when a
+   * download checked it against that sha256, hashed once when none did, and
+   * downloaded again when it is another revision.
    */
   downloadFile(
     url: string,

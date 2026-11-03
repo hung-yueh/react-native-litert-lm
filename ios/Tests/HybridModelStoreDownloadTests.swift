@@ -6,29 +6,35 @@ import NitroModules
 /// What HybridModelStore's download does when the network answers, against a
 /// stub server (a URLProtocol in front of the session) — the cases
 /// HybridModelStoreDownloadTest covers on Android: a partial download kept and
-/// continued with a Range request; the answers that start it over or keep it
-/// (a server that ignores the range, a 416, a 206 of another version, a 503);
-/// a continuation short of the whole file; two downloads of one file at once;
-/// the sha256 check; old partial downloads deleted when another download
-/// starts; and a new download that takes a 200 only.
+/// continued with a Range request (from the bytes synced to disk, under a new
+/// URL signature); the answers that start it over, keep it or discard it (a
+/// server that ignores the range, a 416, a 206 of another version, a 503, a
+/// 404); a continuation short of the whole file; two downloads of one file at
+/// once; the sha256 check and the hash kept for a cached file; old partial
+/// downloads deleted when another download starts; a download that would fill
+/// the disk; names the cache reserves; and a new download that takes a 200 only.
 final class HybridModelStoreDownloadTests: XCTestCase {
     private var store: HybridModelStore!
     private var names: [String] = []
     private let payload = Data((0..<(300 * 1024)).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) })
+    private var availableCapacity: ((String) -> Int64)!
 
     override func setUp() {
         super.setUp()
         StubServer.reset()
         ResumableDownload.protocolClasses = [StubServer.self]
+        availableCapacity = ResumableDownload.availableCapacity
         store = HybridModelStore()
     }
 
     override func tearDown() {
         for name in names {
-            for suffix in ["", ".tmp", ".tmp.json"] {
+            for suffix in ["", ".tmp", ".tmp.json", ".sha256"] {
                 try? FileManager.default.removeItem(atPath: path(name, suffix))
             }
         }
+        ResumableDownload.availableCapacity = availableCapacity
+        ResumableDownload.syncBytes = 64 << 20
         ResumableDownload.protocolClasses = []
         StubServer.reset()
         store = nil
@@ -53,9 +59,27 @@ final class HybridModelStoreDownloadTests: XCTestCase {
         (try? FileManager.default.attributesOfItem(atPath: path(name, suffix)))?[.size] as? Int
     }
 
-    private func download(_ name: String, sha256: String = "", progress: ProgressLog? = nil) throws -> Promise<String> {
-        try store.downloadFile(url: "https://stub.test/models/\(name)", fileName: name, headersJson: "{}",
+    private func download(_ name: String, sha256: String = "", progress: ProgressLog? = nil,
+                          query: String = "") throws -> Promise<String> {
+        try store.downloadFile(url: "https://stub.test/models/\(name)\(query)", fileName: name, headersJson: "{}",
                                sha256: sha256) { value in progress?.add(value) }
+    }
+
+    /// Writes a file into the models dir.
+    private func write(_ name: String, _ suffix: String = "", _ data: Data) throws {
+        try FileManager.default.createDirectory(atPath: (path(name) as NSString).deletingLastPathComponent,
+                                                withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: path(name, suffix), contents: data))
+    }
+
+    /// The record of a partial download, or the hash kept for a model (`.sha256`).
+    private func json(_ name: String, _ suffix: String) -> [String: Any]? {
+        FileManager.default.contents(atPath: path(name, suffix))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    }
+
+    private func modified(_ name: String, _ suffix: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path(name, suffix)))?[.modificationDate] as? Date
     }
 
     /// The promise's result, or a failure when it has not settled within `seconds`.
@@ -121,10 +145,10 @@ final class HybridModelStoreDownloadTests: XCTestCase {
     /// that named the file's version and size: the partial file stays. The
     /// connection drops once those bytes are on disk (a drop that comes before
     /// the session hands them over keeps nothing: testADropBeforeAnyByteIsWrittenStartsTheNextCallOver).
-    private func leavePartial(_ name: String, cut: Int, sha256: String = "") throws {
+    private func leavePartial(_ name: String, cut: Int, sha256: String = "", query: String = "") throws {
         let resume = DispatchSemaphore(value: 0)
         StubServer.enqueue(whole(pauseAfter: cut, resume: resume, dropAfter: cut))
-        let promise = try download(name, sha256: sha256)
+        let promise = try download(name, sha256: sha256, query: query)
         waitUntil("the download writes \(cut) bytes") { size(name, ".tmp") == cut }
         resume.signal()
         if case .success = settle(promise) {
@@ -266,6 +290,145 @@ final class HybridModelStoreDownloadTests: XCTestCase {
         XCTAssertNotNil(size(name, ".tmp.json"))
     }
 
+    func testAContinuationTheServerNoLongerHasDiscardsThePartialFile() throws {
+        for code in [404, 410] {
+            let name = fileName("gone\(code)")
+            try leavePartial(name, cut: 100 * 1024)
+            StubServer.enqueue(StubAnswer(status: code))
+
+            guard case .failure(let error) = settle(try download(name)) else {
+                return XCTFail("A \(code) must reject")
+            }
+
+            XCTAssertTrue(error.localizedDescription.contains("HTTP \(code)"), error.localizedDescription)
+            XCTAssertNil(size(name, ".tmp"))
+            XCTAssertNil(size(name, ".tmp.json"))
+            StubServer.forgetRequests()
+        }
+    }
+
+    func testASignedUrlWithANewSignatureContinuesThePartialFile() throws {
+        let name = fileName("signed")
+        try leavePartial(name, cut: 100 * 1024, query: "?X-Amz-Signature=one")
+        // The record keeps no signature
+        XCTAssertEqual(json(name, ".tmp.json")?["url"] as? String, "https://stub.test/models/\(name)")
+        StubServer.enqueue(rest(from: 100 * 1024))
+
+        let path = try resolved(try download(name, query: "?X-Amz-Signature=two"))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(StubServer.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=\(100 * 1024)-")
+    }
+
+    func testDeleteFileRemovesAPartialDownload() throws {
+        let name = fileName("deleted")
+        try leavePartial(name, cut: 100 * 1024)
+
+        try store.deleteFile(fileName: name)
+
+        waitUntil("the partial download goes") { size(name, ".tmp") == nil && size(name, ".tmp.json") == nil }
+    }
+
+    // MARK: - What reaches the disk
+
+    private func syncedBytes(_ name: String) -> Int? {
+        (json(name, ".tmp.json")?["syncedBytes"] as? NSNumber)?.intValue
+    }
+
+    func testADroppedDownloadRecordsWhatItSyncedToDisk() throws {
+        let name = fileName("synced")
+        try leavePartial(name, cut: 100 * 1024)
+
+        XCTAssertEqual(syncedBytes(name), 100 * 1024)
+    }
+
+    func testALongDownloadSyncsToDiskAsItGoes() throws {
+        ResumableDownload.syncBytes = 64 * 1024
+        let name = fileName("long")
+        let resume = DispatchSemaphore(value: 0)
+        StubServer.enqueue(whole(pauseAfter: 128 * 1024, resume: resume))
+
+        let running = try download(name)
+        waitUntil("the record counts synced bytes while the download runs") { (syncedBytes(name) ?? 0) >= 64 * 1024 }
+        XCTAssertNil(size(name))
+        resume.signal()
+
+        XCTAssertEqual(FileManager.default.contents(atPath: try resolved(running)), payload)
+    }
+
+    func testAResumeStartsAtTheLastByteSyncedToDisk() throws {
+        let name = fileName("powercut")
+        try leavePartial(name, cut: 100 * 1024)
+        // As after a power cut: the file holds more than the record says reached the disk
+        var record = try XCTUnwrap(json(name, ".tmp.json"))
+        record["syncedBytes"] = 64 * 1024
+        try JSONSerialization.data(withJSONObject: record).write(to: URL(fileURLWithPath: path(name, ".tmp.json")))
+        StubServer.enqueue(rest(from: 64 * 1024))
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(StubServer.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=\(64 * 1024)-")
+    }
+
+    func testARecordWithoutSyncedBytesStartsOver() throws {
+        let name = fileName("unsynced")
+        try leavePartial(name, cut: 100 * 1024)
+        var record = try XCTUnwrap(json(name, ".tmp.json"))
+        record["syncedBytes"] = nil
+        try JSONSerialization.data(withJSONObject: record).write(to: URL(fileURLWithPath: path(name, ".tmp.json")))
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(name))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertNil(StubServer.requests.first?.value(forHTTPHeaderField: "Range"))
+    }
+
+    func testADownloadThatWouldFillTheDiskFailsBeforeWritingAByte() throws {
+        // Room for the file, not for the margin on top
+        let room = Int64(payload.count)
+        ResumableDownload.availableCapacity = { _ in room }
+        let name = fileName("full")
+        StubServer.enqueue(whole())
+
+        guard case .failure(let error) = settle(try download(name)) else {
+            return XCTFail("A download the disk has no room for must reject")
+        }
+
+        XCTAssertTrue(error.localizedDescription.contains("Not enough free storage"), error.localizedDescription)
+        XCTAssertNil(size(name))
+        XCTAssertNil(size(name, ".tmp"))
+        XCTAssertNil(size(name, ".tmp.json"))
+    }
+
+    func testAContinuationThatWouldFillTheDiskKeepsThePartialFile() throws {
+        let name = fileName("fuller")
+        try leavePartial(name, cut: 100 * 1024)
+        ResumableDownload.availableCapacity = { _ in 0 }
+        StubServer.enqueue(rest(from: 100 * 1024))
+
+        guard case .failure(let error) = settle(try download(name)) else {
+            return XCTFail("A continuation the disk has no room for must reject")
+        }
+
+        XCTAssertTrue(error.localizedDescription.contains("Not enough free storage"), error.localizedDescription)
+        XCTAssertEqual(size(name, ".tmp"), 100 * 1024)
+        XCTAssertNotNil(size(name, ".tmp.json"))
+    }
+
+    func testNamesTheCacheReservesAreRejected() throws {
+        for name in ["x.tmp", "x.tmp.json", "x.sha256", ".", ""] {
+            XCTAssertThrowsError(try store.isCached(fileName: name), "\"\(name)\"")
+            let promise = try store.downloadFile(url: "https://stub.test/models/x", fileName: name,
+                                                 headersJson: "{}", sha256: "") { _ in }
+            if case .success = settle(promise) {
+                XCTFail("\"\(name)\" must be rejected")
+            }
+        }
+        XCTAssertEqual(StubServer.requests.count, 0)
+    }
+
     func testAContinuationShortOfTheWholeFileIsNotInstalled() throws {
         let name = fileName("short")
         try leavePartial(name, cut: 100 * 1024)
@@ -401,6 +564,103 @@ final class HybridModelStoreDownloadTests: XCTestCase {
         XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
     }
 
+    func testAContinuationThatStartsOverIsHashedFromItsFirstByte() throws {
+        let name = fileName("rehash")
+        try leavePartial(name, cut: 100 * 1024, sha256: sha256(payload))
+        // The part on disk was hashed before the request; the server ignores the range
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+    }
+
+    // MARK: - A cached file and a sha256
+
+    func testACachedFileIsHashedOnceAndTheResultKept() throws {
+        let name = fileName("cachedsha")
+        try write(name, "", payload)
+
+        XCTAssertEqual(try resolved(try download(name, sha256: sha256(payload))), path(name))
+
+        let kept = try XCTUnwrap(json(name, ".sha256"))
+        XCTAssertEqual(kept["sha256"] as? String, sha256(payload))
+        XCTAssertEqual((kept["size"] as? NSNumber)?.intValue, payload.count)
+        // The next call trusts the kept hash: it doesn't hash the file and write it again
+        try age(name, ".sha256", daysAgo: 1)
+        let before = modified(name, ".sha256")
+        XCTAssertEqual(try resolved(try download(name, sha256: sha256(payload))), path(name))
+        XCTAssertEqual(modified(name, ".sha256"), before)
+        XCTAssertEqual(StubServer.requests.count, 0)
+        // The kept hash is not a cached model of its own
+        XCTAssertEqual(try store.listCachedFiles().map(\.fileName).filter { $0.hasPrefix(name) }, [name])
+    }
+
+    func testACachedFileOfAnotherRevisionIsDownloadedAgain() throws {
+        let name = fileName("revised")
+        try write(name, "", Data(repeating: 1, count: 128))
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(StubServer.requests.count, 1)
+        XCTAssertEqual(json(name, ".sha256")?["sha256"] as? String, sha256(payload))
+    }
+
+    func testADownloadedFileIsNotHashedAgainOnTheNextCall() throws {
+        let name = fileName("fresh")
+        StubServer.enqueue(whole())
+        _ = try resolved(try download(name, sha256: sha256(payload)))
+        XCTAssertEqual(json(name, ".sha256")?["sha256"] as? String, sha256(payload))
+        try age(name, ".sha256", daysAgo: 1)
+        let before = modified(name, ".sha256")
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(modified(name, ".sha256"), before)
+        XCTAssertEqual(StubServer.requests.count, 1)
+    }
+
+    func testAKeptHashDoesNotVouchForAFileChangedSince() throws {
+        let name = fileName("rewritten")
+        StubServer.enqueue(whole())
+        let first = try resolved(try download(name, sha256: sha256(payload)))
+        // Something outside the store rewrites the file
+        try Data(repeating: 2, count: 256).write(to: URL(fileURLWithPath: first))
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(name, sha256: sha256(payload)))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertEqual(StubServer.requests.count, 2)
+    }
+
+    func testAFileInstalledWithoutASha256DropsTheKeptHash() throws {
+        let name = fileName("plain")
+        // The hash kept for a file that was deleted outside the store
+        try write(name, ".sha256", Data(#"{"sha256":"\#(String(repeating: "a", count: 64))","size":1,"modified":1}"#.utf8))
+        StubServer.enqueue(whole())
+
+        let path = try resolved(try download(name))
+
+        XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
+        XCTAssertNil(size(name, ".sha256"))
+    }
+
+    func testDeleteFileRemovesTheKeptHash() throws {
+        let name = fileName("hashkept")
+        StubServer.enqueue(whole())
+        _ = try resolved(try download(name, sha256: sha256(payload)))
+        XCTAssertNotNil(size(name, ".sha256"))
+
+        try store.deleteFile(fileName: name)
+
+        XCTAssertNil(size(name))
+        XCTAssertNil(size(name, ".sha256"))
+    }
+
     // MARK: - Partial downloads nothing has written to for a week
 
     private func age(_ name: String, _ suffix: String, daysAgo: Double) throws {
@@ -454,6 +714,22 @@ final class HybridModelStoreDownloadTests: XCTestCase {
 
         XCTAssertEqual(FileManager.default.contents(atPath: path), payload)
         XCTAssertEqual(StubServer.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=\(100 * 1024)-")
+    }
+
+    func testAWeekOldPartialDownloadWhoseContinuationFailsIsDiscarded() throws {
+        let name = fileName("abandoned")
+        try leavePartial(name, cut: 100 * 1024)
+        try age(name, ".tmp", daysAgo: 8)
+        try age(name, ".tmp.json", daysAgo: 8)
+        StubServer.enqueue(StubAnswer(status: 503))
+
+        guard case .failure(let error) = settle(try download(name)) else {
+            return XCTFail("A 503 must reject")
+        }
+
+        XCTAssertTrue(error.localizedDescription.contains("503"), error.localizedDescription)
+        XCTAssertNil(size(name, ".tmp"))
+        XCTAssertNil(size(name, ".tmp.json"))
     }
 
     func testAWeekOldPartialDownloadThatIsDownloadingStays() throws {

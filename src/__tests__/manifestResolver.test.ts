@@ -281,6 +281,17 @@ describe("resolutionFor", () => {
     expect(r?.contextLength).toBe(4096);
   });
 
+  it("passes a variant's sha256 on as a download takes it", () => {
+    const withSha = (sha256: unknown) => {
+      const m = lfmLike();
+      for (const v of m.variants) (v as { sha256?: unknown }).sha256 = sha256;
+      return resolutionFor(m, { platform: "android", backend: "gpu" })?.sha256;
+    };
+    expect(withSha(`sha256:${"d".repeat(64)}`)).toBe("d".repeat(64));
+    expect(withSha("")).toBeUndefined();
+    expect(withSha(null)).toBeUndefined();
+  });
+
   it("surfaces session_defaults.notes after the variant's notes, and the raw object", () => {
     const m = lfmLike();
     const r = resolutionFor(m, { platform: "android", backend: "gpu" });
