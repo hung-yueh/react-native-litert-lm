@@ -567,10 +567,11 @@ export function createStreamEventParser(
   <p>
     Number of tokens currently held in the conversation KV cache (prompt +
     history + generated tokens), read from the engine. Returns
-    <code>-1</code> while unknown: no model loaded, or just after a reset (on
-    <span class="pill android">Android</span>, until the next message
-    completes when the reset replays a transcript or gives up waiting for a
-    message it cancelled). The engine prefills the system prompt and tool
+    <code>-1</code> while unknown: no model loaded, just after a reset, and
+    until the next message completes when the reset replays a transcript
+    (the engine prefills it with that message) or, on
+    <span class="pill android">Android</span>, gives up waiting for a
+    message it cancelled. The engine prefills the system prompt and tool
     schemas with the first message, so the count includes them from then on:
     right after <code>loadModel()</code> or a reset, it leaves them out.
     Combine with <code>maxContextTokens</code> to

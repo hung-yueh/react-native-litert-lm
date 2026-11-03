@@ -266,7 +266,10 @@ function Chat() {
       <strong>Auto-load on mount, close on unmount.</strong> The hook creates
       the instance via <code>createLLM({ enableMemoryTracking, maxMemorySnapshots })</code>,
       loads on mount when <code>autoLoad</code> is true, and closes the
-      instance when the component unmounts — no manual cleanup needed.
+      instance when the component unmounts — no manual cleanup needed. A
+      download still running at unmount keeps going, and nothing loads into
+      the closed instance; the next mount joins that download instead of
+      starting another.
     </li>
     <li>
       <strong>Inline config objects are safe.</strong> The config is

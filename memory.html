@@ -261,7 +261,8 @@ try {
   <p>
     On a <code>createLLM</code> instance, <code>getMemoryForecast()</code> does
     the wiring for you — it reads <code>getContextTokenCount()</code> and the
-    active config, and returns <code>null</code> if no model is loaded. The
+    active config, and returns <code>null</code> if no model is loaded or the
+    count is unknown (see below). The
     <code>useModel</code> hook refreshes its <code>memoryForecast</code> after
     each <code>generate()</code> call.
   </p>
@@ -301,11 +302,12 @@ try {
     <p>
       Token counts are read from the engine on both platforms.
       <code>getMemoryForecast()</code> returns <code>null</code> while the count
-      is unknown: just after <code>resetConversation()</code> (on
-      <span class="pill android">Android</span>, until the next message completes
-      when the reset replays a transcript, as a <code>createConversation()</code>
-      switch back to a conversation with history does, or gives up waiting for a
-      message it cancelled). The engine prefills the system prompt and tool
+      is unknown: just after <code>resetConversation()</code>, and until the next
+      message completes when the reset replays a transcript, as a
+      <code>createConversation()</code> switch back to a conversation with history
+      does (the engine prefills it with that message), or, on
+      <span class="pill android">Android</span>, gives up waiting for a message it
+      cancelled. The engine prefills the system prompt and tool
       schemas with the first message, so the count includes them from then on:
       right after <code>loadModel()</code> or a reset, the forecast leaves them out.
     </p>
