@@ -66,6 +66,42 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
   });
 
+  /** A native download that runs until the test finishes it. */
+  function holdDownload() {
+    let finish!: (path: string) => void;
+    mockModelStore.downloadFile.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { finish = resolve; }),
+    );
+    return (path: string) => finish(path);
+  }
+
+  it('should not load the model into an instance closed while it was downloading', async () => {
+    const finish = holdDownload();
+    const load = llm.loadModel('https://example.com/model.litertlm');
+    llm.close();
+    finish('/mock/path/model.litertlm');
+
+    await expect(load).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' });
+    expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
+    expect(mockLiteRTLM.close).toHaveBeenCalled();
+    // And nothing loads into it afterwards
+    await expect(llm.loadModel('/mock/path/model.litertlm')).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' });
+    expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
+  });
+
+  it('should not load the model into an instance unloaded while it was downloading', async () => {
+    const finish = holdDownload();
+    const load = llm.loadModel('https://example.com/model.litertlm');
+    await llm.unload();
+    finish('/mock/path/model.litertlm');
+
+    await expect(load).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' });
+    expect(mockLiteRTLM.loadModel).not.toHaveBeenCalled();
+    // An unloaded instance loads again
+    await llm.loadModel('/mock/path/model.litertlm');
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledTimes(1);
+  });
+
   it('should throw an error for invalid model URL', async () => {
     await expect(llm.loadModel('https://example.com/'))
       .rejects.toThrow('Invalid model URL: https://example.com/');

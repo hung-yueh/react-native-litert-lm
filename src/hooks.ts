@@ -348,6 +348,11 @@ export function useModel(
 export interface UseEmbedderConfig extends EmbedderConfig {
   /** Load as soon as the hook mounts (default true) */
   autoLoad?: boolean;
+  /**
+   * Expected SHA-256 of the downloaded model (64 hex characters) — see
+   * `ModelDownloadOptions.sha256`. Ignored for a local path.
+   */
+  sha256?: string;
 }
 
 export interface UseEmbedderResult {
@@ -386,6 +391,7 @@ export function useEmbedder(pathOrUrl: string, config?: UseEmbedderConfig): UseE
 
   // Primitives keep the config stable across renders with inline objects.
   const autoLoad = config?.autoLoad ?? true;
+  const sha256 = config?.sha256;
   const backend = config?.backend;
   const visionBackend = config?.visionBackend;
   const audioBackend = config?.audioBackend;
@@ -425,7 +431,10 @@ export function useEmbedder(pathOrUrl: string, config?: UseEmbedderConfig): UseE
     setDownloadProgress(0);
     try {
       if (embedderRef.current) {
-        await embedderRef.current.loadModel(pathOrUrl, embedderConfig, setDownloadProgress);
+        await embedderRef.current.loadModel(pathOrUrl, embedderConfig, {
+          sha256,
+          onProgress: setDownloadProgress,
+        });
         setModelInfo(embedderRef.current.getModelInfo());
         setIsReady(true);
       }
@@ -433,7 +442,7 @@ export function useEmbedder(pathOrUrl: string, config?: UseEmbedderConfig): UseE
       setError(e.message || "Failed to load embedding model");
       setErrorCode(e instanceof LiteRTLMError ? e.code : null);
     }
-  }, [pathOrUrl, embedderConfig]);
+  }, [pathOrUrl, embedderConfig, sha256]);
 
   useEffect(() => {
     if (autoLoad) load();

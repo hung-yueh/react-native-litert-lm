@@ -763,6 +763,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         ready = false
         conversation?.let { live ->
             conversation = null
+            messageStartedIn = null
             if (generationsRunning > 0) runCatching { live.cancelProcess() }
             retiredConversations += live
         }
@@ -790,6 +791,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 val eng = stateLock.withLock {
                     ready = false
                     retireConversationLocked(timeoutMs = null)
+                    // Nothing runs and nothing is live, so nothing records a count until a
+                    // load: let go of the closed conversation the last one belonged to
+                    contextTokens.set(null)
                     engine.also { engine = null }
                 }
                 eng?.close()
@@ -835,6 +839,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private fun retireConversationLocked(timeoutMs: Long?) {
         conversation?.let { live ->
             conversation = null
+            messageStartedIn = null
             if (generationsRunning > 0) runCatching { live.cancelProcess() }
             retiredConversations += live
         }

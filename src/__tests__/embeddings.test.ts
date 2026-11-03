@@ -240,6 +240,38 @@ describe("createEmbedder", () => {
     expect(syncErr.code).toBe("INVALID_INPUT");
   });
 
+  it("takes a progress callback or the download options as its third argument", async () => {
+    const onProgress = jest.fn();
+    await createEmbedder().loadModel("https://example.com/egemma.litertlm", undefined, onProgress);
+    expect(onProgress).toHaveBeenCalledWith(1.0);
+    await createEmbedder().loadModel("https://example.com/egemma.litertlm", undefined, {
+      sha256: "CD".repeat(32),
+      headers: { Authorization: "Bearer t" },
+    });
+    expect(mockModelStore.downloadFile).toHaveBeenLastCalledWith(
+      "https://example.com/egemma.litertlm",
+      "egemma.litertlm",
+      JSON.stringify({ Authorization: "Bearer t" }),
+      "cd".repeat(32),
+      expect.any(Function),
+    );
+  });
+
+  it("doesn't load into an embedder closed while its model was downloading", async () => {
+    let finish!: (path: string) => void;
+    mockModelStore.downloadFile.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { finish = resolve; }),
+    );
+    const embedder = createEmbedder();
+    const load = embedder.loadModel("https://example.com/egemma.litertlm");
+    embedder.close();
+    finish("/mock/path/egemma.litertlm");
+
+    await expect(load).rejects.toMatchObject({ code: "MODEL_NOT_LOADED" });
+    expect(mockEmbedder.loadModel).not.toHaveBeenCalled();
+    await expect(embedder.loadModel("/m/egemma.litertlm")).rejects.toMatchObject({ code: "MODEL_NOT_LOADED" });
+  });
+
   it("passes through readiness, memory and close", () => {
     const embedder = createEmbedder();
     expect(embedder.isReady()).toBe(true);
@@ -282,6 +314,20 @@ describe("useEmbedder", () => {
     expect((await result.current.embedBatch(["a", "b"])).length).toBe(2);
     unmount();
     expect(mockEmbedder.close).toHaveBeenCalled();
+  });
+
+  it("passes its sha256 to the download", async () => {
+    renderHook(() => useEmbedder("https://example.com/egemma.litertlm", { sha256: "EF".repeat(32) }));
+    await TestRenderer.act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(mockModelStore.downloadFile).toHaveBeenCalledWith(
+      "https://example.com/egemma.litertlm",
+      "egemma.litertlm",
+      "{}",
+      "ef".repeat(32),
+      expect.any(Function),
+    );
   });
 
   it("reports a typed load failure", async () => {

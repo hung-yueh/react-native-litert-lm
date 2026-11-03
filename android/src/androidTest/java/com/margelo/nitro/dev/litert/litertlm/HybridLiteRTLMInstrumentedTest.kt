@@ -720,6 +720,8 @@ class HybridLiteRTLMInstrumentedTest {
         class HeldRead(llm: HybridLiteRTLM, private val n: Int, private val afterEngine: Boolean) {
             val reached = CountDownLatch(1)
             val release = CountDownLatch(1)
+            /** Counted down when the held read hands its count back to the library. */
+            val finished = CountDownLatch(1)
             @Volatile var engineMs = -1.0
             val calls = AtomicInteger()
             init {
@@ -731,6 +733,7 @@ class HybridLiteRTLMInstrumentedTest {
                     read(conversation).also {
                         if (held) engineMs = (System.nanoTime() - start) / 1e6
                         if (held && afterEngine) { reached.countDown(); release.await(60, TimeUnit.SECONDS) }
+                        if (held) finished.countDown()
                     }
                 }
             }
@@ -804,13 +807,21 @@ class HybridLiteRTLMInstrumentedTest {
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
                 val firstToken = CountDownLatch(1)
                 val done = CountDownLatch(1)
-                llm.execute(arrayOf(textPart("Write two sentences about the ocean.")), { token, isDone ->
+                // Long enough to still be generating at the check on a fast backend
+                llm.execute(arrayOf(textPart("Write a long, detailed essay about the history of the bicycle.")), { token, isDone ->
                     if (!isDone && token.isNotEmpty()) firstToken.countDown()
                     if (isDone) done.countDown()
-                }, options(maxOutputTokens = 96.0))
+                }, options(maxOutputTokens = 512.0))
                 assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
                 hold.release.countDown()
-                Thread.sleep(300)
+                if (afterEngine) {
+                    assertTrue("the held read never finished", hold.finished.await(10, TimeUnit.SECONDS))
+                    // What it hands back is recorded (or not) under the lock right after
+                    Thread.sleep(50)
+                } else {
+                    // Let go before the engine, the read waits for the message to end: no signal to wait for
+                    Thread.sleep(300)
+                }
                 val generating = llm.getContextTokenCount()
                 val stillGenerating = done.count == 1L
                 assertTrue("the message never finished", done.await(60, TimeUnit.SECONDS))

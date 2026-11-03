@@ -576,10 +576,10 @@ rec.reason;     // why, including any backends it skipped</code></pre>
           <td>On Android the tool call surfaces once complete; still a typed <code>toolCall</code> event.</td>
         </tr>
         <tr>
-          <td><code>getContextTokenCount()</code> after <code>resetConversation()</code> replays a transcript</td>
-          <td>The engine's count once the new conversation is created</td>
+          <td><code>getContextTokenCount()</code> after a <code>resetConversation()</code> that gives up waiting for a message it cancelled</td>
+          <td>The new conversation's count</td>
           <td>-1 until the next message completes</td>
-          <td>The engine prefills a replayed transcript with the next message. Without a transcript, both read the new conversation's count after the reset, unless on Android the reset gives up waiting for a message it cancelled.</td>
+          <td>On both, a reset that replays a transcript reads -1 until the next message completes, since the engine prefills the transcript with that message; one without a transcript reads the new conversation's count.</td>
         </tr>
         <tr>
           <td>GPU backend</td>

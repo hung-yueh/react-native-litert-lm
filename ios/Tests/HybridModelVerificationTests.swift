@@ -126,6 +126,20 @@ final class HybridModelVerificationTests: XCTestCase {
         print("[verify] recall: \(color)")
         XCTAssertTrue(answer(color).lowercased().contains("teal"), "multi-turn: \(color)")
 
+        // A reset that replays the transcript: the engine prefills it with the
+        // next message, so the count stays unknown until that one completes
+        let transcript = try bridge.getHistory().map { ["role": $0.role.stringValue, "content": $0.content] }
+        try bridge.resetConversation(
+            historyJson: String(data: try JSONSerialization.data(withJSONObject: transcript), encoding: .utf8),
+            systemPrompt: nil)
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let replayed = try bridge.getContextTokenCount()
+        let again = try await ask(bridge, "What is my favorite color? Answer with one word.")
+        let afterReplay = try bridge.getContextTokenCount()
+        print("[verify] context tokens after a replaying reset \(Int(replayed)), after its first message \(Int(afterReplay)): \(again)")
+        XCTAssertEqual(replayed, -1, "context tokens after a reset that replays a transcript")
+        XCTAssertGreaterThan(afterReplay, 0, "context tokens after the replaying reset's first message")
+
         // Streaming
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
         var chunks = 0

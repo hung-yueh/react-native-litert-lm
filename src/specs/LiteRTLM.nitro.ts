@@ -639,9 +639,10 @@ export interface LiteRTLM extends HybridObject<{
    * while one generates. The engine prefills the system prompt and tool
    * schemas with the first message, so the count includes them from then on:
    * right after `loadModel()` or a reset, it leaves them out. Returns -1 while
-   * unknown: no model loaded, or just after a reset (on Android, until the
-   * next message completes when the reset replays a transcript or gives up
-   * waiting for a message it cancelled).
+   * unknown: no model loaded, just after a reset, and until the next message
+   * completes when the reset replays a transcript (the engine prefills it
+   * with that message) or, on Android, gives up waiting for a message it
+   * cancelled.
    *
    * Combine with `maxContextTokens` to warn before the context window
    * (and its memory) runs out — see `getMemoryForecast()` in the JS API.

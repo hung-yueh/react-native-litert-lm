@@ -175,6 +175,10 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   let loadedConfig: LLMConfig | undefined;
   let loadedModelInfo: ModelInfo | null = null;
   let lastBudgetLevel: BudgetLevel = "ok";
+  // Moved by unload() and close(): a load still downloading or reading its
+  // bundle when either is called stops before the engine loads anything
+  let teardowns = 0;
+  let closed = false;
 
   const checkBudget = (residentBytes: number, availableBytes: number) => {
     if (!budget?.onBudgetExceeded) return;
@@ -254,6 +258,10 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     if (config?.maxTokens !== undefined) {
       warnDeprecated("LLMConfig.maxTokens", "maxContextTokens and maxOutputTokens");
     }
+    if (closed) {
+      throw new LiteRTLMError("MODEL_NOT_LOADED", "This instance is closed; create a new one with createLLM().");
+    }
+    const teardownsAtStart = teardowns;
     const modelPath = await ModelRegistry.resolveModel(
       pathOrUrl,
       typeof download === "object" ? download : { onProgress: download },
@@ -310,6 +318,14 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
     }
 
+    // A download another instance shares keeps running after this one is
+    // closed (useModel closes on unmount): the model must not load into it
+    if (teardowns !== teardownsAtStart) {
+      throw new LiteRTLMError(
+        "MODEL_NOT_LOADED",
+        `The instance was ${closed ? "closed" : "unloaded"} before ${modelPath} finished loading; nothing was loaded.`,
+      );
+    }
     const result = await native.loadModel(modelPath, effectiveConfig).catch((e: unknown) => {
       throw toTypedError(e, "load", { modelPath, config: effectiveConfig });
     });
@@ -505,6 +521,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   };
 
   const unloadWrapped = async (): Promise<void> => {
+    teardowns++;
     await native.unload();
     loadedModelPath = undefined;
     loadedModelFileSize = -1;
@@ -512,6 +529,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     loadedModelInfo = null;
     resetConversationManagerState();
     recordMemorySnapshot();
+  };
+
+  const closeWrapped = (): void => {
+    teardowns++;
+    closed = true;
+    native.close();
   };
 
   return new Proxy(native, {
@@ -547,6 +570,9 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
       if (prop === "unload") {
         return unloadWrapped;
+      }
+      if (prop === "close") {
+        return closeWrapped;
       }
       if (prop === "createConversation") {
         return createConversation;

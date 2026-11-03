@@ -141,7 +141,7 @@ const best = topK(query, index, 3); // [{ index, score }], best first</code></pr
   loadModel(
     pathOrUrl: string,
     config?: EmbedderConfig,
-    onDownloadProgress?: (progress: number) =&gt; void,
+    download?: ((progress: number) =&gt; void) | ModelDownloadOptions,
   ): Promise&lt;void&gt;;
   embed(input: EmbeddingInput, options?: EmbeddingOptions): Promise&lt;Float32Array&gt;;
   embedBatch(inputs: EmbeddingInput[], options?: EmbeddingOptions): Promise&lt;Float32Array[]&gt;;
@@ -159,8 +159,8 @@ export type EmbeddingInput = string | MultimodalPart[];</div>
       <thead><tr><th>Method</th><th>Description</th></tr></thead>
       <tbody>
         <tr>
-          <td><code>loadModel(pathOrUrl, config?, onDownloadProgress?)</code></td>
-          <td>Download (for an HTTPS URL, reporting 0–1 progress) and load an embedding bundle, after the same pre-flight checks as <code>createLLM().loadModel()</code> — see <a href="#loading">Loading</a>.</td>
+          <td><code>loadModel(pathOrUrl, config?, download?)</code></td>
+          <td>Download (for an HTTPS URL) and load an embedding bundle, after the same pre-flight checks as <code>createLLM().loadModel()</code> — see <a href="#loading">Loading</a>. The third argument is a 0–1 progress callback, or the <a href="models.html#model-registry"><code>ModelDownloadOptions</code></a> (<code>onProgress</code>, <code>headers</code>, <code>sha256</code>). An embedder closed while its model downloads loads nothing, and rejects with <code>MODEL_NOT_LOADED</code>.</td>
         </tr>
         <tr>
           <td><code>embed(input, options?)</code></td>
@@ -511,9 +511,11 @@ const matches = topK(query, photos, 5);</code></pre>
   <p>
     The embedding counterpart of <a href="use-model.html">useModel</a>: it
     manages download, pre-flight, load and cleanup. <code>UseEmbedderConfig</code>
-    extends <a href="#embedderconfig"><code>EmbedderConfig</code></a> with one
-    field of its own, <code>autoLoad</code> (default <code>true</code>): load
-    as soon as the hook mounts.
+    extends <a href="#embedderconfig"><code>EmbedderConfig</code></a> with two
+    fields of its own: <code>autoLoad</code> (default <code>true</code>), to
+    load as soon as the hook mounts, and <code>sha256</code>, the downloaded
+    model's expected SHA-256 (see
+    <a href="models.html#model-registry"><code>ModelDownloadOptions</code></a>).
   </p>
   <div class="tbl-wrap">
     <table>

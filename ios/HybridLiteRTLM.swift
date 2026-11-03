@@ -52,6 +52,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         /// Moves on load, close and unload only, so a load finishing after a
         /// close() doesn't report itself ready.
         var lifecycle = 0
+        /// Set by close(): the instance loads nothing after it.
+        var closed = false
         /// Streams generating on the engine's own thread.
         var streamsInFlight = 0
         var memoryWarningCallback: ((MemoryWarningLevel, MemoryUsage) -> Void)?
@@ -155,11 +157,16 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             // Skip it if a newer reset, close or load has superseded it.
             guard self.engine != nil, self.withSnapshot({ $0.epoch }) == epoch else { return }
             // Replay in the engine's own message format, tool exchanges included.
+            let messagesJson = Self.engineMessagesJson(transcript)
             self.conversationFailure = self.createNewConversation(
-                initialMessagesJson: Self.engineMessagesJson(transcript),
+                initialMessagesJson: messagesJson,
                 systemPromptOverride: systemPrompt,
                 speculativeDecoding: speculativeDecoding
             )
+            // The engine prefills a replayed transcript with the next message,
+            // so until that one completes the count stays -1, as on Android:
+            // the 0 it reads now would understate what the message builds on.
+            guard messagesJson == nil else { return }
             let tokens = self.conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
             self.withSnapshot { s in
                 if s.epoch == epoch { s.contextTokens = tokens }
@@ -289,7 +296,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     /// warnings immediately, a message still generating is cancelled, and
     /// `queue` frees the engine once that message has stopped.
     public func close() throws {
-        withSnapshot { $0.memoryWarningCallback = nil }
+        withSnapshot { s in
+            s.memoryWarningCallback = nil
+            s.closed = true
+        }
         stopMemoryPressureMonitoring()
         markUnloaded()
         cancelGeneration()
@@ -320,10 +330,17 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         let promise = Promise<Void>()
         // A new load replaces the conversation: work still in flight in the
         // old one lands nowhere, and a close() or unload() that follows wins.
-        let lifecycle: Int = withSnapshot { s in
+        let started: Int? = withSnapshot { s in
+            guard !s.closed else { return nil }
             s.epoch += 1
             s.lifecycle += 1
             return s.lifecycle
+        }
+        guard let lifecycle = started else {
+            promise.reject(withError: LiteRTLMNativeError(
+                .load, status: "FAILED_PRECONDITION",
+                "This LiteRTLM instance is closed; create a new one with createLLM()."))
+            return promise
         }
         cancelGeneration()
         let teardownsBefore = Teardowns.mark()

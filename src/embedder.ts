@@ -1,7 +1,7 @@
 import { NitroModules } from "react-native-nitro-modules";
 import type { Embedder, EmbedderConfig, EmbeddingOptions } from "./specs/Embedder.nitro";
 import type { MemoryUsage, MultimodalPart } from "./specs/LiteRTLM.nitro";
-import { ModelRegistry } from "./modelRegistry";
+import { ModelRegistry, type ModelDownloadOptions } from "./modelRegistry";
 import { inspectModel, tryGetDeviceInfo } from "./modelInspector";
 import { LiteRTLMError, MemoryError } from "./core/errors";
 import { toLiteRTLMError, type NativePhase } from "./core/nativeError";
@@ -16,12 +16,14 @@ export interface EmbedderInstance {
   /**
    * Download (if a URL) and load an embedding bundle, after the same pre-flight
    * checks as `createLLM().loadModel()`: model type, runtime version, backend,
-   * memory. Rejects an LLM bundle with `MODEL_TYPE_MISMATCH`.
+   * memory. Rejects an LLM bundle with `MODEL_TYPE_MISMATCH`. The third
+   * argument is a download progress callback, or the options of
+   * `ModelRegistry.resolveModel()` (`onProgress`, `headers`, `sha256`).
    */
   loadModel(
     pathOrUrl: string,
     config?: EmbedderConfig,
-    onDownloadProgress?: (progress: number) => void,
+    download?: ((progress: number) => void) | ModelDownloadOptions,
   ): Promise<void>;
   /**
    * One vector for one input. The `Float32Array` views native memory — no
@@ -80,10 +82,21 @@ const toParts = (input: EmbeddingInput): MultimodalPart[] =>
 export function createEmbedder(): EmbedderInstance {
   const native = NitroModules.createHybridObject<Embedder>("Embedder");
   let modelInfo: ModelInfo | null = null;
+  // Moved by unload() and close(): a load still downloading or reading its
+  // bundle when either is called stops before the engine loads anything
+  let teardowns = 0;
+  let closed = false;
 
   return {
-    async loadModel(pathOrUrl, config, onDownloadProgress) {
-      const modelPath = await ModelRegistry.resolveModel(pathOrUrl, { onProgress: onDownloadProgress });
+    async loadModel(pathOrUrl, config, download) {
+      if (closed) {
+        throw new LiteRTLMError("MODEL_NOT_LOADED", "This embedder is closed; create a new one with createEmbedder().");
+      }
+      const teardownsAtStart = teardowns;
+      const modelPath = await ModelRegistry.resolveModel(
+        pathOrUrl,
+        typeof download === "object" ? download : { onProgress: download },
+      );
 
       let info: ModelInfo | null = null;
       try {
@@ -119,6 +132,14 @@ export function createEmbedder(): EmbedderInstance {
         }
       }
 
+      // A download another instance shares keeps running after this one is
+      // closed (useEmbedder closes on unmount): the model must not load into it
+      if (teardowns !== teardownsAtStart) {
+        throw new LiteRTLMError(
+          "MODEL_NOT_LOADED",
+          `The embedder was ${closed ? "closed" : "unloaded"} before ${modelPath} finished loading; nothing was loaded.`,
+        );
+      }
       await typed("load", () => native.loadModel(modelPath, effective));
       modelInfo = info;
     },
@@ -139,11 +160,14 @@ export function createEmbedder(): EmbedderInstance {
     getMemoryUsage: () => native.getMemoryUsage(),
 
     async unload() {
+      teardowns++;
       await native.unload();
       modelInfo = null;
     },
 
     close() {
+      teardowns++;
+      closed = true;
       native.close();
       modelInfo = null;
     },
