@@ -46,6 +46,14 @@ jobs:
       - name: Framework release guardrail
         run: npm run check-framework-release
 
+      # 0.8.1 reached npm without android/consumer-rules.pro, which
+      # android/build.gradle names (#31). Pack contents need lib/, so build first.
+      - name: Build
+        run: npm run build
+
+      - name: Package contents check
+        run: npm run check-package
+
   android-unit-tests:
     name: Android Unit Tests (Robolectric)
     runs-on: ubuntu-latest

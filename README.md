@@ -591,7 +591,7 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 | --- | --- |
 | React Native | 0.76+ |
 | react-native-nitro-modules | 0.37.1+ |
-| LiteRT-LM engine | 0.18.0 |
+| LiteRT-LM engine | 0.18.1 |
 | Android | API 26+, arm64-v8a — CPU (all), GPU (where OpenCL is present), NPU |
 | iOS | 15.1+, arm64 — CPU, GPU (Metal; auto-fallback to CPU) |
 

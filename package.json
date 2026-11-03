@@ -2,9 +2,9 @@
   "name": "react-native-litert-lm",
   "version": "0.8.1",
   "litertLm": {
-    "version": "0.18.0",
-    "androidMavenVersion": "0.18.0",
-    "iosGitTag": "v0.18.0"
+    "version": "0.18.1",
+    "androidMavenVersion": "0.18.1",
+    "iosGitTag": "v0.18.1"
   },
   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",
   "license": "MIT",
@@ -74,6 +74,7 @@
     "clean": "rm -rf lib android/build ios/build ios/Frameworks nitrogen/generated",
     "download-frameworks": "scripts/download-ios-frameworks.sh",
     "check-framework-release": "node scripts/check-framework-release.js",
+    "check-package": "node scripts/check-package-contents.js",
     "prepublishOnly": "node scripts/check-framework-release.js",
     "android": "expo run:android",
     "android:clean": "cd android && ./gradlew clean",

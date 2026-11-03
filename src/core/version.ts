@@ -3,7 +3,7 @@
  * (`litertLm.version` in package.json; a unit test keeps the two in sync).
  * Compare a bundle's `minRuntimeVersion` against it before loading.
  */
-export const LITERT_LM_VERSION = "0.18.0";
+export const LITERT_LM_VERSION = "0.18.1";
 
 /**
  * Compare dotted numeric versions ("0.17.0" vs "0.18"); a leading "v" and any
