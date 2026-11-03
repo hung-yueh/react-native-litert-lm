@@ -17,4 +17,5 @@ Release v0.7.4 prep and Metric Classification Model integration: upgraded LiteRT
 - None added to npm packages; bumped internal package version to 0.7.4.
 
 ## Known Blockers / Next Steps
-- Continue Kev LiteRT System-1 Decision Model implementation (KevModel spec, pair graph state prefill & question step caching).
+- Implement Laya Multilingual LiteRT System-1 Decision Model (LayaModel spec, two-stage graph execution, memory-mapped table lookup, choice/score/bool decision APIs).
+- Kev LiteRT System-1 Decision Model implementation (KevModel spec, pair graph state prefill & question step caching).
