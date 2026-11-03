@@ -394,7 +394,7 @@ await llm.loadModel(path, { backend });</code></pre>
   </p>
   <ul>
     <li><strong>The wrong kind of bundle</strong> rejects with <code>MODEL_TYPE_MISMATCH</code>: an embedding model in <code>createLLM()</code>, or an LLM in <code>createEmbedder()</code>.</li>
-    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>: its <code>minRuntimeVersion</code> is compared with <code>LITERT_LM_VERSION</code>, the engine this package ships (<code>"0.18.0"</code>).</li>
+    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>: its <code>minRuntimeVersion</code> is compared with <code>LITERT_LM_VERSION</code>, the engine this package ships (<code>"0.18.1"</code>).</li>
     <li><strong>With <code>backend</code> omitted</strong>, the bundle's preferred backend that this device can run is used (CPU when the bundle declares none). A per-SoC NPU build on another phone rejects with <code>UNSUPPORTED</code>.</li>
     <li><strong>Image and audio encoders</strong> load only if the bundle has them, on the backends it declares; <code>multimodal: false</code> keeps an engine text-only.</li>
     <li><strong><code>maxContextTokens</code></strong> above the bundle's maximum is clamped, so the memory estimate and the engine agree.</li>
