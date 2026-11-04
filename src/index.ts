@@ -42,6 +42,20 @@ export {
   defaultMetricTokenizer,
 } from "./metricModel";
 
+// Laya Multilingual System-1 Decision Model
+export type {
+  LayaModel,
+  LayaModelConfig,
+  LayaDecisionRequest,
+  LayaDecisionResponse,
+  LayaChoiceResult,
+  LayaScoreResult,
+  LayaBoolResult,
+  LayaDecisionResult,
+  LayaModelInstance,
+} from "./layaModel";
+export { createLayaModel } from "./layaModel";
+
 
 // Re-export memory tracking utilities (uses NitroModules.createNativeArrayBuffer v0.35+)
 export type {
