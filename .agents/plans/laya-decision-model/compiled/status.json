@@ -1,0 +1,61 @@
+{
+  "updated": "2026-11-03T22:01:30-06:00",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Define Nitro Spec and Register in nitro.json",
+      "depends_on": [],
+      "status": "done",
+      "commit": "76f9e6f",
+      "notes": "Defined LayaModel.nitro.ts and added to nitro.json autolinking"
+    },
+    {
+      "id": "T2",
+      "title": "Run Nitrogen code generation",
+      "depends_on": ["T1"],
+      "status": "done",
+      "commit": "8c515ce",
+      "notes": "Ran npx nitrogen, generating HybridLayaModelSpec for Android, iOS, C++"
+    },
+    {
+      "id": "T3",
+      "title": "Implement Android Kotlin Native Runtime and Components",
+      "depends_on": ["T2"],
+      "status": "done",
+      "commit": "c371e23",
+      "notes": "Implemented HybridLayaModel.kt and laya components (DecisionGraph, LayaEmbeddings, LayaTokenizer, LayaPromptBuilder, LayaDecoder, LayaCalibration, LayaJson)"
+    },
+    {
+      "id": "T4",
+      "title": "Implement iOS Swift Native Bridge",
+      "depends_on": ["T2"],
+      "status": "done",
+      "commit": "9b204bb",
+      "notes": "Implemented HybridLayaModel.swift conforming to HybridLayaModelSpec"
+    },
+    {
+      "id": "T5",
+      "title": "Implement TypeScript Interface and Decision Ergonomics",
+      "depends_on": ["T1"],
+      "status": "done",
+      "commit": "8c515ce",
+      "notes": "Created src/layaModel.ts with createLayaModel(), decideChoice(), decideScore(), decideBool(), decide()"
+    },
+    {
+      "id": "T6",
+      "title": "Integrate into Public Exports and Jest Mocks",
+      "depends_on": ["T5"],
+      "status": "done",
+      "commit": "ff1423f",
+      "notes": "Exported from src/index.ts and added mockLayaModel to react-native-nitro-modules mock"
+    },
+    {
+      "id": "T7",
+      "title": "Write Unit Tests and Verify Complete Test Suite",
+      "depends_on": ["T3", "T4", "T5", "T6"],
+      "status": "done",
+      "commit": "1ae8c6b",
+      "notes": "Added src/__tests__/layaModel.test.ts. All 15 test suites and 200 tests passing"
+    }
+  ]
+}

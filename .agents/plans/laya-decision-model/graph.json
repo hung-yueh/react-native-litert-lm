@@ -1,0 +1,93 @@
+{
+  "level": "T",
+  "nodes": [
+    {
+      "id": "T1",
+      "title": "Define Nitro Spec and Register in nitro.json",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": [],
+      "produces": ["src/specs/LayaModel.nitro.ts", "nitro.json"],
+      "consumes": [],
+      "est_complexity": "S"
+    },
+    {
+      "id": "T2",
+      "title": "Run Nitrogen code generation",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T1"],
+      "produces": ["nitrogen/generated/"],
+      "consumes": ["src/specs/LayaModel.nitro.ts", "nitro.json"],
+      "est_complexity": "S"
+    },
+    {
+      "id": "T3",
+      "title": "Implement Android Kotlin Native Runtime and Components",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T2"],
+      "produces": [
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLayaModel.kt",
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/laya/LayaTokenizer.kt",
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/laya/LayaEmbeddings.kt",
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/laya/LayaPromptBuilder.kt",
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/laya/LayaDecoder.kt",
+        "android/src/main/java/com/margelo/nitro/dev/litert/litertlm/laya/LayaCalibration.kt"
+      ],
+      "consumes": ["nitrogen/generated/"],
+      "est_complexity": "M"
+    },
+    {
+      "id": "T4",
+      "title": "Implement iOS Swift Native Bridge",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T2"],
+      "produces": ["ios/HybridLayaModel.swift"],
+      "consumes": ["nitrogen/generated/"],
+      "est_complexity": "S"
+    },
+    {
+      "id": "T5",
+      "title": "Implement TypeScript Interface and Decision Ergonomics",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T1"],
+      "produces": ["src/layaModel.ts"],
+      "consumes": ["src/specs/LayaModel.nitro.ts"],
+      "est_complexity": "M"
+    },
+    {
+      "id": "T6",
+      "title": "Integrate into Public Exports and Jest Mocks",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T5"],
+      "produces": ["src/index.ts", "src/__mocks__/react-native-nitro-modules.ts"],
+      "consumes": ["src/layaModel.ts"],
+      "est_complexity": "S"
+    },
+    {
+      "id": "T7",
+      "title": "Write Unit Tests and Verify Complete Test Suite",
+      "status": "leaf",
+      "subplan": null,
+      "depends_on": ["T3", "T4", "T5", "T6"],
+      "produces": ["src/__tests__/layaModel.test.ts"],
+      "consumes": ["src/layaModel.ts", "src/index.ts"],
+      "est_complexity": "M"
+    }
+  ],
+  "edges": [
+    { "from": "T1", "to": "T2" },
+    { "from": "T2", "to": "T3" },
+    { "from": "T2", "to": "T4" },
+    { "from": "T1", "to": "T5" },
+    { "from": "T5", "to": "T6" },
+    { "from": "T3", "to": "T7" },
+    { "from": "T4", "to": "T7" },
+    { "from": "T5", "to": "T7" },
+    { "from": "T6", "to": "T7" }
+  ]
+}

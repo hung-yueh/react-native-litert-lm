@@ -155,6 +155,61 @@ export const mockMetricModel = {
   close: jest.fn(),
 };
 
+export const mockLayaModel = {
+  isReady: jest.fn(() => false),
+  loadModel: jest.fn().mockResolvedValue(undefined),
+  decide: jest.fn(async (request: any) => {
+    const qtype = (request.type || "choice").toLowerCase();
+    let choice: string | undefined;
+    let score: number | undefined;
+    let noul: number | undefined;
+    let decision: boolean | undefined;
+    const probabilities: Record<string, number> = {};
+
+    if (qtype === "choice") {
+      let opts = request.options;
+      if (!opts && request.criteria) {
+        try {
+          const parsed = JSON.parse(request.criteria);
+          if (Array.isArray(parsed)) opts = parsed;
+          else if (typeof parsed === "object") opts = Object.keys(parsed);
+        } catch (_) {}
+      }
+      opts = opts && opts.length > 0 ? opts : ["default"];
+      choice = opts[0];
+      const p = 1.0 / opts.length;
+      opts.forEach((o: string) => {
+        probabilities[o] = p;
+      });
+    } else if (qtype === "score") {
+      score = 2.0;
+      probabilities["0"] = 0.1;
+      probabilities["1"] = 0.2;
+      probabilities["2"] = 0.4;
+      probabilities["3"] = 0.3;
+    } else if (qtype === "noul") {
+      noul = 0.95;
+      decision = true;
+      probabilities["false"] = 0.05;
+      probabilities["true"] = 0.95;
+    }
+
+    return {
+      type: request.type,
+      choice,
+      score,
+      noul,
+      decision,
+      probabilities,
+      confidence: 0.95,
+      actProbability: 1.0,
+      latencyMs: 12.5,
+    };
+  }),
+  unload: jest.fn().mockResolvedValue(undefined),
+  close: jest.fn(),
+};
+
 export const NitroModules = {
   createHybridObject: jest.fn((name: string) => {
     if (name === "LiteRTLM") {
@@ -165,6 +220,9 @@ export const NitroModules = {
     }
     if (name === "MetricModel") {
       return mockMetricModel;
+    }
+    if (name === "LayaModel") {
+      return mockLayaModel;
     }
     throw new Error(`Mock not implemented for hybrid object: ${name}`);
   }),

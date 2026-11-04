@@ -478,6 +478,218 @@ metricModel.close();
 12. `Assertiveness`
 13. `Playfulness`
 
+## Decision Models & Laya Multilingual System-1
+
+### What is a Decision Model? (System-1 vs. System-2)
+
+While generative LLMs (**System-2**, e.g., Gemma, Llama, Qwen) autoregressively sample one token at a time to compose freeform text, **Decision Models** (**System-1**) are non-autoregressive discriminative models designed for ultra-low latency, deterministic inference:
+
+| Dimension | Generative LLMs (System-2) | Decision Models (System-1 / Laya) |
+| --- | --- | --- |
+| **Primary Task** | Freeform text generation, chat, tool-calling | Classification, scoring, binary verification |
+| **Inference Latency** | 500ms – 5,000ms+ (streaming tokens) | **<10ms – 60ms** (single forward pass) |
+| **Memory Footprint** | 1.5 GB – 4.0 GB+ RAM | **~30 MB – 80 MB** RAM |
+| **Output Type** | Autoregressive text string | Calibrated probability distribution & score |
+| **Hallucination Risk** | Non-zero | **Zero** (constrained categorical / ordinal heads) |
+| **Ideal Mobile Workflows** | Drafting replies, deep summaries, agentic tools | Triage, sentiment/tone scoring, intent routing, yes/no checks |
+
+### Model Bundle Structure & Asset Acquisition
+
+Unlike single-file `.litertlm` bundles, a Laya decision model is packaged as a directory containing 5 coordinated assets:
+
+```text
+models/laya_multilingual/
+├── tokenizer.json                 # HuggingFace fast BPE tokenizer with ranked merge pairs
+├── token_embeddings_fp16.bin      # Mapped token embeddings table (512-dim FP16)
+├── token_embeddings.json          # Embeddings metadata (vocab_size, hidden_dim)
+├── laya_ml_s256_embeds_wfp16.tflite # Main decision graph with multi-head attention
+├── laya_ml_act_head_fp32.tflite   # Action/escalation head graph (actProbability)
+└── laya_ml_calibration.json       # Temperature/platt scaling calibration factors
+```
+
+Download the official weights from Hugging Face:
+👉 **[litert-community/Laya-Multilingual-LiteRT](https://huggingface.co/litert-community/Laya-Multilingual-LiteRT)**
+
+> [!IMPORTANT]
+> `loadModel()` requires an **absolute directory path** containing all required files. If `tokenizer.json` or `token_embeddings_fp16.bin` is missing from the directory, `loadModel()` will throw an `IllegalArgumentException`.
+
+#### Setting Up Model Assets in React Native / Expo
+
+Store the bundle in your app's persistent storage (e.g., `FileSystem.documentDirectory`):
+
+```typescript
+import * as FileSystem from 'expo-file-system';
+import { createLayaModel } from 'react-native-litert-lm';
+
+const LAYA_DIR = `${FileSystem.documentDirectory}models/laya_multilingual/`;
+
+// 1. Verify all required files exist before loading
+async function isLayaBundleAvailable(): Promise<boolean> {
+  const tokenizer = await FileSystem.getInfoAsync(`${LAYA_DIR}tokenizer.json`);
+  const embeddings = await FileSystem.getInfoAsync(`${LAYA_DIR}token_embeddings_fp16.bin`);
+  return tokenizer.exists && embeddings.exists;
+}
+
+// 2. Load model once assets are present
+async function initLaya() {
+  const ready = await isLayaBundleAvailable();
+  if (!ready) {
+    console.warn('Laya bundle not found. Download or extract model files first.');
+    return null;
+  }
+
+  const laya = createLayaModel();
+  await laya.loadModel(LAYA_DIR, {
+    accelerator: 'gpu', // GPU with automatic CPU fallback
+    numThreads: 4,      // CPU worker threads
+    window: 256,        // Sequence token window (defaults to 256)
+  });
+  return laya;
+}
+```
+
+For development or automated testing on Android via ADB:
+```bash
+adb push ./path/to/laya_multilingual/. /data/user/0/<your.package.id>/files/models/laya_multilingual/
+```
+
+### The Three Decision Primitives
+
+Laya models evaluate an input `state` under specific `instructions` across three core decision types:
+
+#### 1. Categorical Choice (`decideChoice`)
+Picks the most suitable category from a set of options or dictionary descriptions:
+
+```typescript
+// Categorical triage with label descriptions
+const intent = await laya.decideChoice(
+  "I was billed twice for my subscription this month. Please refund me.",
+  "What is the customer's intent?",
+  {
+    refund: "money returned or transaction reversed",
+    tech_support: "troubleshooting bugs or technical assistance",
+    billing: "general invoicing or subscription inquiries",
+  }
+);
+
+console.log(intent.choice);        // "refund"
+console.log(intent.probabilities); // { refund: 0.985, tech_support: 0.005, billing: 0.010 }
+console.log(intent.confidence);    // 0.972 (entropy-normalized confidence in [0.0, 1.0])
+console.log(intent.actProbability);// 0.89  (probability from the escalation head)
+console.log(intent.latencyMs);     // e.g. 14.2ms
+```
+
+You can also pass a simple array of string options:
+```typescript
+const sentiment = await laya.decideChoice(
+  "Great update! The new layout is so much faster.",
+  "Analyze sentiment",
+  ["positive", "neutral", "negative"]
+);
+console.log(sentiment.choice); // "positive"
+```
+
+#### 2. Ordinal Score (`decideScore`)
+Evaluates where an input falls along an ordered scale (e.g. Likert scale, urgency, or tonal dimensions). The resulting `score` represents the expectation $\sum (i \times p_i)$:
+
+```typescript
+const urgency = await laya.decideScore(
+  "Production database is locked and checkouts are failing globally!",
+  "Rate the severity level",
+  ["Low", "Medium", "High", "Critical"] // levels 0, 1, 2, 3
+);
+
+console.log(urgency.score);        // 2.94 (very close to 3.0 = Critical)
+console.log(urgency.probabilities);// { "0": 0.001, "1": 0.012, "2": 0.035, "3": 0.952 }
+console.log(urgency.confidence);   // 0.938
+```
+
+#### 3. Boolean Statement Verification (`decideBool`)
+Evaluates whether a proposition holds true given the context (`noul` primitive), returning both a boolean decision ($p \ge 0.5$) and a calibrated continuous probability:
+
+```typescript
+const escalation = await laya.decideBool(
+  "I need to speak to your manager right now! This is ridiculous.",
+  "Does the customer require human manager escalation?"
+);
+
+console.log(escalation.decision);    // true
+console.log(escalation.probability); // 0.982
+console.log(escalation.confidence);  // 0.965
+```
+
+Custom positive/negative criteria can optionally be supplied:
+```typescript
+const isUrgent = await laya.decideBool(
+  "Can you review this whenever you get a chance next week?",
+  "Is immediate action required?",
+  { false: "can wait or no rush", true: "requires immediate attention" }
+);
+console.log(isUrgent.decision); // false
+console.log(isUrgent.probability); // 0.041
+```
+
+### Action Head (`actProbability`)
+
+Every decision query returns `actProbability` ($\in [0.0, 1.0]$). This is calculated by a dedicated action head (`laya_ml_act_head_fp32.tflite`) trained to predict whether the situation warrants proactive intervention or external escalation, independently of the specific categorical classification.
+
+### State Context & Token Window Budgeting
+
+The `state` parameter accepts a raw string or any JSON-serializable object (conversation turns, user profiles, metadata):
+
+```typescript
+const state = {
+  contact: { name: "Alice", relationship: "colleague" },
+  recent_messages: [
+    { sender: "Alice", text: "Are we still on for the 2pm sync?" },
+    { sender: "User", text: "Running 5 mins late!" }
+  ],
+  target_message: "Can we reschedule to 3pm instead?",
+};
+
+const tone = await laya.decideScore(
+  state,
+  "Rate directness of the target message",
+  ["Indirect", "Somewhat Direct", "Direct", "Blunt"]
+);
+```
+
+> [!TIP]
+> **Token Window Budgeting**: Laya evaluates inputs within a fixed sequence window (default `256` tokens). Because instructions, special tokens, and candidate criteria masks take precedence, serialized `state` is right-truncated if it exceeds the remaining budget. Place high-priority context (such as the target message and immediate turn) at the beginning of your state object.
+
+### Configuration Reference (`LayaModelConfig`)
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `accelerator` | `'gpu' \| 'cpu'` | `'gpu'` | Inference accelerator. Uses OpenCL/Metal with automatic fallback to CPU. |
+| `numThreads` | `number` | `4` | Worker threads to utilize when executing on CPU. |
+| `window` | `number` | `256` | Sequence token context length. |
+| `mainGraphName` | `string` | `'laya_ml_s256_embeds_wfp16.tflite'` | Custom filename for the main decision graph. |
+| `actGraphName` | `string` | `'laya_ml_act_head_fp32.tflite'` | Custom filename for the action head graph. |
+| `calibrationFile` | `string` | `'laya_ml_calibration.json'` | Custom filename for temperature calibration factors. |
+
+### Lifecycle & Memory Management
+
+Laya models are lightweight (~30MB–80MB), but should be managed cleanly in resource-constrained mobile apps:
+
+```typescript
+const laya = createLayaModel();
+
+// 1. Check readiness
+if (!laya.isReady()) {
+  await laya.loadModel(modelDirPath);
+}
+
+// 2. Perform inference queries
+const result = await laya.decideChoice(...);
+
+// 3. Unload model graphs when idle to release native memory
+await laya.unload();
+
+// 4. Destroy instance permanently
+laya.close();
+```
+
 ## Architecture
 
 Nitro Modules (JSI) bridges TypeScript to a per-platform native engine:
