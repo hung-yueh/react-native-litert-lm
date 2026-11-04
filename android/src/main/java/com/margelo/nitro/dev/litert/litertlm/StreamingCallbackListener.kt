@@ -1,6 +1,7 @@
 package com.margelo.nitro.dev.litert.litertlm
 
 import android.util.Log
+import com.google.ai.edge.litertlm.BenchmarkInfo
 import com.google.ai.edge.litertlm.Content
 import java.util.concurrent.CancellationException
 
@@ -17,6 +18,8 @@ internal class StreamingCallbackListener(
     private val userMessage: String,
     private val onStatsReady: (GenerationStats) -> Unit,
     private val onFailure: ((Throwable) -> Unit)? = null,
+    /** The engine's numbers for the finished message, if it has them (exactStats). */
+    private val engineStats: () -> BenchmarkInfo? = { null },
 ) : com.google.ai.edge.litertlm.MessageCallback {
 
     private val startTime = System.nanoTime()
@@ -52,19 +55,9 @@ internal class StreamingCallbackListener(
         val (text, calls) = splitToolCallMarkers(fullResponse)
         history.add(Message(Role.MODEL, text, calls.takeIf { it.isNotEmpty() }?.toTypedArray(), null))
 
-        // Compute stats using heuristic token counts (~4 chars/token)
         val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
         val ttftMs = if (firstTokenTime > 0) (firstTokenTime - startTime) / 1_000_000.0 else 0.0
-        val promptTokens = userMessage.length / 4.0
-        val completionTokens = fullResponse.length / 4.0
-        onStatsReady(GenerationStats(
-            promptTokens = promptTokens,
-            completionTokens = completionTokens,
-            totalTokens = promptTokens + completionTokens,
-            timeToFirstToken = ttftMs,
-            totalTime = elapsedMs,
-            tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
-        ))
+        onStatsReady(generationStats(engineStats(), userMessage, fullResponse, elapsedMs, ttftMs))
 
         Log.d("StreamingCallbackListener", "Streaming done. Length: ${fullResponse.length}, TTFT: ${ttftMs.toLong()}ms, Total: ${elapsedMs.toLong()}ms")
 

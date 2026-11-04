@@ -97,6 +97,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
     private var enableSpeculativeDecoding: Bool = false
+    /// LLMConfig.exactStats: the live engine is in benchmark mode, so getStats() can read its numbers.
+    private(set) var exactStats: Bool = false
     private var chatTemplate: String?
     private var numThreads: Int?
     private var maxVisionTokensPerImage: Int?
@@ -379,6 +381,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
                 self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
+                self.exactStats = config.exactStats ?? false
                 self.chatTemplate = config.chatTemplate
                 self.numThreads = config.numThreads.map { Int($0) }
                 self.maxVisionTokensPerImage = config.maxVisionTokensPerImage.map { Int($0) }
@@ -396,6 +399,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
+                self.exactStats = false
                 self.chatTemplate = nil
                 self.numThreads = nil
                 self.maxVisionTokensPerImage = nil
@@ -461,7 +465,9 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 defer { litert_lm_engine_settings_delete(s) }
                 
                 litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxContextTokens))
-                litert_lm_engine_settings_enable_benchmark(s)
+                if self.exactStats {
+                    litert_lm_engine_settings_enable_benchmark(s)
+                }
 
                 // Memory tuning knobs (v0.14 C API)
                 if let threads = self.numThreads {

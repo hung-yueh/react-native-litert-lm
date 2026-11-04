@@ -125,6 +125,42 @@ class HybridLiteRTLMTests: XCTestCase {
         }
     }
 
+    /// With the engine's numbers (`LLMConfig.exactStats`): its last turns, not the text length.
+    func testStatsFromTheEngine() {
+        let engine = HybridLiteRTLM.EngineTurn(
+            promptTokens: 20, prefillTokensPerSecond: 200, completionTokens: 128, decodeTokensPerSecond: 64)
+        let streamed = HybridLiteRTLM.generationStats(
+            engine: engine, promptCharacters: 2, responseCharacters: 7, totalTime: 4, streamedFirstToken: 0.09)
+        XCTAssertEqual(streamed.promptTokens, 20)
+        XCTAssertEqual(streamed.completionTokens, 128)
+        XCTAssertEqual(streamed.totalTokens, 148)
+        XCTAssertEqual(streamed.timeToFirstToken, 90, accuracy: 1e-9, "a streamed message times its own first token")
+        XCTAssertEqual(streamed.totalTime, 4000)
+        XCTAssertEqual(streamed.tokensPerSecond, 64)
+
+        let blocking = HybridLiteRTLM.generationStats(
+            engine: engine, promptCharacters: 2, responseCharacters: 7, totalTime: 4, streamedFirstToken: nil)
+        XCTAssertEqual(blocking.timeToFirstToken, 100, accuracy: 1e-9, "20 tokens at 200 tokens/s: the last prefill")
+    }
+
+    /// Without the engine's numbers: about 4 characters per token, as on Android.
+    func testStatsWithoutTheEngine() {
+        let streamed = HybridLiteRTLM.generationStats(
+            engine: nil, promptCharacters: 8, responseCharacters: 4, totalTime: 2, streamedFirstToken: 0.09)
+        XCTAssertEqual(streamed.promptTokens, 2)
+        XCTAssertEqual(streamed.completionTokens, 1)
+        XCTAssertEqual(streamed.totalTokens, 3)
+        XCTAssertEqual(streamed.timeToFirstToken, 90, accuracy: 1e-9)
+        XCTAssertEqual(streamed.tokensPerSecond, 0.5)
+
+        let blocking = HybridLiteRTLM.generationStats(
+            engine: nil, promptCharacters: 8, responseCharacters: 4, totalTime: 2, streamedFirstToken: nil)
+        XCTAssertEqual(blocking.timeToFirstToken, 0)
+        let instant = HybridLiteRTLM.generationStats(
+            engine: nil, promptCharacters: 0, responseCharacters: 0, totalTime: 0, streamedFirstToken: nil)
+        XCTAssertEqual(instant.tokensPerSecond, 0, "no time, no rate")
+    }
+
     func testDeleteModelCleanupLogic() async throws {
         bridge.loadedModelPath = "/path/to/my_loaded_model.litertlm"
 

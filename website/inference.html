@@ -543,20 +543,51 @@ export function createStreamEventParser(
 
   <h3 id="getstats">getStats()</h3>
   <div class="sig">getStats(): GenerationStats</div>
-  <p>Returns the last generation statistics:</p>
+  <p>
+    Returns the statistics of the last completed message. The token counts and
+    <code>tokensPerSecond</code> are estimates unless the model was loaded with
+    <code>exactStats: true</code>:
+  </p>
   <div class="tbl-wrap">
     <table>
-      <thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+      <thead><tr><th>Field</th><th>Type</th><th>Without <code>exactStats</code> (the default)</th><th>With <code>exactStats</code></th></tr></thead>
       <tbody>
-        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Number of tokens in the prompt.</td></tr>
-        <tr><td><code>completionTokens</code></td><td><code>number</code></td><td>Number of tokens generated.</td></tr>
-        <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>Total tokens (prompt + completion).</td></tr>
-        <tr><td><code>timeToFirstToken</code></td><td><code>number</code></td><td>Time to first token in milliseconds.</td></tr>
-        <tr><td><code>totalTime</code></td><td><code>number</code></td><td>Total generation time in milliseconds.</td></tr>
-        <tr><td><code>tokensPerSecond</code></td><td><code>number</code></td><td>Tokens per second.</td></tr>
+        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Estimate: the message's text length ÷ 4.</td><td>The engine's count for the message's prefill: with the chat template's tokens, and the system prompt, tool schemas or a replayed transcript if it prefilled them with this message.</td></tr>
+        <tr><td><code>completionTokens</code></td><td><code>number</code></td><td>Estimate: the reply's text length ÷ 4.</td><td>The engine's count for the message's decode, which can include the end-of-turn token when the model stopped by itself.</td></tr>
+        <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>The sum of the two estimates.</td><td><code>promptTokens + completionTokens</code>: what the message added to <code>getContextTokenCount()</code>.</td></tr>
+        <tr><td><code>timeToFirstToken</code></td><td><code>number</code></td><td>A streamed message's own first token, in milliseconds. <code>0</code> for a message sent without a callback.</td><td>The same for a streamed message. Without a callback, the engine's time for the message's prefill.</td></tr>
+        <tr><td><code>totalTime</code></td><td><code>number</code></td><td colspan="2">Total generation time in milliseconds.</td></tr>
+        <tr><td><code>tokensPerSecond</code></td><td><code>number</code></td><td>The estimated <code>completionTokens</code> over <code>totalTime</code>, which also covers the prefill.</td><td>The engine's decode rate for the message.</td></tr>
       </tbody>
     </table>
   </div>
+  <p>
+    The estimates are about 4 characters per token, which is far off for CJK
+    text: a 331-character Japanese prompt of 218 tokens is estimated at 83, and
+    its 128-token reply at 50. <code>getContextTokenCount()</code> is exact with
+    or without the flag, so knowing when the context fills up doesn't need it.
+  </p>
+  <p>
+    <code>exactStats</code> is set at load and creates the engine in benchmark
+    mode, which can add to the time to the first token. Measured with Gemma 4
+    E2B on the GPU (20-token prompt, 128 tokens generated):
+  </p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>Load</th><th>Time to first token</th><th>Decode</th></tr></thead>
+      <tbody>
+        <tr><td>Pixel 8a</td><td>No difference (about 31 s)</td><td>+24 ms (262 → 286 ms)</td><td>No difference (about 15 tok/s)</td></tr>
+        <tr><td>Galaxy S26 (LiteRT-LM 0.18.0)</td><td>No difference</td><td>+16–20 ms (94 → 113 ms)</td><td>No difference</td></tr>
+        <tr><td>iPhone 18 Pro</td><td>No difference (about 0.6 s)</td><td>No difference (49 ms)</td><td>No difference (about 89 tok/s)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    With a GPU bundle such as <code>gemma-4-E2B-it-gpu.litertlm</code>, the
+    engine also logs a warning after every prefill and decode on Android
+    (<code>GetProfileSummary not implemented for backend: GpuArtisan</code>). The
+    counts and the replies are not affected.
+  </p>
 
   <h3 id="counttokens">countTokens()</h3>
   <div class="sig">countTokens(text: string): number</div>

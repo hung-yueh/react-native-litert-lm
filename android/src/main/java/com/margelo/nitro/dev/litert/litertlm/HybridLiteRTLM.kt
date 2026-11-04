@@ -20,9 +20,11 @@ import androidx.annotation.Keep
 import androidx.annotation.VisibleForTesting
 import com.facebook.proguard.annotations.DoNotStrip
 import dev.litert.litertlm.LiteRTLMInitProvider
+import com.google.ai.edge.litertlm.BenchmarkInfo
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.margelo.nitro.dev.litert.litertlm.Backend
@@ -230,6 +232,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
+    /** LLMConfig.exactStats: the live engine is in benchmark mode, so getStats() can read its numbers. */
+    @Volatile
+    private var exactStats: Boolean = false
     private var chatTemplate: String? = null
     private var numThreads: Int? = null
     private var maxVisionTokensPerImage: Int? = null
@@ -304,6 +309,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             cleanupInternal()
 
             // Apply configuration
+            exactStats = config?.exactStats ?: false
             config?.let { cfg ->
                 cfg.backend?.let { backend = it }
                 cfg.temperature?.let { temperature = it }
@@ -405,6 +411,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         EngineFlags.forEngine(
                             speculativeDecoding = if (enableSpeculativeDecoding) true else null,
                             maxVisionTokensPerImage = maxVisionTokensPerImage,
+                            benchmark = exactStats,
                         ) { Engine(cfg).also { it.initialize() } }
                     } catch (e: Exception) {
                         Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
@@ -871,6 +878,22 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
+    /**
+     * The engine's numbers for the message that just finished on [conversation].
+     * Null without exactStats (an engine not in benchmark mode throws instead of
+     * answering) or if the engine can't say: the message's stats are then estimated.
+     */
+    @OptIn(ExperimentalApi::class)
+    private fun engineStats(conversation: Conversation): BenchmarkInfo? {
+        if (!exactStats) return null
+        return try {
+            conversation.getBenchmarkInfo()
+        } catch (e: Exception) {
+            Log.w(TAG, "No engine stats for this message, estimating them: ${e.message}")
+            null
+        }
+    }
+
     /** Tokens in [conversation]'s KV cache, or -1 when the engine can't say. */
     private fun tokenCount(conversation: Conversation): Double = try {
         conversation.getTokenCount().toDouble()
@@ -1247,7 +1270,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             lastStats = stats
                             recordContextTokens(conv)
                         },
-                        onFailure = { e -> errorRef.set(e) }
+                        onFailure = { e -> errorRef.set(e) },
+                        engineStats = { engineStats(conv) },
                     )
 
                     try {
@@ -1307,16 +1331,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                     history.add(Message(Role.MODEL, textResponse, responseMsg.toolCalls.toNitroToolCalls(), null))
 
-                    val promptTokens = userTextRepresentation.length / 4.0
-                    val completionTokens = response.length / 4.0
-                    lastStats = GenerationStats(
-                        promptTokens = promptTokens,
-                        completionTokens = completionTokens,
-                        totalTokens = promptTokens + completionTokens,
-                        timeToFirstToken = 0.0,
-                        totalTime = elapsedMs,
-                        tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
-                    )
+                    lastStats = generationStats(engineStats(conv), userTextRepresentation, response, elapsedMs)
                     recordContextTokens(conv)
                     response
                 }
@@ -1337,6 +1352,35 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun countTokens(text: String): Double {
         return -1.0
     }
+}
+
+/**
+ * What getStats() reports for a finished message: the engine's last prefill and
+ * decode turns when it has them (exactStats), else about 4 characters per token.
+ * [streamedFirstTokenMs] is null for a blocking message, which has no first
+ * token to time: that reports the last prefill's time, or 0 without the engine's numbers.
+ */
+internal fun generationStats(
+    engine: BenchmarkInfo?,
+    prompt: String,
+    response: String,
+    elapsedMs: Double,
+    streamedFirstTokenMs: Double? = null,
+): GenerationStats {
+    val promptTokens = engine?.lastPrefillTokenCount?.toDouble() ?: (prompt.length / 4.0)
+    val completionTokens = engine?.lastDecodeTokenCount?.toDouble() ?: (response.length / 4.0)
+    val lastPrefillMs = engine?.takeIf { it.lastPrefillTokensPerSecond > 0 }
+        ?.let { it.lastPrefillTokenCount / it.lastPrefillTokensPerSecond * 1000.0 }
+        ?: 0.0
+    return GenerationStats(
+        promptTokens = promptTokens,
+        completionTokens = completionTokens,
+        totalTokens = promptTokens + completionTokens,
+        timeToFirstToken = streamedFirstTokenMs ?: lastPrefillMs,
+        totalTime = elapsedMs,
+        tokensPerSecond = engine?.lastDecodeTokensPerSecond
+            ?: if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0,
+    )
 }
 
 /** Map the Nitro ThinkingOptions to the LiteRT-LM SDK config (engine defaults: enabled, unlimited budget). */

@@ -202,6 +202,7 @@ class HybridLiteRTLMInstrumentedTest {
         chatTemplate: String? = null,
         maxVisionTokensPerImage: Double? = null,
         numThreads: Double? = null,
+        exactStats: Boolean? = null,
     ) = LLMConfig(
         systemPrompt = null, backend = backend, maxContextTokens = 2048.0, maxOutputTokens = 64.0,
         maxTokens = null, temperature = 0.0, topK = 1.0, topP = 1.0, multimodal = multimodal,
@@ -210,7 +211,7 @@ class HybridLiteRTLMInstrumentedTest {
         numThreads = numThreads, maxVisionTokensPerImage = maxVisionTokensPerImage, gpu = null,
         singleThreadedExecution = null, prefillChunkSize = null,
         activationDataType = activationDataType, loraPath = null, audioLoraPath = null, loraRank = null,
-        streamToolCalls = null, toolCallChannelName = null, forceLoad = true,
+        streamToolCalls = null, toolCallChannelName = null, forceLoad = true, exactStats = exactStats,
     )
 
     private fun options(
@@ -275,9 +276,9 @@ class HybridLiteRTLMInstrumentedTest {
 
     /**
      * Throughput baseline for engine bumps — reported, not gated. One warm-up
-     * plus three measured runs of a fixed prompt under greedy sampling. The
-     * Kotlin SDK exposes no benchmark info, so rates are measured from the
-     * stream itself: TTFT = first chunk, decode = chunks/s after the first
+     * plus three measured runs of a fixed prompt under greedy sampling. Rates
+     * are measured from the stream itself (this engine isn't in benchmark mode,
+     * see LLMConfig.exactStats): TTFT = first chunk, decode = chunks/s after the first
      * (one chunk per decoded token on this path). Sorts first, so the shared
      * engine's load is timed here.
      */
@@ -944,6 +945,199 @@ class HybridLiteRTLMInstrumentedTest {
         val one = decodeTps(1.0)
         val default = decodeTps(null)
         println("[android-int][threads] decode ${"%.2f".format(one)} tok/s on 1 thread, ${"%.2f".format(default)} tok/s default")
+    }
+
+    /** Wait for a Nitro Promise on the test thread; returns its value or throws its error. */
+    private fun <T> settle(promise: com.margelo.nitro.core.Promise<T>): T {
+        val settled = CountDownLatch(1)
+        var value: Result<T>? = null
+        promise
+            .then { value = Result.success(it); settled.countDown() }
+            .catch { value = Result.failure(it); settled.countDown() }
+        assertTrue(
+            "The promise did not settle within ${GENERATE_TIMEOUT_SEC}s",
+            settled.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS),
+        )
+        return value!!.getOrThrow()
+    }
+
+    /**
+     * LLMConfig.exactStats: a message's promptTokens + completionTokens is what
+     * it added to getContextTokenCount(), streamed or blocking, ending at the
+     * limit or by itself, in the first message of a conversation or a later
+     * one, after a reset (one that cancels a message, one with a system prompt,
+     * one replaying a transcript). The flag holds for one load; without it,
+     * the stats are the estimate.
+     */
+    @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+    @Test
+    fun testX_exactStatsAddUpToTheContextGrowth() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        Teardowns.await(Teardowns.mark())
+        val path = model!!.absolutePath
+        val explain = "Explain what on-device AI means in simple terms."
+        val cjk = "日本の四季について、それぞれの季節の特徴を詳しく説明してください。"
+
+        val llm = HybridLiteRTLM()
+        try {
+            llm.loadModelBlocking(path, llmConfig(exactStats = true))
+            assertFalse(
+                "the SDK's flag is process-wide: an engine created next must not inherit it",
+                com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark,
+            )
+
+            /** One message; [before] is the count it starts from (0 when a reset leaves it unknown). */
+            fun send(label: String, prompt: String, maxOut: Double, stream: Boolean = true): GenerationStats {
+                val before = knownContextTokens(llm).coerceAtLeast(0.0)
+                val opts = options(maxOutputTokens = maxOut)
+                val reply = if (stream) generate(llm, prompt, opts).first
+                    else settle(llm.execute(arrayOf(textPart(prompt)), null, opts))
+                val stats = llm.getStats()
+                val grew = llm.getContextTokenCount() - before
+                println(
+                    "[android-int][exact-stats] $label: prompt ${stats.promptTokens} + completion ${stats.completionTokens}, " +
+                        "context grew $grew, first token ${"%.1f".format(stats.timeToFirstToken)} ms, " +
+                        "${"%.2f".format(stats.tokensPerSecond)} tok/s, ${reply.length} chars",
+                )
+                assertEquals("$label: prompt + completion", grew, stats.promptTokens + stats.completionTokens, 0.0)
+                assertEquals("$label: total", grew, stats.totalTokens, 0.0)
+                assertTrue("$label: no decode rate", stats.tokensPerSecond > 0)
+                assertTrue("$label: no first-token time", stats.timeToFirstToken > 0)
+                assertTrue("$label: ${stats.timeToFirstToken} > ${stats.totalTime}", stats.timeToFirstToken <= stats.totalTime)
+                return stats
+            }
+
+            val first = send("first message, up to the limit", explain, 64.0)
+            val second = send("second message", "Now say that again in one short sentence.", 64.0)
+            assertTrue(
+                "the first token is timed per message, not repeated: ${first.timeToFirstToken}",
+                first.timeToFirstToken != second.timeToFirstToken,
+            )
+            send("blocking", "Say hello.", 16.0, stream = false)
+
+            llm.resetConversation(null, null, null)
+            send("after a reset", explain, 16.0)
+
+            // A cancelled message leaves nothing behind in the next one's numbers.
+            val firstToken = CountDownLatch(1)
+            val cancelled = CountDownLatch(1)
+            llm.execute(arrayOf(textPart("Write a long essay about the history of the bicycle.")), { token, isDone ->
+                if (token.isNotEmpty()) firstToken.countDown()
+                if (isDone) cancelled.countDown()
+            }, options(maxOutputTokens = 512.0))
+            assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+            llm.resetConversation(null, null, null)
+            assertTrue("the cancelled message never ended", cancelled.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
+            send("after a reset that cancelled a message", explain, 16.0)
+
+            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null)
+            send("after a reset with a system prompt", "Say hello.", 16.0)
+
+            // The engine prefills a replayed transcript with the next message.
+            val transcript = JSONArray(
+                listOf(
+                    JSONObject(mapOf("role" to "user", "content" to "My lucky number is 47. Acknowledge briefly.")),
+                    JSONObject(mapOf("role" to "model", "content" to "Understood — your lucky number is 47.")),
+                )
+            ).toString()
+            llm.resetConversation(transcript, null, null)
+            assertEquals("the count is unknown until that message", -1.0, llm.getContextTokenCount(), 0.0)
+            val replayed = send("after a replaying reset", "What is my lucky number?", 16.0)
+            assertTrue("the prefill holds the transcript: ${replayed.promptTokens}", replayed.promptTokens > 30)
+
+            llm.resetConversation(null, null, null)
+            val exactCjk = send("CJK", cjk, 64.0)
+
+            // The next load without the flag: the estimate, and a context count as exact as before.
+            llm.loadModelBlocking(path, llmConfig())
+            val before = knownContextTokens(llm)
+            val (reply, _) = generate(llm, cjk, options(maxOutputTokens = 64.0))
+            val estimate = llm.getStats()
+            println(
+                "[android-int][exact-stats] CJK without the flag: prompt ${estimate.promptTokens} + completion " +
+                    "${estimate.completionTokens}, context grew ${llm.getContextTokenCount() - before} " +
+                    "(with the flag: ${exactCjk.promptTokens} + ${exactCjk.completionTokens})",
+            )
+            assertEquals(cjk.length / 4.0, estimate.promptTokens, 0.0)
+            assertEquals(reply.length / 4.0, estimate.completionTokens, 0.0)
+            assertTrue("a streamed message still times its first token", estimate.timeToFirstToken > 0)
+            assertEquals(
+                "the same message, whatever the flag",
+                exactCjk.promptTokens + exactCjk.completionTokens,
+                llm.getContextTokenCount() - before,
+                0.0,
+            )
+            settle(llm.execute(arrayOf(textPart("Say hello.")), null, options(maxOutputTokens = 16.0)))
+            assertEquals("a blocking message without the flag", 0.0, llm.getStats().timeToFirstToken, 0.0)
+
+            // And back on with the next load.
+            llm.loadModelBlocking(path, llmConfig(exactStats = true))
+            send("reloaded with the flag", explain, 16.0)
+        } finally {
+            llm.close()
+            Teardowns.await(Teardowns.mark())
+        }
+    }
+
+    /**
+     * LLMConfig.exactStats with an image or audio in the message, and in the
+     * text message after it; and a load with the flag that fails: the flag
+     * doesn't outlive it.
+     */
+    @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+    @Test
+    fun testXb_exactStatsWithMediaAndAFailedLoad() {
+        val model = modelFile()
+        val image = fixture("test.jpeg")
+        val audio = fixture("test.wav")
+        assumeTrue("model, test.jpeg or test.wav not pushed — skipping", model != null && image != null && audio != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val junk = File(context.cacheDir, "not_a_model.litertlm").apply { writeBytes(ByteArray(4096) { 0x42 }) }
+        try {
+            failedLoad(junk.absolutePath, llmConfig(exactStats = true))
+        } finally {
+            junk.delete()
+        }
+        assertFalse(
+            "a failed load must restore the global flag",
+            com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark,
+        )
+
+        val llm = HybridLiteRTLM()
+        try {
+            llm.loadModelBlocking(
+                model!!.absolutePath,
+                llmConfig(backend = Backend.CPU, multimodal = true, exactStats = true),
+            )
+            assumeTrue("this bundle has no vision or audio encoder", llm.hasVisionEncoder && llm.hasAudioEncoder)
+            val mismatches = mutableListOf<String>()
+            fun send(label: String, vararg parts: MultimodalPart) {
+                val before = knownContextTokens(llm)
+                val (text, _) = generateParts(llm, arrayOf(*parts), options(maxOutputTokens = 32.0))
+                val stats = llm.getStats()
+                val grew = llm.getContextTokenCount() - before
+                println(
+                    "[android-int][exact-stats] $label: prompt ${stats.promptTokens} + completion " +
+                        "${stats.completionTokens}, context grew $grew, ${text.length} chars",
+                )
+                if (stats.promptTokens + stats.completionTokens != grew) mismatches.add(label)
+            }
+            send("image", textPart("Describe this picture in one short sentence."), mediaPart(PartType.IMAGE, image!!))
+            send("the text message after an image", textPart("Say that again in one word."))
+            llm.resetConversation(null, null, null)
+            send("audio", textPart("What do you hear? One short sentence."), mediaPart(PartType.AUDIO, audio!!))
+            send("the text message after audio", textPart("Say that again in one word."))
+            assertTrue("prompt + completion differs from the context's growth: $mismatches", mismatches.isEmpty())
+        } finally {
+            llm.close()
+            Teardowns.await(Teardowns.mark())
+        }
     }
 
     /** Speculative decoding on for one conversation (Gemma 4 E2B ships an MTP drafter); speed reported. */

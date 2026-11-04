@@ -13,16 +13,27 @@ import com.google.ai.edge.litertlm.ExperimentalFlags
 internal object EngineFlags {
     private val lock = Any()
 
-    /** Create an engine with speculative decoding and a per-image vision-token cap (null: defaults). */
-    fun <T> forEngine(speculativeDecoding: Boolean?, maxVisionTokensPerImage: Int?, create: () -> T): T =
+    /**
+     * Create an engine with speculative decoding and a per-image vision-token
+     * cap (null: defaults), in benchmark mode if asked.
+     */
+    fun <T> forEngine(
+        speculativeDecoding: Boolean?,
+        maxVisionTokensPerImage: Int?,
+        benchmark: Boolean,
+        create: () -> T,
+    ): T =
         synchronized(lock) {
+            val benchmarkBefore = ExperimentalFlags.enableBenchmark
             val speculative = ExperimentalFlags.enableSpeculativeDecoding
             val budget = ExperimentalFlags.visualTokenBudget
+            ExperimentalFlags.enableBenchmark = benchmark
             ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
             ExperimentalFlags.visualTokenBudget = maxVisionTokensPerImage
             try {
                 create()
             } finally {
+                ExperimentalFlags.enableBenchmark = benchmarkBefore
                 ExperimentalFlags.enableSpeculativeDecoding = speculative
                 ExperimentalFlags.visualTokenBudget = budget
             }

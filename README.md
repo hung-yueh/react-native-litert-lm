@@ -562,6 +562,7 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 | `chatTemplate` | the bundle's | Jinja template that replaces the bundle's — see [Chat templates](#chat-templates) |
 | `enableSpeculativeDecoding` | `false` | Multi-token prediction, if the bundle has a drafter |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
+| `exactStats` | `false` | `getStats()` reports the engine's numbers for each message instead of estimates (about 4 characters per token); what it costs is on the [docs site](https://litert.dev/inference.html#getstats) |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `maxVisionTokensPerImage`, `gpu.metalResidencySet`, `loraPath` — see [Tuning knobs](#tuning-knobs) |
 | `singleThreadedExecution` | `false` | One engine thread, for debugging and reproducibility (iOS) |
 

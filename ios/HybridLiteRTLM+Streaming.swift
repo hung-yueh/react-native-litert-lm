@@ -22,7 +22,8 @@ class ExecuteStreamContext {
     var rawResponse: String = ""
     var fullResponse: String = ""
     var lastEmittedLength: Int = 0
-    var tokenCount: Int = 0
+    /// When the first token reached the callback.
+    var firstTokenTime: Date?
 
     init(
         userLabel: String,
@@ -131,6 +132,7 @@ extension HybridLiteRTLM {
         }
         if finalText.count > ctx.lastEmittedLength {
             let si = finalText.index(finalText.startIndex, offsetBy: ctx.lastEmittedLength)
+            if ctx.firstTokenTime == nil { ctx.firstTokenTime = Date() }
             ctx.onToken(String(finalText[si...]), false)
         }
         ctx.fullResponse = finalText
@@ -143,8 +145,8 @@ extension HybridLiteRTLM {
                 inputTurns: ctx.inputTurns,
                 modelResponse: ctx.fullResponse,
                 startTime: ctx.startTime,
-                conversation: self.conversation,
-                tokenCount: ctx.tokenCount
+                firstTokenTime: ctx.firstTokenTime,
+                conversation: self.conversation
             )
             ctx.onToken("", true)
             ctx.cleanup()
@@ -168,9 +170,9 @@ extension HybridLiteRTLM {
         let safe = safeEmitLength(processed)
         if safe > ctx.lastEmittedLength {
             let chars = Array(processed)
+            if ctx.firstTokenTime == nil { ctx.firstTokenTime = Date() }
             ctx.onToken(String(chars[ctx.lastEmittedLength..<safe]), false)
             ctx.lastEmittedLength = safe
-            ctx.tokenCount += 1
         }
     }
 }

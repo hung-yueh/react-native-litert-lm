@@ -225,6 +225,12 @@
           <td><code>false</code></td>
           <td>Skip the automatic pre-flight memory check in <code>loadModel()</code> and load even when the estimate says the model likely does not fit. JS-side only — the native engine ignores this field.</td>
         </tr>
+        <tr>
+          <td><code>exactStats</code></td>
+          <td><code>boolean</code></td>
+          <td><code>false</code></td>
+          <td>Create the engine in benchmark mode, so <code>getStats()</code> reports the engine's own numbers for each message instead of estimates. It can add to the time to the first token — see <a href="inference.html#getstats">getStats()</a>.</td>
+        </tr>
       </tbody>
     </table>
   </div>
