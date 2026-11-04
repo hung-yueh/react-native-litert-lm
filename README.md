@@ -478,6 +478,50 @@ metricModel.close();
 12. `Assertiveness`
 13. `Playfulness`
 
+## Laya Multilingual System-1 Decision Model
+
+For ultra-low latency (<60ms) on-device System-1 decision making across 100+ languages, `react-native-litert-lm` provides native support for [Laya Multilingual LiteRT](https://huggingface.co/litert-community/Laya-Multilingual-LiteRT).
+
+Laya supports three canonical decision types:
+- **`choice`**: Categorical classification picking one of several options.
+- **`score`**: Ordinal evaluation scoring the input along a scale (e.g. 0 to 4).
+- **`bool`**: Binary statement verification (yes/no).
+
+```typescript
+import { createLayaModel } from "react-native-litert-lm";
+
+const laya = createLayaModel();
+await laya.loadModel("/path/to/laya_model_dir", { accelerator: "gpu" });
+
+// 1. Categorical Choice (e.g. support triage)
+const intent = await laya.decideChoice(
+  "I was billed twice for my subscription this month. Please refund me.",
+  "What is the customer's intent?",
+  { refund: "money returned or reversed", tech_support: "technical assistance", billing: "invoicing questions" }
+);
+console.log(intent.choice); // "refund"
+console.log(intent.probabilities); // { refund: 0.9954, ... }
+console.log(intent.confidence); // 0.958
+
+// 2. Ordinal Score (e.g. urgency or sentiment)
+const urgency = await laya.decideScore(
+  "Production server is down and checkout is failing!",
+  "Rate urgency level",
+  ["Low", "Medium", "High", "Critical"]
+);
+console.log(urgency.score); // e.g. 3.0 (Critical)
+
+// 3. Boolean Statement Verification
+const needsEscalation = await laya.decideBool(
+  "I need to speak to your manager right now!",
+  "Does the customer require manager escalation?"
+);
+console.log(needsEscalation.decision); // true
+console.log(needsEscalation.probability); // 0.98
+
+laya.close();
+```
+
 ## Architecture
 
 Nitro Modules (JSI) bridges TypeScript to a per-platform native engine:
