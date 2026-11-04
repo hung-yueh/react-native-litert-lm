@@ -22,6 +22,10 @@
     "MetricModel": {
       "ios": { "language": "swift", "implementationClassName": "HybridMetricModel" },
       "android": { "language": "kotlin", "implementationClassName": "HybridMetricModel" }
+    },
+    "LayaModel": {
+      "ios": { "language": "swift", "implementationClassName": "HybridLayaModel" },
+      "android": { "language": "kotlin", "implementationClassName": "HybridLayaModel" }
     }
   },
   "ignorePaths": ["**/node_modules"]
