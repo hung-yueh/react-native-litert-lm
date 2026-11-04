@@ -69,14 +69,14 @@
      - Calibrated softmax and Python-compatible rounding (4 decimal places).
 
 ## 4. Acceptance Criteria
-- [ ] Nitro specification `LayaModel.nitro.ts` created and registered in `nitro.json`.
-- [ ] Nitrogen code generation succeeds (`npx nitrogen`), generating Kotlin/Swift/C++ bridges.
-- [ ] Android Kotlin native implementation `HybridLayaModel.kt` executes main graph and act head with LiteRT `CompiledModel`.
-- [ ] iOS Swift bridge `HybridLayaModel.swift` compiles cleanly and satisfies `HybridLayaModelSpec`.
-- [ ] TypeScript public API `src/layaModel.ts` and exports in `src/index.ts` provide `createLayaModel()`, `decideChoice()`, `decideScore()`, `decideBool()`, and `decide()`.
-- [ ] Jest mocks updated in `src/__mocks__/react-native-nitro-modules.ts`.
-- [ ] Unit tests in `src/__tests__/layaModel.test.ts` verify all decision types, prompt construction, calibration, and error states.
-- [ ] Existing test suite (`npm test`) passes with 100% success.
+- [x] Nitro specification `LayaModel.nitro.ts` created and registered in `nitro.json`.
+- [x] Nitrogen code generation succeeds (`npx nitrogen`), generating Kotlin/Swift/C++ bridges.
+- [x] Android Kotlin native implementation `HybridLayaModel.kt` executes main graph and act head with LiteRT `CompiledModel`.
+- [x] iOS Swift bridge `HybridLayaModel.swift` compiles cleanly and satisfies `HybridLayaModelSpec`.
+- [x] TypeScript public API `src/layaModel.ts` and exports in `src/index.ts` provide `createLayaModel()`, `decideChoice()`, `decideScore()`, `decideBool()`, and `decide()`.
+- [x] Jest mocks updated in `src/__mocks__/react-native-nitro-modules.ts`.
+- [x] Unit tests in `src/__tests__/layaModel.test.ts` verify all decision types, prompt construction, calibration, and error states.
+- [x] Existing test suite (`npm test`) passes with 100% success.
 
 ## 5. Task Breakdown
 - **T1**: Nitro Spec & Configuration — `src/specs/LayaModel.nitro.ts` & `nitro.json`
