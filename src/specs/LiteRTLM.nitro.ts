@@ -458,9 +458,9 @@ export interface GenerationStats {
   /**
    * Tokens in the prompt. With `exactStats`, the engine's count for the
    * message: what it prefilled, so with the chat template's tokens, and the
-   * system prompt, tool schemas or a replayed transcript if it prefilled them
-   * with this message. Without it, an estimate from the message's own text
-   * (about 4 characters per token, far off for CJK text).
+   * system prompt or a replayed transcript if it prefilled them with this
+   * message. Without it, an estimate from the message's own text (about 4
+   * characters per token, far off for CJK text).
    */
   promptTokens: number;
   /**

@@ -552,7 +552,7 @@ export function createStreamEventParser(
     <table>
       <thead><tr><th>Field</th><th>Type</th><th>Without <code>exactStats</code> (the default)</th><th>With <code>exactStats</code></th></tr></thead>
       <tbody>
-        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Estimate: the message's text length ÷ 4.</td><td>The engine's count for the message's prefill: with the chat template's tokens, and the system prompt, tool schemas or a replayed transcript if it prefilled them with this message.</td></tr>
+        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Estimate: the message's text length ÷ 4.</td><td>The engine's count for the message's prefill: with the chat template's tokens, and the system prompt or a replayed transcript if it prefilled them with this message.</td></tr>
         <tr><td><code>completionTokens</code></td><td><code>number</code></td><td>Estimate: the reply's text length ÷ 4.</td><td>The engine's count for the message's decode, which can include the end-of-turn token when the model stopped by itself.</td></tr>
         <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>The sum of the two estimates.</td><td><code>promptTokens + completionTokens</code>: what the message added to <code>getContextTokenCount()</code>.</td></tr>
         <tr><td><code>timeToFirstToken</code></td><td><code>number</code></td><td>A streamed message's own first token, in milliseconds. <code>0</code> for a message sent without a callback.</td><td>The same for a streamed message. Without a callback, the engine's time for the message's prefill.</td></tr>
@@ -570,7 +570,7 @@ export function createStreamEventParser(
   <p>
     <code>exactStats</code> is set at load and creates the engine in benchmark
     mode, which can add to the time to the first token. Measured with Gemma 4
-    E2B on the GPU (20-token prompt, 128 tokens generated):
+    E2B on the GPU, with a 20-token prompt:
   </p>
   <div class="tbl-wrap">
     <table>
