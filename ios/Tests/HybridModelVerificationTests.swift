@@ -32,13 +32,23 @@ final class HybridModelVerificationTests: XCTestCase {
         return parts.count == 3 ? (parts[0], parts[1], parts[2]) : (0.0, 1.0, 1.0)
     }
 
+    /// Optional `on` or `off` (`TEST_RUNNER_LITERTLM_VERIFY_THINKING`); default the bundle's. A model
+    /// that thinks by default spends the short answers' token limits on its thought.
+    static var thinking: ThinkingOptions? {
+        switch ProcessInfo.processInfo.environment["LITERTLM_VERIFY_THINKING"] {
+        case "on": return ThinkingOptions(enabled: true, tokenBudget: nil)
+        case "off": return ThinkingOptions(enabled: false, tokenBudget: nil)
+        default: return nil
+        }
+    }
+
     private func text(_ s: String) -> MultimodalPart { .textPart(s) }
 
     private func config(tools: [ToolDefinition]? = nil) -> LLMConfig {
         LLMConfig(
             systemPrompt: nil, backend: .cpu, maxContextTokens: 2048, maxOutputTokens: 256, maxTokens: nil,
             temperature: Self.sampler.0, topK: Self.sampler.1, topP: Self.sampler.2, multimodal: false, tools: tools,
-            enableSpeculativeDecoding: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: nil,
+            enableSpeculativeDecoding: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: Self.thinking,
             numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
             prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
             streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true
@@ -74,7 +84,7 @@ final class HybridModelVerificationTests: XCTestCase {
             let cfg = LLMConfig(
                 systemPrompt: system, backend: .cpu, maxContextTokens: 2048, maxOutputTokens: 128, maxTokens: nil,
                 temperature: 0.0, topK: 1, topP: 1.0, multimodal: false, tools: nil,
-                enableSpeculativeDecoding: nil, chatTemplate: nil, enableStructuredOutput: nil, thinking: nil,
+                enableSpeculativeDecoding: nil, chatTemplate: nil, enableStructuredOutput: nil, thinking: Self.thinking,
                 numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
                 prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
                 streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true)

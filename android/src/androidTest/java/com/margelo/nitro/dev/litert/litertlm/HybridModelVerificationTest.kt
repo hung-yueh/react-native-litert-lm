@@ -53,10 +53,20 @@ class HybridModelVerificationTest {
         }
     }
 
+    /**
+     * Optional `-e verifyThinking on|off`; default the bundle's. A model that thinks by
+     * default spends the short answers' token limits on its thought.
+     */
+    private fun thinking(): ThinkingOptions? = when (InstrumentationRegistry.getArguments().getString("verifyThinking")) {
+        "on" -> ThinkingOptions(enabled = true, tokenBudget = null)
+        "off" -> ThinkingOptions(enabled = false, tokenBudget = null)
+        else -> null
+    }
+
     private fun config(tools: Array<ToolDefinition>? = null) = LLMConfig(
         systemPrompt = null, backend = Backend.CPU, maxContextTokens = 2048.0, maxOutputTokens = 256.0,
         maxTokens = null, temperature = 0.0, topK = 1.0, topP = 1.0, multimodal = false, tools = tools,
-        enableSpeculativeDecoding = null, chatTemplate = null, enableStructuredOutput = true, thinking = null,
+        enableSpeculativeDecoding = null, chatTemplate = null, enableStructuredOutput = true, thinking = thinking(),
         numThreads = null, maxVisionTokensPerImage = null, gpu = null, singleThreadedExecution = null,
         prefillChunkSize = null, activationDataType = null, loraPath = null, audioLoraPath = null, loraRank = null,
         streamToolCalls = null, toolCallChannelName = null, forceLoad = true,

@@ -784,25 +784,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         }
         
         if let tools = self.tools, !tools.isEmpty {
-            var toolsArray: [[String: Any]] = []
-            for tool in tools {
-                var functionMap: [String: Any] = ["name": tool.name, "description": tool.description]
-                if let data = tool.parametersJson.data(using: .utf8),
-                   let parsedParams = try? JSONSerialization.jsonObject(with: data, options: []) {
-                    functionMap["parameters"] = parsedParams
-                } else {
-                    // Don't silently drop the schema — the model would see a
-                    // tool with no parameters and hallucinate arguments.
-                    NSLog("[LiteRTLM] Tool '%@' has unparseable parametersJson — sending empty schema", tool.name)
-                    functionMap["parameters"] = [String: Any]()
-                }
-                toolsArray.append(["type": "function", "function": functionMap])
-            }
-            if let data = try? JSONSerialization.data(withJSONObject: toolsArray, options: []),
-               let jsonString = String(data: data, encoding: .utf8) {
-                jsonString.withCString { toolsC in
-                    litert_lm_conversation_config_set_tools(convConfig, toolsC)
-                }
+            Self.toolsJson(tools).withCString { toolsC in
+                litert_lm_conversation_config_set_tools(convConfig, toolsC)
             }
         }
         
@@ -966,18 +949,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 // "function","function":{"name":…,"arguments":{…}}}]} (verified on
                 // Gemma 4 E2B). Surface them in the <tool_call>{json}</tool_call>
                 // marker protocol the JS event parser understands instead of
-                // leaking the raw message JSON into the token stream.
-                if let toolCalls = json["tool_calls"] as? [[String: Any]] {
-                    for call in toolCalls {
-                        let function = (call["function"] as? [String: Any]) ?? call
-                        var payload: [String: Any] = [:]
-                        payload["name"] = function["name"] ?? ""
-                        payload["arguments"] = function["arguments"] ?? [String: Any]()
-                        if let payloadData = try? JSONSerialization.data(withJSONObject: payload),
-                           let payloadJson = String(data: payloadData, encoding: .utf8) {
-                            textResult += "<tool_call>\(payloadJson)</tool_call>"
-                        }
-                    }
+                // leaking the raw message JSON into the token stream. Made from
+                // the response's text, so the arguments keep the model's order.
+                if json["tool_calls"] is [[String: Any]],
+                   let calls = JSONText.member("tool_calls", of: jsonResponse).flatMap(JSONText.elements(of:)) {
+                    textResult += calls.map(Self.toolCallMarker).joined()
                 }
                 // A message-shaped payload never leaks raw JSON — if it carried
                 // neither text nor tool calls, it contributes nothing.

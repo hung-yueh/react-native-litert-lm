@@ -452,6 +452,80 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertFalse(HybridLiteRTLM.legacyMultimodalHint("/3n-dir/qwen.litertlm"))
     }
 
+    // Tool JSON is compared as exact text. A Swift dictionary changes its order
+    // with every launch, and chat templates write a tool's fields in the order
+    // they get them: LFM3 named its call after the description when that came first.
+
+    func testToolsJsonWritesNameDescriptionAndTheSchemaAsGiven() {
+        let schema = #"{"type":"object","required":["location"],"properties":{"location":{"type":"string"},"unit":{"enum":["c","f"]}}}"#
+        let json = HybridLiteRTLM.toolsJson([
+            ToolDefinition(name: "get_current_weather", description: #"The "current" weather."#, parametersJson: schema),
+            ToolDefinition(name: "ping", description: "", parametersJson: "not json"),
+        ])
+        XCTAssertEqual(json,
+            #"[{"type":"function","function":{"name":"get_current_weather","description":"The \"current\" weather.","parameters":"# +
+            schema + #"}},{"type":"function","function":{"name":"ping","description":"","parameters":{}}}]"#)
+    }
+
+    func testReplayedToolCallsAndResultsGoInAsRecorded() throws {
+        XCTAssertEqual(
+            try HybridLiteRTLM.toolMessageJson([(name: "get_current_weather", json: #"{"temperature_c":27.0,"condition":"hail"}"#)]),
+            #"{"role":"tool","content":[{"type":"tool_response","name":"get_current_weather","response":{"temperature_c":27.0,"condition":"hail"}}]}"#)
+
+        let messages = [
+            Message(role: .system, content: "Be brief.", toolCalls: nil, toolName: nil),
+            Message(role: .user, content: "Weather in \"Paris\"?\n", toolCalls: nil, toolName: nil),
+            Message(role: .model, content: "", toolCalls: [
+                ToolCall(name: "get_current_weather", argumentsJson: #"{"zeta":1.50,"alpha":"a","mid":[2,1]}"#),
+                ToolCall(name: "broken", argumentsJson: "{oops"),
+            ], toolName: nil),
+            Message(role: .tool, content: #"{"temperature_c":27,"condition":"hail"}"#, toolCalls: nil,
+                    toolName: "get_current_weather"),
+            Message(role: .tool, content: "no JSON here", toolCalls: nil, toolName: nil),
+            Message(role: .model, content: "Hail, 27°C.", toolCalls: nil, toolName: nil),
+        ]
+        let expected = [
+            #"{"role":"system","content":"Be brief."}"#,
+            #"{"role":"user","content":"Weather in \"Paris\"?\n"}"#,
+            #"{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"get_current_weather","# +
+                #""arguments":{"zeta":1.50,"alpha":"a","mid":[2,1]}}},{"type":"function","function":{"name":"broken","arguments":{}}}]}"#,
+            #"{"role":"tool","content":[{"type":"tool_response","name":"get_current_weather","# +
+                #""response":{"temperature_c":27,"condition":"hail"}}]}"#,
+            #"{"role":"tool","content":[{"type":"tool_response","name":"","response":"no JSON here"}]}"#,
+            #"{"role":"assistant","content":"Hail, 27°C."}"#,
+        ]
+        XCTAssertEqual(HybridLiteRTLM.engineMessagesJson(messages), "[" + expected.joined(separator: ",") + "]")
+    }
+
+    func testToolCallsKeepTheModelsArgumentOrder() {
+        let response = #"{"role":"assistant","content":[],"tool_calls":[{"type":"function","function":{"# +
+            #""name":"get_current_weather","arguments":{"zeta":1,"alpha":"</tool_call>","mid":{"b":2,"a":1}}}},"# +
+            #"{"name":"bare","arguments":{"y":true,"x":null}}]}"#
+        let text = bridge.extractTextFromResponse(response)
+        XCTAssertEqual(text,
+            #"<tool_call>{"name":"get_current_weather","arguments":{"zeta":1,"alpha":"<\/tool_call>","mid":{"b":2,"a":1}}}</tool_call>"# +
+            #"<tool_call>{"name":"bare","arguments":{"y":true,"x":null}}</tool_call>"#)
+
+        let (rest, calls) = HybridLiteRTLM.splitToolCalls(text)
+        XCTAssertEqual(rest, "")
+        XCTAssertEqual(calls.map { $0.name }, ["get_current_weather", "bare"])
+        XCTAssertEqual(calls.map { $0.argumentsJson },
+                       [#"{"zeta":1,"alpha":"<\/tool_call>","mid":{"b":2,"a":1}}"#, #"{"y":true,"x":null}"#])
+    }
+
+    func testJSONTextReadsMembersAndElementsWithoutReordering() {
+        let members = JSONText.members(of: #" { "b" : [1, {"x":"]}"}] , "a\"q" :"s\\\"}", "c":null,"d":-1.5e3 } "#)
+        XCTAssertEqual(members?.map { $0.key }, ["b", "a\"q", "c", "d"])
+        XCTAssertEqual(members?.map { $0.value }, [#"[1, {"x":"]}"}]"#, #""s\\\"}""#, "null", "-1.5e3"])
+        XCTAssertEqual(JSONText.member("a\"q", of: #"{"a\"q":1,"a\"q":2}"#), "2")
+        XCTAssertEqual(JSONText.elements(of: #"[ {"a":1} ,"x,y", 2 ]"#), [#"{"a":1}"#, #""x,y""#, "2"])
+        XCTAssertEqual(JSONText.members(of: " {} ")?.count, 0)
+        XCTAssertEqual(JSONText.elements(of: "[]"), [])
+        XCTAssertNil(JSONText.members(of: "[1]"))
+        XCTAssertNil(JSONText.elements(of: #"{"a":1}"#))
+        XCTAssertEqual(JSONText.literal("a\"b\\c\n\t\u{1}é/"), #""a\"b\\c\n\t\u0001é/""#)
+    }
+
     private func assertNativeError(
         _ error: Error, phase: NativePhase, status: String, code: String?,
         file: StaticString = #filePath, line: UInt = #line
