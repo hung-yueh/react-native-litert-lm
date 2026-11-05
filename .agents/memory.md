@@ -1,7 +1,7 @@
 # Project Memory
 
 ## Last Completed Task
-Laya Multilingual LiteRT System-1 Decision Model documentation, bundle asset layout instructions, and package tarball rebuild (v0.7.5): added comprehensive README documentation comparing System-1 decision models with generative LLMs, detailed 5-asset directory bundle layout, asset acquisition via Hugging Face, code examples for all three decision primitives (decideChoice, decideScore, decideBool), sequence window budgeting, and rebuild of `react-native-litert-lm-0.7.5.tgz`.
+LayaTokenizer BPE merge table null/malformed entry hardening: fixed fatal `NullPointerException: null cannot be cast to non-null type kotlin.collections.List<*>` on initialization by replacing unchecked casts with safe parsers (`entry as? List<*>`, `entry as? String` for space-separated pair formats, null guards, and safe vocabulary lookups). Rebuilt and packaged `react-native-litert-lm-0.7.5.tgz`.
 
 ## Architecture Notes
 - LayaModel (`HybridLayaModelSpec`): Two-stage graph execution pipeline (main graph `laya_ml_s256_embeds_wfp16.tflite` + action head `laya_ml_act_head_fp32.tflite`) for sub-60ms System-1 reactive decision making in 100+ languages across `choice`, `score`, and `bool`/`noul` question types.

@@ -99,24 +99,41 @@ class LayaTokenizer(file: File) {
       byteIds[i] =
         vocabulary["<0x" + i.toString(16).uppercase().padStart(2, '0') + ">"] ?: -1
     }
-    val rawMerges = model.getValue("merges") as List<*>
+    val rawMerges = (model["merges"] as? List<*>) ?: emptyList<Any?>()
     merges =
       HashMap<Long, Merge>(rawMerges.size * 4 / 3 + 1).also { ranks ->
         for ((rank, entry) in rawMerges.withIndex()) {
-          val pair = entry as List<*>
-          val left = pair[0] as String
-          val right = pair[1] as String
-          ranks[key(vocabulary.getValue(left), vocabulary.getValue(right))] =
-            Merge(rank, vocabulary.getValue(left + right))
+          if (entry == null) continue
+          val (left, right) = when (entry) {
+            is List<*> -> {
+              if (entry.size < 2) continue
+              val l = entry[0] as? String ?: continue
+              val r = entry[1] as? String ?: continue
+              l to r
+            }
+            is String -> {
+              val parts = entry.split(" ", limit = 2)
+              if (parts.size < 2) continue
+              parts[0] to parts[1]
+            }
+            else -> continue
+          }
+          val leftId = vocabulary[left] ?: continue
+          val rightId = vocabulary[right] ?: continue
+          val mergedId = vocabulary[left + right] ?: continue
+          ranks[key(leftId, rightId)] = Merge(rank, mergedId)
         }
       }
-    for (value in root.getValue("added_tokens") as List<*>) {
-      val entry = value as Map<*, *>
+    val rawAddedTokens = (root["added_tokens"] as? List<*>) ?: emptyList<Any?>()
+    for (value in rawAddedTokens) {
+      val entry = value as? Map<*, *> ?: continue
       require(entry["normalized"] == false && entry["single_word"] == false)
+      val content = entry["content"] as? String ?: continue
+      val idNum = entry["id"] as? Number ?: continue
       val token =
         AddedToken(
-          entry["content"] as String,
-          (entry["id"] as Number).toInt(),
+          content,
+          idNum.toInt(),
           entry["lstrip"] == true,
           entry["rstrip"] == true,
         )
