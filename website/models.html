@@ -164,7 +164,10 @@ export const GEMMA_3N_E2B_IT_INT4 =
       <code>resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct")</code>
       picks the GPU re-export where it helps. Its tool calls use LFM's own
       <code>&lt;|tool_call_start|&gt;</code> syntax, which
-      <code>parseToolCalls()</code> doesn't read.
+      <code>parseToolCalls()</code> doesn't read. Load it with
+      <code>kvCacheBytesPerToken: 24 * 1024</code>: only 6 of its 16 layers
+      keep a KV cache, which the memory estimate's file-size heuristic can't
+      see (<a href="memory.html#kv-cost">details</a>).
     </p>
   </div>
   <div class="note">

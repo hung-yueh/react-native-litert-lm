@@ -141,6 +141,7 @@ export function useModel(
   const maxVisionTokensPerImage = config?.maxVisionTokensPerImage;
   const metalResidencySet = config?.gpu?.metalResidencySet;
   const singleThreadedExecution = config?.singleThreadedExecution;
+  const kvCacheBytesPerToken = config?.kvCacheBytesPerToken;
   const toolsKey = tools ? JSON.stringify(tools) : undefined;
   const thinkingKey = thinking ? JSON.stringify(thinking) : undefined;
 
@@ -175,6 +176,7 @@ export function useModel(
       ...(maxVisionTokensPerImage !== undefined && { maxVisionTokensPerImage }),
       ...(metalResidencySet !== undefined && { gpu: { metalResidencySet } }),
       ...(singleThreadedExecution !== undefined && { singleThreadedExecution }),
+      ...(kvCacheBytesPerToken !== undefined && { kvCacheBytesPerToken }),
     }),
     // `tools`/`thinking` are tracked via their serialized keys so inline objects stay stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -205,6 +207,7 @@ export function useModel(
       maxVisionTokensPerImage,
       metalResidencySet,
       singleThreadedExecution,
+      kvCacheBytesPerToken,
     ],
   );
 

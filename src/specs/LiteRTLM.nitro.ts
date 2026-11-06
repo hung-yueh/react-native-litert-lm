@@ -272,6 +272,17 @@ export interface LLMConfig {
    * @default false
    */
   forceLoad?: boolean;
+
+  /**
+   * Per-token KV-cache cost in bytes, used by the pre-flight memory check in
+   * `loadModel()` and by `getMemoryForecast()`. Set it when you've measured
+   * the model or know its attention geometry; without it the cost is guessed
+   * from the file size, which under-counts int4 weights and hybrid models
+   * such as LFM2.5 (only some layers keep a KV cache). `activationDataType:
+   * 'f16'` still halves it in the estimate. JS-side only — the native engine
+   * ignores this field.
+   */
+  kvCacheBytesPerToken?: number;
 }
 
 /**

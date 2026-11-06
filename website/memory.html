@@ -110,7 +110,7 @@
   <p>The math is simple enough to reason about:</p>
   <ul>
     <li><code>modelBytes = fileSize × loadFactor</code> — GPU/NPU backends use <code>GPU_LOAD_FACTOR</code>, otherwise <code>CPU_LOAD_FACTOR</code>.</li>
-    <li><code>kvCacheBytes = maxContextTokens × kvBytesPerToken</code> — halved when <code>config.activationDataType === 'f16'</code>.</li>
+    <li><code>kvCacheBytes = maxContextTokens × kvBytesPerToken</code> — halved when <code>config.activationDataType === 'f16'</code>. <code>kvBytesPerToken</code> is <code>config.kvCacheBytesPerToken</code> when set, else the file-size heuristic below.</li>
     <li><code>overheadBytes = max(OVERHEAD_MIN_BYTES, modelBytes × OVERHEAD_WEIGHTS_FRACTION)</code> — i.e. at least 200&nbsp;MB, or 10% of weights.</li>
     <li>Verdict: <code>usageFraction ≤ 0.8</code> → <code>'safe'</code>; <code>≤ 1</code> → <code>'tight'</code>; else <code>'critical'</code>.</li>
   </ul>
@@ -149,6 +149,33 @@
   <div class="sig">function estimateKvCacheBytesPerToken(
   modelFileSizeBytes: number,
 ): number</div>
+
+  <h3 id="kv-cost">When the heuristic is wrong: <code>kvCacheBytesPerToken</code></h3>
+  <p>
+    File size stands in for the model's attention geometry, and two kinds of
+    model break that link. int4 weights shrink the file to a quarter, but the
+    KV cache isn't quantized with them. Hybrid models such as LFM2.5 keep a KV
+    cache in only some layers; the rest are short convolutions with a small
+    fixed state. Either way the heuristic under-counts, and a load it calls
+    <code>'safe'</code> can still be killed. Set the measured or computed cost
+    in the load config — the pre-flight check and
+    <code>getMemoryForecast()</code> both use it:
+  </p>
+  <div class="code">
+    <div class="code-head"><span>typescript</span></div>
+    <pre><code>// LFM2.5 1.2B: 6 of 16 layers keep a KV cache —
+// 6 layers × 8 KV heads × 64 dims × (K + V) × 4 bytes = 24 KiB per token
+await llm.loadModel(LFM2_5_1_2B_INSTRUCT, {
+  maxContextTokens: 32768,
+  kvCacheBytesPerToken: 24 * 1024,
+});</code></pre>
+  </div>
+  <p>
+    The 4 bytes assume an f32 cache, which makes the figure an upper bound;
+    measure peak memory on a device to tighten it. A direct
+    <code>estimateMemory()</code> call can also pass
+    <code>kvCacheBytesPerTokenOverride</code>, which wins over the config value.
+  </p>
 
   <h3 id="model-picker-example">Example: pick a model before downloading</h3>
   <p>

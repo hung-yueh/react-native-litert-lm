@@ -351,7 +351,8 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     return forecastMemory({
       contextTokensUsed: used,
       maxContextTokens: resolveMaxContextTokens(loadedConfig),
-      kvCacheBytesPerToken: estimateKvCacheBytesPerToken(loadedModelFileSize),
+      kvCacheBytesPerToken:
+        loadedConfig?.kvCacheBytesPerToken ?? estimateKvCacheBytesPerToken(loadedModelFileSize),
     });
   };
 

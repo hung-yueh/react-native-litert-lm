@@ -225,6 +225,12 @@
           <td><code>false</code></td>
           <td>Skip the automatic pre-flight memory check in <code>loadModel()</code> and load even when the estimate says the model likely does not fit. JS-side only — the native engine ignores this field.</td>
         </tr>
+        <tr>
+          <td><code>kvCacheBytesPerToken</code></td>
+          <td><code>number</code></td>
+          <td>file-size heuristic</td>
+          <td>Per-token KV-cache cost in bytes for the pre-flight check and <code>getMemoryForecast()</code>. Set it when you've measured the model or know its attention geometry: the heuristic under-counts int4 and hybrid models such as LFM2.5. See <a href="memory.html#kv-cost">Memory</a>. JS-side only — the native engine ignores this field.</td>
+        </tr>
       </tbody>
     </table>
   </div>

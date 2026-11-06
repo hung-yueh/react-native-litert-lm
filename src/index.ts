@@ -312,6 +312,9 @@ export const EMBEDDING_GEMMA_2_740M =
  * family on iOS; on Android, `resolveFromManifest("litert-community/LFM2.5-1.2B-Instruct")`
  * picks the GPU re-export where it helps. Its tool calls use LFM's own
  * `<|tool_call_start|>` syntax, which `parseToolCalls()` doesn't read.
+ * Pass `kvCacheBytesPerToken: 24 * 1024` when loading it: only 6 of its 16
+ * layers keep a KV cache, which the file-size heuristic can't see (24 KiB
+ * assumes an f32 cache, an upper bound).
  * License: LFM Open License v1.0 (not Apache) — check its commercial terms.
  * Public — no Hugging Face account required.
  */
