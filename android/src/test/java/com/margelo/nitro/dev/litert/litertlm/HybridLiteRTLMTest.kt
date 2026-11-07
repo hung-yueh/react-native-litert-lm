@@ -207,6 +207,7 @@ class HybridLiteRTLMTest {
             streamToolCalls = null,
             toolCallChannelName = null,
             forceLoad = null,
+            exactStats = true,
         )
 
         // The model file doesn't exist, so the load rejects — but config is
@@ -229,6 +230,12 @@ class HybridLiteRTLMTest {
         assertEquals(true, field("enableSpeculativeDecoding"))
         assertEquals(true, field("enableStructuredOutput"))
         assertEquals("/lora/adapter.bin", field("loraPath"))
+        assertEquals(true, field("exactStats"))
+
+        // The flag holds for one load: the next one without it turns it off.
+        val second = bridge.loadModel("/nonexistent/model.litertlm", null)
+        while (!second.isCompleted) { Thread.sleep(10) }
+        assertEquals(false, field("exactStats"))
     }
 
     // ── Concurrency smoke: overlapping calls must not crash ─────────────────

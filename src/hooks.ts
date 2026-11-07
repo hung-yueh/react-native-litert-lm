@@ -136,6 +136,7 @@ export function useModel(
   const audioLoraPath = config?.audioLoraPath;
   const loraRank = config?.loraRank;
   const forceLoad = config?.forceLoad;
+  const exactStats = config?.exactStats;
   const thinking = config?.thinking;
   const chatTemplate = config?.chatTemplate;
   const maxVisionTokensPerImage = config?.maxVisionTokensPerImage;
@@ -170,6 +171,7 @@ export function useModel(
       ...(audioLoraPath !== undefined && { audioLoraPath }),
       ...(loraRank !== undefined && { loraRank }),
       ...(forceLoad !== undefined && { forceLoad }),
+      ...(exactStats !== undefined && { exactStats }),
       ...(thinking !== undefined && { thinking }),
       ...(chatTemplate !== undefined && { chatTemplate }),
       ...(maxVisionTokensPerImage !== undefined && { maxVisionTokensPerImage }),
@@ -200,6 +202,7 @@ export function useModel(
       audioLoraPath,
       loraRank,
       forceLoad,
+      exactStats,
       thinkingKey,
       chatTemplate,
       maxVisionTokensPerImage,

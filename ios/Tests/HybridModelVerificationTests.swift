@@ -51,7 +51,7 @@ final class HybridModelVerificationTests: XCTestCase {
             enableSpeculativeDecoding: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: Self.thinking,
             numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
             prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
-            streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true
+            streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: nil
         )
     }
 
@@ -87,7 +87,7 @@ final class HybridModelVerificationTests: XCTestCase {
                 enableSpeculativeDecoding: nil, chatTemplate: nil, enableStructuredOutput: nil, thinking: Self.thinking,
                 numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
                 prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
-                streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true)
+                streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: nil)
             let bridge = HybridLiteRTLM()
             _ = try await bridge.loadModel(modelPath: path, config: cfg).await()
             let first = try await ask(bridge, prompt, options(maxOutputTokens: 96))
