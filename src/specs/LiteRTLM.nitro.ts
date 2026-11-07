@@ -283,7 +283,8 @@ export interface LLMConfig {
    *
    * Set at load, for every conversation on that engine. Benchmark mode can add
    * to the time to the first token of every message: see "getStats()" in the
-   * docs for what it was measured to cost.
+   * docs for what it was measured to cost. A conversation needs a reset after
+   * a failed message with or without it (see `execute()`).
    *
    * @default false
    */
@@ -471,14 +472,19 @@ export interface GenerationStats {
   completionTokens: number;
   /**
    * `promptTokens + completionTokens`. With `exactStats`, what the message
-   * added to `getContextTokenCount()`.
+   * added to `getContextTokenCount()`, except right after a reply with
+   * thinking: the engine takes that reply's thought back out of the context
+   * at the start of the next message, so the next message adds less than
+   * this, and can even shrink the context.
    */
   totalTokens: number;
   /**
    * Time to this message's first token in milliseconds. A streamed message
-   * times its own. A message sent without a callback has no first token to
-   * time: with `exactStats`, this is the engine's time for its last prefill;
-   * without it, 0.
+   * times its own, and reports 0 if no text reached the callback (say all of
+   * its budget went to thinking). A message sent without a callback has no
+   * first token to time: with `exactStats`, this is the engine's time for its
+   * last prefill (the engine's own time to first token also counts the first
+   * decode step); without it, 0.
    */
   timeToFirstToken: number;
   /** Total generation time in milliseconds */
@@ -730,6 +736,12 @@ export interface LiteRTLM extends HybridObject<{
    * @returns Promise resolving to the full response string. It rejects with
    *   `INFERENCE_CANCELLED` if `resetConversation()`, `loadModel()`,
    *   `unload()` or `close()` is called before the message finishes.
+   *
+   * After a message fails, call `resetConversation()` before sending another.
+   * In LiteRT-LM 0.18.1, when the engine fails a message (one that doesn't fit
+   * in what is left of the context, say), every later message in that
+   * conversation fails at once with `Task failed with state: 7`, with or
+   * without `LLMConfig.exactStats`.
    */
   execute(
     parts: MultimodalPart[],

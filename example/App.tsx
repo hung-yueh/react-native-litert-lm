@@ -135,6 +135,8 @@ function Main() {
       enableSpeculativeDecoding,
       streamToolCalls: enableTools,
       tools: enableTools ? [WEATHER_TOOL] : undefined,
+      // The tok/s under each reply is the engine's, not an estimate.
+      exactStats: true,
       ...(forceLoad && { forceLoad }),
     }),
     [backend, contextTokens, enableSpeculativeDecoding, enableTools, forceLoad],

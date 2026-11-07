@@ -41,7 +41,7 @@ final class HybridModelVerificationTests: XCTestCase {
             enableSpeculativeDecoding: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: nil,
             numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
             prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
-            streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: true
+            streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: nil
         )
     }
 

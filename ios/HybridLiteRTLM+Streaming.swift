@@ -14,6 +14,10 @@ class ExecuteStreamContext {
     let inputTurns: [Message]
     /// The conversation this turn belongs to (see Snapshot.epoch).
     let epoch: Int
+    /// The conversation it streams in. Not freed before streamEnded() (see settleStreams()).
+    let conversation: OpaquePointer
+    /// LLMConfig.exactStats of the engine it runs on: read the engine's numbers at the end.
+    let exactStats: Bool
     let startTime: Date
     let onToken: (_ token: String, _ done: Bool) -> Void
     let promise: Promise<String>
@@ -29,6 +33,8 @@ class ExecuteStreamContext {
         userLabel: String,
         inputTurns: [Message],
         epoch: Int,
+        conversation: OpaquePointer,
+        exactStats: Bool,
         startTime: Date,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<String>,
@@ -38,6 +44,8 @@ class ExecuteStreamContext {
         self.userLabel = userLabel
         self.inputTurns = inputTurns
         self.epoch = epoch
+        self.conversation = conversation
+        self.exactStats = exactStats
         self.startTime = startTime
         self.onToken = onToken
         self.promise = promise
@@ -69,7 +77,8 @@ extension HybridLiteRTLM {
             }
         }
         let ctx = ExecuteStreamContext(
-            userLabel: userLabel, inputTurns: inputTurns, epoch: epoch, startTime: Date(),
+            userLabel: userLabel, inputTurns: inputTurns, epoch: epoch,
+            conversation: conversation, exactStats: exactStats, startTime: Date(),
             onToken: onToken, promise: promise, parent: self,
             cleanup: fullCleanup
         )
@@ -137,6 +146,11 @@ extension HybridLiteRTLM {
         }
         ctx.fullResponse = finalText
 
+        // This message's numbers, read now: the commit below waits for `queue`,
+        // where a message sent during this stream can run first and leave its
+        // own turns last. Before streamEnded(), so the conversation is still alive.
+        let endTime = Date()
+        let engine = ctx.exactStats ? Self.lastEngineTurn(ctx.conversation) : nil
         // The engine is done with the conversation (see settleStreams()).
         streamEnded()
         queue.async {
@@ -145,7 +159,11 @@ extension HybridLiteRTLM {
                 inputTurns: ctx.inputTurns,
                 modelResponse: ctx.fullResponse,
                 startTime: ctx.startTime,
-                firstTokenTime: ctx.firstTokenTime,
+                endTime: endTime,
+                // No text reached the callback (all of the budget went to
+                // thinking, say): no first token, so 0, as on Android.
+                firstTokenTime: ctx.firstTokenTime ?? ctx.startTime,
+                engine: engine,
                 conversation: self.conversation
             )
             ctx.onToken("", true)

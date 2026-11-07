@@ -111,8 +111,8 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         if let bridge = Self.sharedBridge { return bridge }
         let bridge = HybridLiteRTLM()
         do {
-            // exactStats: test0 reports the engine's own numbers.
-            _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: true)).await()
+            // The default most apps load with: no exactStats, so no benchmark mode.
+            _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig()).await()
         } catch {
             Self.loadError = error
             throw error
@@ -143,11 +143,17 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     /// Throughput baseline for engine bumps — reported, not gated. One warm-up
     /// plus three measured runs of a fixed prompt under greedy sampling. TTFT
     /// is each message's own; decode tok/s and the token count come from the
-    /// engine (exactStats, getStats()).
-    /// Sorts first, so the shared engine's load is timed here.
+    /// engine (exactStats, getStats()), so this loads an engine of its own: the
+    /// shared one stays in the default. Sorts first, before the shared engine
+    /// loads, and frees its own before the next test.
     func test0_BenchmarkDecodeThroughput() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
         let loadStart = Date()
-        let bridge = try await ensureLoaded()
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: true)).await()
         let loadSeconds = Date().timeIntervalSince(loadStart)
 
         let prompt = "Write a detailed paragraph about the history of the bicycle."
@@ -304,6 +310,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
         }
+        // Free the suite's shared engine so two models never sit in memory.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
         let weatherTool = ToolDefinition(
             name: "get_current_weather",
             description: "Get the current weather for a location.",
@@ -357,6 +366,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
         }
+        // Free the suite's shared engine so two models never sit in memory.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
         let weatherTool = ToolDefinition(
             name: "get_current_weather",
             description: "Get the current weather for a location.",
@@ -434,6 +446,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
         }
+        // Free the suite's shared engine so two models never sit in memory.
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
         let bridge = HybridLiteRTLM()
         defer { try? bridge.close() }
         _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(chatTemplate: Self.bananaTemplate)).await()
@@ -446,8 +461,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     /// it added to getContextTokenCount(), streamed or blocking, ending at the
     /// limit or by itself, in the first message of a conversation or a later
     /// one, after a reset (one that cancels a message, one with a system prompt,
-    /// one replaying a transcript). The flag holds for one load; without it, the
-    /// stats are the estimate.
+    /// one replaying a transcript). Not after a reply with thinking, whose
+    /// thought the engine takes back out. The flag holds for one load; without
+    /// it, the stats are the estimate.
     func testX_ExactStatsAddUpToTheContextGrowth() async throws {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
@@ -462,18 +478,11 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         defer { try? bridge.close() }
         _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: true)).await()
 
-        /// The count once a reset's work on `queue` has run; 0 when it stays unknown.
-        func knownCount() async throws -> Double {
-            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-                bridge.queue.async { done.resume() }
-            }
-            return max(0, try bridge.getContextTokenCount())
-        }
-
-        @discardableResult
-        func send(_ label: String, _ prompt: String, _ maxOut: Double, stream: Bool = true) async throws -> GenerationStats {
-            let before = try await knownCount()
-            let reply = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: maxOut),
+        /// One message: its stats, how much it grew the context, and the reply.
+        func measure(_ label: String, _ prompt: String, _ maxOut: Double, stream: Bool = true,
+                     thinking: ThinkingOptions? = nil) async throws -> (stats: GenerationStats, grew: Double, reply: String) {
+            let before = try await knownCount(bridge)
+            let reply = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: maxOut, thinking: thinking),
                                       onToken: stream ? { _, _ in } : nil)
             let stats = try bridge.getStats()
             let grew = try bridge.getContextTokenCount() - before
@@ -481,6 +490,12 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                          "first token %.1f ms, %.2f tok/s, %d chars",
                          label, stats.promptTokens, stats.completionTokens, grew,
                          stats.timeToFirstToken, stats.tokensPerSecond, reply.count))
+            return (stats, grew, reply)
+        }
+
+        @discardableResult
+        func send(_ label: String, _ prompt: String, _ maxOut: Double, stream: Bool = true) async throws -> GenerationStats {
+            let (stats, grew, _) = try await measure(label, prompt, maxOut, stream: stream)
             XCTAssertEqual(stats.promptTokens + stats.completionTokens, grew, "\(label): prompt + completion")
             XCTAssertEqual(stats.totalTokens, grew, "\(label): total")
             XCTAssertGreaterThan(stats.tokensPerSecond, 0, "\(label): no decode rate")
@@ -496,6 +511,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         try await send("blocking", "Say hello.", 16, stream: false)
 
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        XCTAssertEqual(try bridge.getStats().totalTokens, 0, "a reset leaves no stats of the last conversation")
         try await send("after a reset", explain, 16)
 
         // A cancelled message leaves nothing behind in the next one's numbers.
@@ -526,12 +542,36 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         let replayed = try await send("after a replaying reset", "What is my lucky number?", 16)
         XCTAssertGreaterThan(replayed.promptTokens, 30, "the prefill holds the transcript")
 
+        // Thinking: the engine takes a reply's thought back out of the context.
+        // LiteRT-LM 0.18.1 does it at the start of the next message, so the
+        // reply with the thought adds up, and the next message adds less than
+        // its total, by about the thought's tokens.
+        let thinking = ThinkingOptions(enabled: true, tokenBudget: nil)
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        let thought = try await measure("a reply with thinking", "What is 17 × 23? Reply with the number only.", 256,
+                                        thinking: thinking)
+        let afterThought = try await measure("the message after it", "Now add 9 to it. Reply with the number only.", 16)
+        print(String(format: "[integration][exact-stats] the thought taken out: %.0f tokens",
+                     afterThought.stats.totalTokens - afterThought.grew))
+        XCTAssertGreaterThan(thought.stats.completionTokens, 20, "no thought in the reply: \(thought.reply)")
+        XCTAssertEqual(thought.stats.totalTokens, thought.grew, "the reply with thinking")
+        XCTAssertLessThan(afterThought.grew, afterThought.stats.totalTokens, "the message after a reply with thinking")
+
+        // A stream whose whole budget goes to thinking sends no text: no first
+        // token to time, so 0, as on Android.
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        let silent = try await measure("all of the budget to thinking", "What is 17 × 23? Reply with the number only.", 8,
+                                       thinking: thinking)
+        XCTAssertEqual(silent.reply, "", "the thought should use the whole budget")
+        XCTAssertEqual(silent.stats.timeToFirstToken, 0, "no text reached the callback")
+        XCTAssertEqual(silent.stats.totalTokens, silent.grew, "a reply that is all thought")
+
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
         let exactCJK = try await send("CJK", cjk, 64)
 
         // The next load without the flag: the estimate, and a context count as exact as before.
         _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig()).await()
-        let before = try await knownCount()
+        let before = try await knownCount(bridge)
         let reply = try await run(bridge, cjk, options: Self.makeOptions(maxOutputTokens: 64)) { _, _ in }
         let estimate = try bridge.getStats()
         let grew = try bridge.getContextTokenCount() - before
@@ -539,8 +579,8 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                      "context grew %.0f (with the flag: %.0f + %.0f)",
                      estimate.promptTokens, estimate.completionTokens, grew,
                      exactCJK.promptTokens, exactCJK.completionTokens))
-        XCTAssertEqual(estimate.promptTokens, Double(cjk.count) / 4.0)
-        XCTAssertEqual(estimate.completionTokens, Double(reply.count) / 4.0)
+        XCTAssertEqual(estimate.promptTokens, Double(cjk.utf16.count) / 4.0)
+        XCTAssertEqual(estimate.completionTokens, Double(reply.utf16.count) / 4.0)
         XCTAssertGreaterThan(estimate.timeToFirstToken, 0, "a streamed message still times its first token")
         XCTAssertEqual(exactCJK.promptTokens + exactCJK.completionTokens, grew, "the same message, whatever the flag")
         _ = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 16))
@@ -571,10 +611,7 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         }
         var mismatches: [String] = []
         func send(_ label: String, _ parts: [MultimodalPart]) async throws {
-            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-                bridge.queue.async { done.resume() }
-            }
-            let before = max(0, try bridge.getContextTokenCount())
+            let before = try await knownCount(bridge)
             let reply = try await bridge.execute(
                 parts: parts, onToken: { _, _ in }, options: Self.makeOptions(maxOutputTokens: 32)
             ).await()
@@ -584,16 +621,114 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                          label, stats.promptTokens, stats.completionTokens, grew, reply.count))
             if stats.promptTokens + stats.completionTokens != grew { mismatches.append(label) }
         }
-        func media(_ type: PartType, _ name: String) -> MultimodalPart {
-            MultimodalPart(type: type, text: nil, path: Self.fixture(name), imageBuffer: nil, audioBuffer: nil,
-                           name: nil, responseJson: nil)
-        }
-        try await send("image", [textPart("Describe this picture in one short sentence."), media(.image, "test.jpeg")])
+        try await send("image", [textPart("Describe this picture in one short sentence."),
+                                 .imagePart(Self.fixture("test.jpeg"))])
         try await send("the text message after an image", [textPart("Say that again in one word.")])
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
-        try await send("audio", [textPart("What do you hear? One short sentence."), media(.audio, "test.wav")])
+        try await send("audio", [textPart("What do you hear? One short sentence."), .audioPart(Self.fixture("test.wav"))])
         try await send("the text message after audio", [textPart("Say that again in one word.")])
         XCTAssertEqual(mismatches, [], "prompt + completion differs from the context's growth")
+    }
+
+    /// A message that fails, here one that fits in the context but not in what
+    /// is left of it, with and without LLMConfig.exactStats. In LiteRT-LM
+    /// 0.18.1 every later message in that conversation waits on the failed one
+    /// and fails at once ("Task failed with state: 7": a task it depends on
+    /// failed), with or without the flag, until a reset. So none of them starts
+    /// a benchmark turn after the one the failed prefill left open. After the
+    /// reset, the flag's numbers are the engine's again.
+    func testXc_ExactStatsAfterAFailedMessage() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        // About 1,100 tokens each: the first fits, the second fits alone but not
+        // in the 2,048-token context the first leaves.
+        let long = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 110)
+        var later: [Bool: [String]] = [:]
+        for exact in [true, false] {
+            await awaitTeardowns()
+            let label = exact ? "with the flag" : "without the flag"
+            let bridge = HybridLiteRTLM()
+            defer { try? bridge.close() }
+            _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: exact)).await()
+            _ = try await run(bridge, long, options: Self.makeOptions(maxOutputTokens: 8)) { _, _ in }
+            print("[integration][exact-stats] \(label): context \(try bridge.getContextTokenCount()) after the first long message")
+            do {
+                _ = try await run(bridge, long, options: Self.makeOptions(maxOutputTokens: 8)) { _, _ in }
+                XCTFail("\(label): a message that doesn't fit in what is left of the context ran")
+            } catch {
+                print("[integration][exact-stats] \(label): the second long message failed: \(error)")
+            }
+            var outcomes: [String] = []
+            for _ in 0..<2 {
+                do {
+                    let reply = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 8)) { _, _ in }
+                    outcomes.append("ran: \(reply)")
+                } catch {
+                    outcomes.append("failed: \(error)")
+                }
+            }
+            later[exact] = outcomes
+            print("[integration][exact-stats] \(label): the next two messages \(outcomes)")
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+            let before = try await knownCount(bridge)
+            let reply = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 16)) { _, _ in }
+            let stats = try bridge.getStats()
+            let grew = try bridge.getContextTokenCount() - before
+            print(String(format: "[integration][exact-stats] %@, after a reset: prompt %.1f + completion %.1f, " +
+                         "context grew %.0f, %d chars", label, stats.promptTokens, stats.completionTokens, grew, reply.count))
+            XCTAssertFalse(reply.isEmpty, "\(label): after a reset")
+            if exact { XCTAssertEqual(stats.totalTokens, grew, "after a reset") }
+        }
+        await awaitTeardowns()
+        for (exact, outcomes) in later {
+            XCTAssertTrue(outcomes.count == 2 && outcomes.allSatisfy { $0.hasPrefix("failed") },
+                          "\(exact ? "with" : "without") the flag, the messages after a failed one: \(outcomes)")
+        }
+    }
+
+    /// LLMConfig.exactStats and a blocking message sent while a stream runs on
+    /// the same conversation: the stream reports its own numbers. Its commit
+    /// waits for `queue`, where the blocking message runs first, so the stream
+    /// reads the engine's turns as it ends, not then.
+    func testXd_ExactStatsOfAStreamWithABlockingMessageBehindIt() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        await awaitTeardowns()
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: true)).await()
+        let essay = "Write a long essay about the history of the bicycle."
+
+        // The essay's prompt alone, as the first message of a conversation.
+        _ = try await run(bridge, essay, options: Self.makeOptions(maxOutputTokens: 1)) { _, _ in }
+        let alone = try bridge.getStats()
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+
+        let firstToken = expectation(description: "first streamed token")
+        firstToken.assertForOverFulfill = false
+        let essayParts = [textPart(essay)]
+        let essayOptions = Self.makeOptions(maxOutputTokens: 64)
+        let stream = Task {
+            try await bridge.execute(parts: essayParts, onToken: { token, _ in
+                if !token.isEmpty { firstToken.fulfill() }
+            }, options: essayOptions).await()
+        }
+        await fulfillment(of: [firstToken], timeout: 60)
+        let hello = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 8))
+        let text = try await stream.value
+        let stats = try bridge.getStats()
+        print(String(format: "[integration][exact-stats] a stream with a blocking message behind it: prompt %.0f " +
+                     "(alone %.0f) + completion %.0f, %.2f tok/s; stream %d chars, blocking reply: %@",
+                     stats.promptTokens, alone.promptTokens, stats.completionTokens, stats.tokensPerSecond,
+                     text.count, hello))
+        XCTAssertEqual(stats.completionTokens, 64, "the stream's own decode: it ran to its limit")
+        XCTAssertEqual(stats.promptTokens, alone.promptTokens, "the stream's own prefill")
     }
 
     /// Speculative decoding switched on for one conversation (Gemma 4 E2B
@@ -749,12 +884,13 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(label) generated nothing")
             return stats.tokensPerSecond
         }
-        _ = try await measure("cpu", Self.makeConfig(backend: .cpu))
+        // exactStats: the engine's decode rate and prefill time, not the estimate.
+        _ = try await measure("cpu", Self.makeConfig(backend: .cpu, exactStats: true))
         _ = try await measure("cpu+maxVisionTokensPerImage=280",
-                              Self.makeConfig(maxVisionTokensPerImage: 280, backend: .cpu))
-        _ = try await measure("gpu", Self.makeConfig(backend: .gpu))
+                              Self.makeConfig(maxVisionTokensPerImage: 280, backend: .cpu, exactStats: true))
+        _ = try await measure("gpu", Self.makeConfig(backend: .gpu, exactStats: true))
         _ = try await measure("gpu+metalResidencySet",
-                              Self.makeConfig(gpu: GpuOptions(metalResidencySet: true), backend: .gpu))
+                              Self.makeConfig(gpu: GpuOptions(metalResidencySet: true), backend: .gpu, exactStats: true))
     }
 
     // MARK: - Bundle model info (LiteRT-LM 0.18)
@@ -1009,6 +1145,15 @@ final class LockedBox<T>: @unchecked Sendable {
 }
 
 private extension HybridLiteRTLMIntegrationTests {
+    /// The context count once the work queued on `bridge` so far (a reset's)
+    /// has run; 0 while it stays unknown, as after a replaying reset.
+    func knownCount(_ bridge: HybridLiteRTLM) async throws -> Double {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            bridge.queue.async { done.resume() }
+        }
+        return max(0, try bridge.getContextTokenCount())
+    }
+
     /// Wait until every engine that close() or unload() has queued for
     /// freeing so far is gone.
     func awaitTeardowns() async {

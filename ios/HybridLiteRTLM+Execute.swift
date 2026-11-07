@@ -424,6 +424,7 @@ extension HybridLiteRTLM {
         }
         defer { litert_lm_json_response_delete(response) }
 
+        let endTime = Date()
         var result = ""
         if let rs = litert_lm_json_response_get_string(response) {
             result = extractTextFromResponse(String(cString: rs))
@@ -435,6 +436,9 @@ extension HybridLiteRTLM {
             inputTurns: inputTurns,
             modelResponse: result,
             startTime: startTime,
+            endTime: endTime,
+            firstTokenTime: nil,
+            engine: exactStats ? Self.lastEngineTurn(conversation) : nil,
             conversation: conversation
         )
         cleanup()
@@ -444,24 +448,27 @@ extension HybridLiteRTLM {
 
 
     /// Record a finished turn in the transcript and stats. Runs on `queue`.
-    /// `firstTokenTime` is when a streamed turn's first token reached the callback.
+    /// `endTime` and `engine` (its numbers, with `exactStats`) are read when the
+    /// turn finished; `firstTokenTime` is when a streamed turn's first token
+    /// reached the callback, nil for a blocking turn.
     func commitExecuteTurn(
         epoch: Int,
         inputTurns: [Message],
         modelResponse: String,
         startTime: Date,
-        firstTokenTime: Date? = nil,
+        endTime: Date,
+        firstTokenTime: Date?,
+        engine: EngineTurn?,
         conversation: OpaquePointer?
     ) {
         // The conversation was reset or closed while this turn ran: it
         // belongs to neither the new transcript nor the new stats.
         guard withSnapshot({ $0.epoch }) == epoch else { return }
-        let totalTime = Date().timeIntervalSince(startTime)
         let stats = Self.generationStats(
-            engine: exactStats ? conversation.flatMap(Self.lastEngineTurn) : nil,
-            promptCharacters: inputTurns.reduce(0) { $0 + $1.content.count },
-            responseCharacters: modelResponse.count,
-            totalTime: totalTime,
+            engine: engine,
+            prompt: inputTurns.map(\.content).joined(),
+            response: modelResponse,
+            totalTime: endTime.timeIntervalSince(startTime),
             streamedFirstToken: firstTokenTime?.timeIntervalSince(startTime)
         )
         // Tool calls move out of the text into structured toolCalls.
@@ -502,20 +509,21 @@ extension HybridLiteRTLM {
     }
 
     /// What getStats() reports for a finished message: the engine's last prefill
-    /// and decode turns when it has them, else about 4 characters per token.
-    /// `streamedFirstToken` is nil for a blocking message, which has no first
-    /// token to time: that reports the last prefill's time, or 0 without the
-    /// engine's numbers. Seconds in; GenerationStats reports milliseconds, as
-    /// documented and as Android does.
+    /// and decode turns when it has them, else about 4 characters per token,
+    /// counted in UTF-16 code units as Android and JavaScript count a string's
+    /// length. `streamedFirstToken` is nil for a blocking message, which has no
+    /// first token to time: that reports the last prefill's time, or 0 without
+    /// the engine's numbers. Seconds in; GenerationStats reports milliseconds,
+    /// as documented and as Android does.
     static func generationStats(
         engine: EngineTurn?,
-        promptCharacters: Int,
-        responseCharacters: Int,
+        prompt: String,
+        response: String,
         totalTime: TimeInterval,
         streamedFirstToken: TimeInterval?
     ) -> GenerationStats {
-        let promptTokens = engine.map { Double($0.promptTokens) } ?? Double(promptCharacters) / 4.0
-        let completionTokens = engine.map { Double($0.completionTokens) } ?? Double(responseCharacters) / 4.0
+        let promptTokens = engine.map { Double($0.promptTokens) } ?? Double(prompt.utf16.count) / 4.0
+        let completionTokens = engine.map { Double($0.completionTokens) } ?? Double(response.utf16.count) / 4.0
         var lastPrefill = 0.0
         if let engine = engine, engine.prefillTokensPerSecond > 0 {
             lastPrefill = Double(engine.promptTokens) / engine.prefillTokensPerSecond

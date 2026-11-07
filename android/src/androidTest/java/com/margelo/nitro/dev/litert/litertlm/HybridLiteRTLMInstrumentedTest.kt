@@ -930,7 +930,11 @@ class HybridLiteRTLMInstrumentedTest {
         fun decodeTps(threads: Double?): Double {
             val llm = HybridLiteRTLM()
             try {
-                llm.loadModelBlocking(model!!.absolutePath, llmConfig(backend = Backend.CPU, numThreads = threads))
+                // exactStats: the engine's decode rate, not the estimate.
+                llm.loadModelBlocking(
+                    model!!.absolutePath,
+                    llmConfig(backend = Backend.CPU, numThreads = threads, exactStats = true),
+                )
                 generate(llm, "Hi", options(maxOutputTokens = 4.0)) // warm-up
                 llm.resetConversation(null, null, null)
                 val (text, _) = generate(
@@ -947,27 +951,15 @@ class HybridLiteRTLMInstrumentedTest {
         println("[android-int][threads] decode ${"%.2f".format(one)} tok/s on 1 thread, ${"%.2f".format(default)} tok/s default")
     }
 
-    /** Wait for a Nitro Promise on the test thread; returns its value or throws its error. */
-    private fun <T> settle(promise: com.margelo.nitro.core.Promise<T>): T {
-        val settled = CountDownLatch(1)
-        var value: Result<T>? = null
-        promise
-            .then { value = Result.success(it); settled.countDown() }
-            .catch { value = Result.failure(it); settled.countDown() }
-        assertTrue(
-            "The promise did not settle within ${GENERATE_TIMEOUT_SEC}s",
-            settled.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS),
-        )
-        return value!!.getOrThrow()
-    }
-
     /**
      * LLMConfig.exactStats: a message's promptTokens + completionTokens is what
      * it added to getContextTokenCount(), streamed or blocking, ending at the
      * limit or by itself, in the first message of a conversation or a later
      * one, after a reset (one that cancels a message, one with a system prompt,
-     * one replaying a transcript). The flag holds for one load; without it,
-     * the stats are the estimate.
+     * one replaying a transcript). Not after a reply with thinking, whose
+     * thought the engine takes back out. The flag holds for one load; without
+     * it, the stats are the estimate. A reset, unload(), close() or new load
+     * leaves no stats behind.
      */
     @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
     @Test
@@ -989,12 +981,22 @@ class HybridLiteRTLMInstrumentedTest {
                 com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark,
             )
 
-            /** One message; [before] is the count it starts from (0 when a reset leaves it unknown). */
-            fun send(label: String, prompt: String, maxOut: Double, stream: Boolean = true): GenerationStats {
-                val before = knownContextTokens(llm).coerceAtLeast(0.0)
-                val opts = options(maxOutputTokens = maxOut)
+            /**
+             * One message: its stats, how much it grew the context, and the reply. It starts from
+             * [startsFrom] if given, else from the count once known (0 when a reset leaves it unknown).
+             */
+            fun measure(
+                label: String,
+                prompt: String,
+                maxOut: Double,
+                stream: Boolean = true,
+                thinking: ThinkingOptions? = null,
+                startsFrom: Double? = null,
+            ): Triple<GenerationStats, Double, String> {
+                val before = startsFrom ?: knownContextTokens(llm).coerceAtLeast(0.0)
+                val opts = options(maxOutputTokens = maxOut, thinking = thinking)
                 val reply = if (stream) generate(llm, prompt, opts).first
-                    else settle(llm.execute(arrayOf(textPart(prompt)), null, opts))
+                    else awaitResult(llm.execute(arrayOf(textPart(prompt)), null, opts)).getOrThrow()
                 val stats = llm.getStats()
                 val grew = llm.getContextTokenCount() - before
                 println(
@@ -1002,6 +1004,11 @@ class HybridLiteRTLMInstrumentedTest {
                         "context grew $grew, first token ${"%.1f".format(stats.timeToFirstToken)} ms, " +
                         "${"%.2f".format(stats.tokensPerSecond)} tok/s, ${reply.length} chars",
                 )
+                return Triple(stats, grew, reply)
+            }
+
+            fun send(label: String, prompt: String, maxOut: Double, stream: Boolean = true, startsFrom: Double? = null): GenerationStats {
+                val (stats, grew, _) = measure(label, prompt, maxOut, stream, startsFrom = startsFrom)
                 assertEquals("$label: prompt + completion", grew, stats.promptTokens + stats.completionTokens, 0.0)
                 assertEquals("$label: total", grew, stats.totalTokens, 0.0)
                 assertTrue("$label: no decode rate", stats.tokensPerSecond > 0)
@@ -1019,6 +1026,7 @@ class HybridLiteRTLMInstrumentedTest {
             send("blocking", "Say hello.", 16.0, stream = false)
 
             llm.resetConversation(null, null, null)
+            assertEquals("a reset leaves no stats of the last conversation", 0.0, llm.getStats().totalTokens, 0.0)
             send("after a reset", explain, 16.0)
 
             // A cancelled message leaves nothing behind in the next one's numbers.
@@ -1045,14 +1053,43 @@ class HybridLiteRTLMInstrumentedTest {
             ).toString()
             llm.resetConversation(transcript, null, null)
             assertEquals("the count is unknown until that message", -1.0, llm.getContextTokenCount(), 0.0)
-            val replayed = send("after a replaying reset", "What is my lucky number?", 16.0)
+            // The count stays -1 until this message ends, by design: it starts from 0.
+            val replayed = send("after a replaying reset", "What is my lucky number?", 16.0, startsFrom = 0.0)
             assertTrue("the prefill holds the transcript: ${replayed.promptTokens}", replayed.promptTokens > 30)
+
+            // Thinking: the engine takes a reply's thought back out of the context.
+            // LiteRT-LM 0.18.1 does it at the start of the next message, so the reply
+            // with the thought adds up, and the next message adds less than its
+            // total, by about the thought's tokens.
+            val thinking = ThinkingOptions(true, null)
+            llm.resetConversation(null, null, null)
+            val (thought, thoughtGrew, thoughtReply) =
+                measure("a reply with thinking", "What is 17 × 23? Reply with the number only.", 256.0, thinking = thinking)
+            val (afterThought, afterThoughtGrew, _) =
+                measure("the message after it", "Now add 9 to it. Reply with the number only.", 16.0)
+            println("[android-int][exact-stats] the thought taken out: ${afterThought.totalTokens - afterThoughtGrew} tokens")
+            assertTrue("no thought in the reply: $thoughtReply", thought.completionTokens > 20)
+            assertEquals("the reply with thinking", thoughtGrew, thought.totalTokens, 0.0)
+            assertTrue(
+                "the message after a reply with thinking: grew $afterThoughtGrew, total ${afterThought.totalTokens}",
+                afterThoughtGrew < afterThought.totalTokens,
+            )
+
+            // A stream whose whole budget goes to thinking sends no text: no first
+            // token to time, so 0, as on iOS.
+            llm.resetConversation(null, null, null)
+            val (silent, silentGrew, silentReply) =
+                measure("all of the budget to thinking", "What is 17 × 23? Reply with the number only.", 8.0, thinking = thinking)
+            assertEquals("the thought should use the whole budget", "", silentReply)
+            assertEquals("no text reached the callback", 0.0, silent.timeToFirstToken, 0.0)
+            assertEquals("a reply that is all thought", silentGrew, silent.totalTokens, 0.0)
 
             llm.resetConversation(null, null, null)
             val exactCjk = send("CJK", cjk, 64.0)
 
             // The next load without the flag: the estimate, and a context count as exact as before.
             llm.loadModelBlocking(path, llmConfig())
+            assertEquals("a new load leaves no stats of the last one", 0.0, llm.getStats().totalTokens, 0.0)
             val before = knownContextTokens(llm)
             val (reply, _) = generate(llm, cjk, options(maxOutputTokens = 64.0))
             val estimate = llm.getStats()
@@ -1070,12 +1107,20 @@ class HybridLiteRTLMInstrumentedTest {
                 llm.getContextTokenCount() - before,
                 0.0,
             )
-            settle(llm.execute(arrayOf(textPart("Say hello.")), null, options(maxOutputTokens = 16.0)))
+            awaitResult(llm.execute(arrayOf(textPart("Say hello.")), null, options(maxOutputTokens = 16.0))).getOrThrow()
             assertEquals("a blocking message without the flag", 0.0, llm.getStats().timeToFirstToken, 0.0)
 
             // And back on with the next load.
             llm.loadModelBlocking(path, llmConfig(exactStats = true))
             send("reloaded with the flag", explain, 16.0)
+
+            // unload() and close() leave no stats either.
+            awaitResult(llm.unload()).getOrThrow()
+            assertEquals("after unload()", 0.0, llm.getStats().totalTokens, 0.0)
+            llm.loadModelBlocking(path, llmConfig(exactStats = true))
+            send("loaded again", "Say hello.", 16.0)
+            llm.close()
+            assertEquals("after close()", 0.0, llm.getStats().totalTokens, 0.0)
         } finally {
             llm.close()
             Teardowns.await(Teardowns.mark())
@@ -1137,6 +1182,64 @@ class HybridLiteRTLMInstrumentedTest {
         } finally {
             llm.close()
             Teardowns.await(Teardowns.mark())
+        }
+    }
+
+    /**
+     * A message that fails, here one that fits in the context but not in what
+     * is left of it, with and without LLMConfig.exactStats. In LiteRT-LM 0.18.1
+     * every later message in that conversation waits on the failed one and
+     * fails at once ("Task failed with state: 7": a task it depends on
+     * failed), with or without the flag, until a reset. So none of them starts
+     * a benchmark turn after the one the failed prefill left open. After the
+     * reset, the flag's numbers are the engine's again.
+     */
+    @Test
+    fun testXc_exactStatsAfterAFailedMessage() {
+        val model = modelFile()
+        assumeTrue("No .litertlm pushed — skipping", model != null)
+        ensureNativeInit()
+        releaseSharedEngine()
+        Teardowns.await(Teardowns.mark())
+        // About 1,100 tokens each: the first fits, the second fits alone but not
+        // in the 2,048-token context the first leaves.
+        val long = "The quick brown fox jumps over the lazy dog. ".repeat(110)
+        fun streamed(llm: HybridLiteRTLM, prompt: String): Result<String> =
+            awaitResult(llm.execute(arrayOf(textPart(prompt)), { _, _ -> }, options(maxOutputTokens = 8.0)))
+        val later = mutableMapOf<Boolean, List<String>>()
+        for (exact in listOf(true, false)) {
+            val label = if (exact) "with the flag" else "without the flag"
+            val llm = HybridLiteRTLM()
+            try {
+                llm.loadModelBlocking(model!!.absolutePath, llmConfig(exactStats = exact))
+                streamed(llm, long).getOrThrow()
+                println("[android-int][exact-stats] $label: context ${llm.getContextTokenCount()} after the first long message")
+                val failed = streamed(llm, long)
+                println("[android-int][exact-stats] $label: the second long message ${failed.fold({ "ran: $it" }, { "failed: $it" })}")
+                assertTrue("$label: a message that doesn't fit in what is left of the context ran", failed.isFailure)
+                later[exact] = List(2) { streamed(llm, "Say hello.").fold({ "ran: $it" }, { "failed: $it" }) }
+                println("[android-int][exact-stats] $label: the next two messages ${later[exact]}")
+                llm.resetConversation(null, null, null)
+                val before = knownContextTokens(llm).coerceAtLeast(0.0)
+                val (reply, _) = generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
+                val stats = llm.getStats()
+                val grew = llm.getContextTokenCount() - before
+                println(
+                    "[android-int][exact-stats] $label, after a reset: prompt ${stats.promptTokens} + completion " +
+                        "${stats.completionTokens}, context grew $grew, ${reply.length} chars",
+                )
+                assertTrue("$label: after a reset", reply.isNotBlank())
+                if (exact) assertEquals("after a reset", grew, stats.totalTokens, 0.0)
+            } finally {
+                llm.close()
+                Teardowns.await(Teardowns.mark())
+            }
+        }
+        for ((exact, outcomes) in later) {
+            assertTrue(
+                "${if (exact) "with" else "without"} the flag, the messages after a failed one: $outcomes",
+                outcomes.size == 2 && outcomes.all { it.startsWith("failed") },
+            )
         }
     }
 

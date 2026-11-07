@@ -71,6 +71,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         private const val TAG = "HybridLiteRTLM"
         private val initLock = Any()
 
+        /** getStats() with no message completed in the live conversation. */
+        private val NO_STATS = GenerationStats(
+            promptTokens = 0.0,
+            completionTokens = 0.0,
+            totalTokens = 0.0,
+            timeToFirstToken = 0.0,
+            totalTime = 0.0,
+            tokensPerSecond = 0.0,
+        )
+
         /**
          * Map a [ComponentCallbacks2] trim level to a JS-facing warning, or
          * null for events that carry no memory-pressure signal. Trim levels
@@ -199,16 +209,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // and read from getHistory() which may be called from the JS thread.
     private val history: MutableList<Message> = Collections.synchronizedList(mutableListOf())
 
-    // Last generation stats
-    @Volatile
-    private var lastStats = GenerationStats(
-        promptTokens = 0.0,
-        completionTokens = 0.0,
-        totalTokens = 0.0,
-        timeToFirstToken = 0.0,
-        totalTime = 0.0,
-        tokensPerSecond = 0.0
-    )
+    /**
+     * What getStats() reports: the last completed message's stats, with the
+     * conversation it ran in. They count only while that conversation is the
+     * live one, so after a reset, unload(), close() or a new load getStats()
+     * reads zeros until the next message completes, as on iOS. Written without
+     * stateLock, like [contextTokens].
+     */
+    private val lastStats = AtomicReference<Pair<Conversation, GenerationStats>?>(null)
 
     /**
      * What getContextTokenCount() reports: a token count read from the engine
@@ -649,7 +657,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun isReady(): Boolean = ready
 
     override fun getStats(): GenerationStats {
-        return lastStats
+        val (counted, stats) = lastStats.get() ?: return NO_STATS
+        return if (counted === conversation) stats else NO_STATS
     }
 
     override fun getMemoryUsage(): MemoryUsage = processMemoryUsage()
@@ -801,6 +810,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // Nothing runs and nothing is live, so nothing records a count until a
                     // load: let go of the closed conversation the last one belonged to
                     contextTokens.set(null)
+                    lastStats.set(null)
                     engine.also { engine = null }
                 }
                 eng?.close()
@@ -1267,7 +1277,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         history = history,
                         userMessage = userTextRepresentation,
                         onStatsReady = { stats ->
-                            lastStats = stats
+                            lastStats.set(conv to stats)
                             recordContextTokens(conv)
                         },
                         onFailure = { e -> errorRef.set(e) },
@@ -1331,7 +1341,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                     history.add(Message(Role.MODEL, textResponse, responseMsg.toolCalls.toNitroToolCalls(), null))
 
-                    lastStats = generationStats(engineStats(conv), userTextRepresentation, response, elapsedMs)
+                    lastStats.set(conv to generationStats(engineStats(conv), userTextRepresentation, response, elapsedMs))
                     recordContextTokens(conv)
                     response
                 }

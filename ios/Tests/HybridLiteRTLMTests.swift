@@ -130,7 +130,7 @@ class HybridLiteRTLMTests: XCTestCase {
         let engine = HybridLiteRTLM.EngineTurn(
             promptTokens: 20, prefillTokensPerSecond: 200, completionTokens: 128, decodeTokensPerSecond: 64)
         let streamed = HybridLiteRTLM.generationStats(
-            engine: engine, promptCharacters: 2, responseCharacters: 7, totalTime: 4, streamedFirstToken: 0.09)
+            engine: engine, prompt: "hi", response: "a reply", totalTime: 4, streamedFirstToken: 0.09)
         XCTAssertEqual(streamed.promptTokens, 20)
         XCTAssertEqual(streamed.completionTokens, 128)
         XCTAssertEqual(streamed.totalTokens, 148)
@@ -139,14 +139,20 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertEqual(streamed.tokensPerSecond, 64)
 
         let blocking = HybridLiteRTLM.generationStats(
-            engine: engine, promptCharacters: 2, responseCharacters: 7, totalTime: 4, streamedFirstToken: nil)
+            engine: engine, prompt: "hi", response: "a reply", totalTime: 4, streamedFirstToken: nil)
         XCTAssertEqual(blocking.timeToFirstToken, 100, accuracy: 1e-9, "20 tokens at 200 tokens/s: the last prefill")
+
+        // A stream whose text never reached the callback (all of the budget went
+        // to thinking, say) passes its start as its first token: 0, as on Android.
+        let silent = HybridLiteRTLM.generationStats(
+            engine: engine, prompt: "hi", response: "", totalTime: 4, streamedFirstToken: 0)
+        XCTAssertEqual(silent.timeToFirstToken, 0)
     }
 
     /// Without the engine's numbers: about 4 characters per token, as on Android.
     func testStatsWithoutTheEngine() {
         let streamed = HybridLiteRTLM.generationStats(
-            engine: nil, promptCharacters: 8, responseCharacters: 4, totalTime: 2, streamedFirstToken: 0.09)
+            engine: nil, prompt: "12345678", response: "1234", totalTime: 2, streamedFirstToken: 0.09)
         XCTAssertEqual(streamed.promptTokens, 2)
         XCTAssertEqual(streamed.completionTokens, 1)
         XCTAssertEqual(streamed.totalTokens, 3)
@@ -154,11 +160,17 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertEqual(streamed.tokensPerSecond, 0.5)
 
         let blocking = HybridLiteRTLM.generationStats(
-            engine: nil, promptCharacters: 8, responseCharacters: 4, totalTime: 2, streamedFirstToken: nil)
+            engine: nil, prompt: "12345678", response: "1234", totalTime: 2, streamedFirstToken: nil)
         XCTAssertEqual(blocking.timeToFirstToken, 0)
         let instant = HybridLiteRTLM.generationStats(
-            engine: nil, promptCharacters: 0, responseCharacters: 0, totalTime: 0, streamedFirstToken: nil)
+            engine: nil, prompt: "", response: "", totalTime: 0, streamedFirstToken: nil)
         XCTAssertEqual(instant.tokensPerSecond, 0, "no time, no rate")
+
+        // Lengths in UTF-16 code units, as Android's String.length: four emoji are 8.
+        let emoji = HybridLiteRTLM.generationStats(
+            engine: nil, prompt: "👍👍👍👍", response: "日本語", totalTime: 2, streamedFirstToken: nil)
+        XCTAssertEqual(emoji.promptTokens, 2)
+        XCTAssertEqual(emoji.completionTokens, 0.75)
     }
 
     func testDeleteModelCleanupLogic() async throws {
