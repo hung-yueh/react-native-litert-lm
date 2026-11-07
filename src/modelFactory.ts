@@ -138,6 +138,8 @@ export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
    * conversations coexist without loading the model twice; switching between
    * them replays the target's transcript (re-prefill cost on the next
    * message). All conversations share one queue: one message runs at a time.
+   * A manual `resetConversation()` restarts only the default conversation:
+   * the others keep their turns and their waiting messages.
    */
   createConversation: (options?: ConversationOptions) => ConversationHandle;
 };
@@ -441,8 +443,15 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   // `null` identifies the default conversation (top-level execute calls).
   let conversationsInUse = false;
   let conversationSeq = 0;
-  let activeConversationId: string | null = null;
+  /**
+   * The conversation whose transcript the native context holds; `undefined`
+   * while native resets, and after a reset that failed. Then none does: the
+   * next switch replays a saved transcript and saves nothing native left.
+   */
+  let activeConversationId: string | null | undefined = null;
   const savedTranscripts = new Map<string | null, Message[]>();
+  /** The default conversation's options, set by the last manual reset */
+  let defaultConversationOptions: ConversationOptions | undefined;
   /** Settles when the last task queued so far has settled */
   let queueTail: Promise<void> = Promise.resolve();
   /** Tasks queued or running; 0 while the queue is idle */
@@ -462,16 +471,44 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     return requested;
   };
 
+  /**
+   * Give conversation `id` the native context: save the outgoing
+   * conversation's transcript, then replay `id`'s with its options (the
+   * default conversation's come from the last manual reset). If native
+   * fails, the error is typed and no conversation holds the context.
+   */
   const switchTo = (id: string | null, options?: ConversationOptions) => {
     if (activeConversationId === id) return;
-    savedTranscripts.set(activeConversationId, native.getHistory());
+    if (activeConversationId !== undefined) {
+      savedTranscripts.set(activeConversationId, native.getHistory());
+    }
     const transcript = savedTranscripts.get(id) ?? [];
-    native.resetConversation(
-      transcript.length > 0 ? JSON.stringify(transcript) : undefined,
-      options?.systemPrompt,
-      supportedSpeculativeDecoding(options?.speculativeDecoding),
-    );
+    const switchOptions = id === null ? defaultConversationOptions : options;
+    // Android replaces its transcript before it can fail, so until native
+    // returns, what it holds is no conversation's transcript
+    activeConversationId = undefined;
+    try {
+      native.resetConversation(
+        transcript.length > 0 ? JSON.stringify(transcript) : undefined,
+        switchOptions?.systemPrompt,
+        supportedSpeculativeDecoding(switchOptions?.speculativeDecoding),
+      );
+    } catch (e) {
+      throw toLiteRTLMError(e, "load");
+    }
     activeConversationId = id;
+  };
+
+  /**
+   * `turns` up to the model's last reply: without the user or tool turns of
+   * a message that got no answer. Android writes those when a message
+   * starts and keeps them when it is cancelled; iOS writes a message's
+   * turns only once it completes.
+   */
+  const answeredTurns = (turns: Message[]): Message[] => {
+    let end = turns.length;
+    while (end > 0 && (turns[end - 1].role === "user" || turns[end - 1].role === "tool")) end--;
+    return end === turns.length ? turns : turns.slice(0, end);
   };
 
   /**
@@ -566,14 +603,19 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       release: () =>
         enqueue(async () => {
           if (released) return;
-          // If this conversation holds the native context, hand it back to the
-          // default conversation (replaying its transcript, if any). A closed
-          // instance has no context to hand back.
-          if (activeConversationId === id && !closed) {
-            switchTo(null);
-          }
-          savedTranscripts.delete(id);
           released = true;
+          try {
+            // If this conversation holds the native context, hand it back to
+            // the default conversation (replaying its transcript, if any). A
+            // closed instance has no context to hand back.
+            if (activeConversationId === id && !closed) switchTo(null);
+          } catch {
+            // Native couldn't (no model loaded, or an unload under way): no
+            // conversation holds the context now, and the next message
+            // replays its own. The handle is released all the same.
+          } finally {
+            savedTranscripts.delete(id);
+          }
         }),
     };
   };
@@ -581,6 +623,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   const resetConversationManagerState = () => {
     savedTranscripts.clear();
     activeConversationId = null;
+    defaultConversationOptions = undefined;
   };
 
   // unload(), close() and resetConversation() go straight to native, never
@@ -656,23 +699,30 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       }
       if (prop === "resetConversation") {
         return (historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean) => {
-          // A manual reset clears the live context — ownership returns to the
-          // default conversation. Native cancels the message generating; the
+          // A manual reset starts the default conversation over and gives it
+          // the live context. Native cancels the message generating; the
           // default conversation's messages waiting behind it are cancelled
           // too. Other conversations' waiting messages still run.
           defaultResets++;
+          // A conversation handle holding the context keeps its turns for its
+          // next message, without the unanswered one this reset cancels
+          if (activeConversationId !== null && activeConversationId !== undefined) {
+            savedTranscripts.set(activeConversationId, answeredTurns(native.getHistory()));
+          }
+          // Switching back to the default conversation replays it with this
+          // reset's options. If native fails, no conversation holds the
+          // context, and the default conversation starts over empty.
+          const supported = supportedSpeculativeDecoding(speculativeDecoding);
+          savedTranscripts.delete(null);
+          defaultConversationOptions = { systemPrompt, speculativeDecoding: supported };
+          activeConversationId = undefined;
           let result: void;
           try {
-            result = target.resetConversation(
-              historyJson,
-              systemPrompt,
-              supportedSpeculativeDecoding(speculativeDecoding),
-            );
+            result = target.resetConversation(historyJson, systemPrompt, supported);
           } catch (e) {
             throw toLiteRTLMError(e, "load");
           }
           activeConversationId = null;
-          savedTranscripts.delete(null);
           recordMemorySnapshot();
           return result;
         };

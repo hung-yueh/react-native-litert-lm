@@ -344,8 +344,11 @@ llm.resetConversation(saved);</code></pre>
     rejects with <code>INFERENCE_CANCELLED</code>. If the new conversation
     can't be created, a typed <a href="memory.html#errors"><code>LiteRTLMError</code></a>
     says why: thrown by the reset on Android, and by the next message on iOS,
-    where the reset returns before the engine does the work. A manual reset returns the
-    live context to the default conversation. For several chats over one engine, prefer
+    where the reset returns before the engine does the work. A manual reset restarts the
+    default conversation and gives it the live context. Conversations from
+    <code>createConversation()</code> are spared: their waiting messages still run, and
+    one that held the context keeps its turns, all but a message the reset cancelled.
+    For several chats over one engine, prefer
     <a href="#multiple-conversations">createConversation()</a>, which does
     this bookkeeping for you, per-conversation
     <code>speculativeDecoding</code> included.
@@ -362,9 +365,10 @@ llm.resetConversation(saved);</code></pre>
       one with <code>createLLM()</code> afterwards.
     </p>
     <p>
-      Neither waits for a message still generating: both cancel it (its
-      promise rejects with <code>INFERENCE_CANCELLED</code>) and report
-      not-ready at once. <code>close()</code> returns immediately and frees
+      Neither waits for a message still generating: both cancel it and
+      every message waiting behind it, in any conversation (their promises
+      reject with <code>INFERENCE_CANCELLED</code>), and report not-ready
+      at once. <code>close()</code> returns immediately and frees
       the engine in the background; a model loaded afterwards, on any
       instance, waits for that, so two models never sit in memory together.
     </p>
@@ -438,9 +442,9 @@ const plain = llm.createConversation({ speculativeDecoding: false });</code></pr
     <li>The replay means a <strong>re-prefill cost on the next message</strong> — expect seconds of extra latency on long transcripts.</li>
     <li>Multimodal turns replay as text placeholders (<code>[Image]</code>, <code>[Audio]</code>); images and audio are not re-encoded on switch.</li>
     <li><strong>Tool exchanges replay too</strong> — the model's tool calls and the <code>'tool'</code> results — so a restored conversation still knows what the tools returned. See <a href="inference.html#tool-calling">Tool calling</a>.</li>
-    <li>Once <code>createConversation()</code> has been called, all inference — including top-level <code>execute()</code> — <strong>serializes through one queue</strong>.</li>
+    <li>All inference on an instance — top-level <code>execute()</code> and every conversation — <strong>runs through one queue</strong>, one message at a time, in call order.</li>
     <li>Calls on a released handle throw: <code>LiteRTLM: conversation '&lt;id&gt;' has been released.</code> Conversation ids follow the pattern <code>conversation_&lt;n&gt;</code>.</li>
-    <li>Calling <code>resetConversation()</code> manually on the instance clears the live context and returns ownership to the default conversation.</li>
+    <li>Calling <code>resetConversation()</code> manually on the instance restarts the default conversation and gives it the live context. The other conversations keep their turns and their waiting messages; one that held the context loses only a message the reset cancelled. Switching back to the default conversation keeps that reset's <code>systemPrompt</code> and <code>speculativeDecoding</code>.</li>
   </ul>
 
   <h2 id="legacy-send-methods">Deprecated send methods <span class="pill dep">deprecated</span></h2>

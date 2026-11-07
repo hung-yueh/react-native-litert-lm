@@ -77,6 +77,16 @@
     complete response at the end. Without <code>onToken</code>, the call blocks
     and resolves with the full response string.
   </p>
+  <p>
+    Calls on one instance run one at a time, in the order they were made. A
+    call made while another is generating waits its turn, and reads its parts
+    (buffers included) only then. <code>resetConversation()</code>,
+    <code>loadModel()</code>, <code>unload()</code> and <code>close()</code>
+    cancel the message generating and the messages waiting behind it, which
+    reject with <code>INFERENCE_CANCELLED</code>. A reset spares the waiting
+    messages of <a href="create-llm.html#multiple-conversations">other
+    conversations</a>.
+  </p>
   <div class="code">
     <div class="code-head"><span>typescript</span></div>
     <pre><code>// Streaming: tokens arrive as they are generated

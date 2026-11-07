@@ -468,9 +468,11 @@ long transcripts — engine-side prefix caching that would make this near-free
 is [in progress upstream](https://github.com/google-ai-edge/LiteRT-LM/issues/2807)).
 Frequent A/B ping-ponging with long histories will feel it; occasional
 switching won't. Multimodal turns replay as `[Image]`/`[Audio]` text
-placeholders. Once conversations are in use, inference calls are serialized
-so a switch can never interrupt a generation; top-level `llm.execute()` acts
-as its own "default" conversation.
+placeholders. Inference calls on an instance run one at a time, with or
+without conversations, so a switch can never interrupt a generation;
+top-level `llm.execute()` acts as its own "default" conversation. A manual
+`llm.resetConversation()` restarts only that default conversation: the
+others keep their turns and their waiting messages.
 
 ## Embeddings
 

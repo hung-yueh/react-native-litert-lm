@@ -166,4 +166,122 @@ describe('multi-conversation manager', () => {
     // Fresh manager state: the conversation re-activates with no seed.
     expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined);
   });
+
+  describe('native failures and manual resets', () => {
+    const mockReset = mockLiteRTLM.resetConversation as jest.Mock;
+    /** What Android throws when no model is loaded (or an unload is under way). */
+    const notLoaded = () => {
+      throw new Error('[LiteRTLM:execute:FAILED_PRECONDITION:MODEL_NOT_LOADED] No model loaded. Call loadModel() first.');
+    };
+
+    it('rejects a switch that native refuses with a typed error, and switches again next time', async () => {
+      const conv = llm.createConversation();
+      mockReset.mockImplementationOnce(notLoaded);
+      await expect(conv.execute([{ type: 'text', text: 'hi' }])).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' });
+      expect(mockExecute).not.toHaveBeenCalled();
+
+      await conv.execute([{ type: 'text', text: 'again' }]);
+      expect(mockReset).toHaveBeenCalledTimes(2);
+      expect(mockExecute).toHaveBeenCalledTimes(1);
+    });
+
+    it("doesn't save what a failed switch left behind as the outgoing conversation's transcript", async () => {
+      const historyA = [
+        { role: 'user', content: 'question A' },
+        { role: 'model', content: 'answer A' },
+      ];
+      const convA = llm.createConversation();
+      const convB = llm.createConversation();
+      await convA.execute([{ type: 'text', text: 'question A' }]);
+
+      // The switch to B saves A's turns; native then fails, after replacing
+      // its transcript (as Android does)
+      mockGetHistory.mockReturnValueOnce(historyA);
+      mockReset.mockImplementationOnce(notLoaded);
+      await expect(convB.execute([{ type: 'text', text: 'question B' }])).rejects.toMatchObject({
+        code: 'MODEL_NOT_LOADED',
+      });
+
+      // The retry saves nothing over A's transcript…
+      mockGetHistory.mockReturnValue([{ role: 'user', content: 'what native left' }]);
+      await convB.execute([{ type: 'text', text: 'question B' }]);
+      // …so switching back to A replays A's own turns
+      await convA.execute([{ type: 'text', text: 'follow-up A' }]);
+      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(historyA), undefined, undefined);
+    });
+
+    it('release() releases the handle even when native refuses the hand-back', async () => {
+      const conv = llm.createConversation();
+      await conv.execute([{ type: 'text', text: 'hi' }]); // conv holds the context
+      mockReset.mockImplementationOnce(notLoaded); // e.g. an unload under way on Android
+
+      await expect(conv.release()).resolves.toBeUndefined();
+      expect(() => conv.getHistory()).toThrow(/has been released/);
+
+      // Nothing holds the context: the default conversation's next message replays it
+      mockReset.mockClear();
+      await llm.execute([{ type: 'text', text: 'top level' }]);
+      expect(mockReset).toHaveBeenCalledWith(undefined, undefined, undefined);
+    });
+
+    it('a manual reset keeps the turns of the conversation that held the context', async () => {
+      const turns = [
+        { role: 'user', content: 'question' },
+        { role: 'model', content: 'answer' },
+      ];
+      const conv = llm.createConversation();
+      await conv.execute([{ type: 'text', text: 'question' }]);
+
+      mockGetHistory.mockReturnValue(turns);
+      llm.resetConversation(); // the default conversation takes the context
+      mockGetHistory.mockReturnValue([]);
+      expect(conv.getHistory()).toEqual(turns);
+
+      await conv.execute([{ type: 'text', text: 'follow-up' }]);
+      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(turns), undefined, undefined);
+    });
+
+    it.each([
+      ['user turn', [{ role: 'user', content: 'in flight' }]],
+      [
+        'tool results',
+        [
+          { role: 'tool', content: '{"temp":21}', toolName: 'weather' },
+          { role: 'tool', content: '{"rain":false}', toolName: 'rain' },
+        ],
+      ],
+    ])("leaves out the %s of the handle's message that a manual reset cancels", async (_, unanswered) => {
+      const answered = [
+        { role: 'user', content: 'question' },
+        { role: 'model', content: 'answer' },
+      ];
+      const conv = llm.createConversation();
+      await conv.execute([{ type: 'text', text: 'question' }]);
+
+      // Android has written the turns of the message still generating
+      mockGetHistory.mockReturnValue([...answered, ...unanswered]);
+      llm.resetConversation();
+      mockGetHistory.mockReturnValue([]);
+      expect(conv.getHistory()).toEqual(answered);
+    });
+
+    it('switching back to the default conversation keeps the options of its last manual reset', async () => {
+      llm.resetConversation(undefined, 'You are a pirate.', true);
+      const conv = llm.createConversation();
+      await conv.execute([{ type: 'text', text: 'in conversation' }]);
+
+      await llm.execute([{ type: 'text', text: 'top level' }]);
+      expect(mockReset).toHaveBeenLastCalledWith(undefined, 'You are a pirate.', true);
+    });
+
+    it("a load forgets the default conversation's reset options", async () => {
+      llm.resetConversation(undefined, 'You are a pirate.');
+      await llm.loadModel('https://example.com/model.litertlm');
+      const conv = llm.createConversation();
+      await conv.execute([{ type: 'text', text: 'in conversation' }]);
+
+      await llm.execute([{ type: 'text', text: 'top level' }]);
+      expect(mockReset).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    });
+  });
 });
