@@ -85,6 +85,15 @@ export interface ConversationHandle {
  * Extended LiteRT-LM instance with memory controls and typed event streaming,
  * plus an augmented loadModel that accepts a download progress callback and
  * runs an automatic pre-flight memory check.
+ *
+ * Inference calls (`execute()`, `executeWithEvents()`, the deprecated
+ * `sendMessage*()` methods and conversation handles) run one at a time, in
+ * the order they were made. A call made while another is generating waits
+ * its turn, and reads its parts (buffers included) only then. A waiting
+ * message is cancelled like the one generating, rejecting with
+ * `INFERENCE_CANCELLED`: `resetConversation()` cancels the default
+ * conversation's waiting messages, and `loadModel()` (once it replaces the
+ * engine), `unload()` and `close()` cancel all of them.
  */
 export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
   memoryTracker?: MemoryTracker;
@@ -128,7 +137,7 @@ export type LiteRTLMInstance = Omit<LiteRTLM, "loadModel"> & {
    * Create a logical conversation sharing the loaded engine. Multiple
    * conversations coexist without loading the model twice; switching between
    * them replays the target's transcript (re-prefill cost on the next
-   * message). Inference calls are serialized once conversations are in use.
+   * message). All conversations share one queue: one message runs at a time.
    */
   createConversation: (options?: ConversationOptions) => ConversationHandle;
 };
@@ -179,6 +188,18 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   // bundle when either is called stops before the engine loads anything
   let teardowns = 0;
   let closed = false;
+  // Native rejects a message sent before a reset, load, unload or close that
+  // hasn't finished, whether it is generating or waiting to start. Messages
+  // waiting in the inference queue (below) haven't reached native yet, so the
+  // queue applies the same rule with two counters: a message notes them when
+  // it is sent and is cancelled, not run, if one has moved by its turn.
+  /** Moved as loadModel() replaces the engine, and by unload() and close() */
+  let engineEpoch = 0;
+  /** Moved by resetConversation(): the default conversation starts over */
+  let defaultResets = 0;
+
+  const closedError = () =>
+    new LiteRTLMError("MODEL_NOT_LOADED", "This instance is closed; create a new one with createLLM().");
 
   const checkBudget = (residentBytes: number, availableBytes: number) => {
     if (!budget?.onBudgetExceeded) return;
@@ -258,9 +279,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     if (config?.maxTokens !== undefined) {
       warnDeprecated("LLMConfig.maxTokens", "maxContextTokens and maxOutputTokens");
     }
-    if (closed) {
-      throw new LiteRTLMError("MODEL_NOT_LOADED", "This instance is closed; create a new one with createLLM().");
-    }
+    if (closed) throw closedError();
     const teardownsAtStart = teardowns;
     const modelPath = await ModelRegistry.resolveModel(
       pathOrUrl,
@@ -326,6 +345,9 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
         `The instance was ${closed ? "closed" : "unloaded"} before ${modelPath} finished loading; nothing was loaded.`,
       );
     }
+    // Replacing the engine cancels the message generating (native does that)
+    // and the messages waiting behind it (the queue does)
+    engineEpoch++;
     const result = await native.loadModel(modelPath, effectiveConfig).catch((e: unknown) => {
       throw toTypedError(e, "load", { modelPath, config: effectiveConfig });
     });
@@ -406,7 +428,13 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     return runExecute(parts, onToken, options);
   };
 
-  // ── Multi-conversation manager ─────────────────────────────────────────
+  // ── Inference queue and multi-conversation manager ─────────────────────
+  // An instance runs one message at a time, in call order. The engine has a
+  // single native conversation, and a message sent while another was still
+  // generating ran alongside it: on Android the first call resolved with the
+  // second's reply, and a message sent during another's prefill failed with
+  // "Session is not prefilled yet.".
+  //
   // One native context exists at a time; logical conversations are switched
   // by snapshotting the outgoing native history and replaying the incoming
   // transcript via resetConversation (re-prefill on the next message).
@@ -415,7 +443,10 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   let conversationSeq = 0;
   let activeConversationId: string | null = null;
   const savedTranscripts = new Map<string | null, Message[]>();
-  let switchQueue: Promise<void> = Promise.resolve();
+  /** Settles when the last task queued so far has settled */
+  let queueTail: Promise<void> = Promise.resolve();
+  /** Tasks queued or running; 0 while the queue is idle */
+  let queueLength = 0;
 
   /**
    * A per-conversation speculative-decoding request the loaded bundle can
@@ -443,29 +474,64 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     activeConversationId = id;
   };
 
-  /** Serialize `fn` behind every pending conversation operation. */
+  /**
+   * Run `fn` once every task queued before it has settled. On an idle queue
+   * it starts at once, in the caller's tick, as calls did before the queue
+   * existed: native execute() reads the message, buffers included, before it
+   * returns. A task that has to wait reads its arguments when its turn comes.
+   */
   const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
-    const task = switchQueue.then(fn);
-    switchQueue = task.then(
-      () => {},
-      () => {},
-    );
+    const previous = queueTail;
+    const idle = queueLength === 0;
+    let release!: () => void;
+    queueTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    queueLength++;
+    let task: Promise<T>;
+    if (idle) {
+      try {
+        task = Promise.resolve(fn());
+      } catch (e) {
+        task = Promise.reject(e);
+      }
+    } else {
+      task = previous.then(fn);
+    }
+    const settled = () => {
+      queueLength--;
+      release();
+    };
+    task.then(settled, settled);
     return task;
   };
 
   /**
-   * Run `fn` with conversation `id` active. A no-op passthrough until the
-   * first createConversation() — after that, all inference serializes through
-   * one queue so a context switch can never interrupt a generation.
+   * Queue an inference call in conversation `id` (null: the default one).
+   * When its turn comes, it rejects with INFERENCE_CANCELLED, without
+   * reaching native, if the engine was replaced since it was sent or, in
+   * the default conversation, the conversation was reset. Then `check`
+   * runs, and once conversations are in use the native context switches to
+   * `id`. On a closed instance the call rejects at once.
    */
   const withConversation = <T>(
     id: string | null,
     options: ConversationOptions | undefined,
     fn: () => Promise<T>,
+    check?: () => void,
   ): Promise<T> => {
-    if (!conversationsInUse) return fn();
+    if (closed) return Promise.reject(closedError());
+    const sentEngine = engineEpoch;
+    const sentResets = defaultResets;
     return enqueue(() => {
-      switchTo(id, options);
+      if (sentEngine !== engineEpoch || (id === null && sentResets !== defaultResets)) {
+        throw new LiteRTLMError(
+          "INFERENCE_CANCELLED",
+          "The conversation was reset or the model unloaded before this message ran.",
+        );
+      }
+      check?.();
+      if (conversationsInUse) switchTo(id, options);
       return fn();
     });
   };
@@ -485,16 +551,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
 
     return {
       id,
+      // `guard` runs before the switch: a released handle never takes the
+      // native context
       execute: (parts, onToken, options_) =>
-        withConversation(id, options, () => {
-          guard();
-          return runExecute(parts, onToken, options_);
-        }),
+        withConversation(id, options, () => runExecute(parts, onToken, options_), guard),
       executeWithEvents: (parts, onEvent, options_) =>
-        withConversation(id, options, () => {
-          guard();
-          return runExecuteWithEvents(parts, onEvent, options_);
-        }),
+        withConversation(id, options, () => runExecuteWithEvents(parts, onEvent, options_), guard),
       getHistory: () => {
         guard();
         return activeConversationId === id
@@ -505,8 +567,9 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
         enqueue(async () => {
           if (released) return;
           // If this conversation holds the native context, hand it back to the
-          // default conversation (replaying its transcript, if any).
-          if (activeConversationId === id) {
+          // default conversation (replaying its transcript, if any). A closed
+          // instance has no context to hand back.
+          if (activeConversationId === id && !closed) {
             switchTo(null);
           }
           savedTranscripts.delete(id);
@@ -520,8 +583,11 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     activeConversationId = null;
   };
 
+  // unload(), close() and resetConversation() go straight to native, never
+  // through the queue: they must reach the message that is generating.
   const unloadWrapped = async (): Promise<void> => {
     teardowns++;
+    engineEpoch++;
     await native.unload();
     loadedModelPath = undefined;
     loadedModelFileSize = -1;
@@ -533,6 +599,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
 
   const closeWrapped = (): void => {
     teardowns++;
+    engineEpoch++;
     closed = true;
     native.close();
   };
@@ -590,7 +657,10 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       if (prop === "resetConversation") {
         return (historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean) => {
           // A manual reset clears the live context — ownership returns to the
-          // default conversation.
+          // default conversation. Native cancels the message generating; the
+          // default conversation's messages waiting behind it are cancelled
+          // too. Other conversations' waiting messages still run.
+          defaultResets++;
           let result: void;
           try {
             result = target.resetConversation(

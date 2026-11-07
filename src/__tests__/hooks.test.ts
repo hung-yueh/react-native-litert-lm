@@ -152,6 +152,45 @@ describe('useModel React Hook Unit Tests', () => {
     expect(hookResult.result.current.memorySummary).toBeDefined();
   });
 
+  it('runs overlapping generate() calls in turn and stays generating until the last ends', async () => {
+    let hookResult: any;
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', { autoLoad: true }));
+    });
+
+    const execute = mockLiteRTLM.execute as jest.Mock;
+    const defaultExecute = execute.getMockImplementation()!;
+    const finishes: Array<(reply: string) => void> = [];
+    execute.mockImplementation(() => new Promise<string>((resolve) => { finishes.push(resolve); }));
+    try {
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await TestRenderer.act(async () => {
+        first = hookResult.result.current.generate("one");
+        second = hookResult.result.current.generate("two");
+      });
+      expect(hookResult.result.current.isGenerating).toBe(true);
+      expect(finishes).toHaveLength(1); // "two" waits its turn
+
+      await TestRenderer.act(async () => {
+        finishes[0]("reply one");
+        await first;
+      });
+      expect(finishes).toHaveLength(2);
+      expect(hookResult.result.current.isGenerating).toBe(true); // "two" is generating
+
+      await TestRenderer.act(async () => {
+        finishes[1]("reply two");
+        await second;
+      });
+      expect(hookResult.result.current.isGenerating).toBe(false);
+      await expect(first).resolves.toBe("reply one");
+      await expect(second).resolves.toBe("reply two");
+    } finally {
+      execute.mockImplementation(defaultExecute);
+    }
+  });
+
   it('should reset conversation correctly', async () => {
     let hookResult: any;
     

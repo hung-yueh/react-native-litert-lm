@@ -91,6 +91,9 @@ export function useModel(
   config?: UseModelConfig,
 ): UseModelResult {
   const modelRef = useRef<LiteRTLMInstance | null>(null);
+  // generate() calls running or waiting their turn (the instance runs one at
+  // a time): isGenerating stays true until the last of them ends
+  const pendingGenerations = useRef(0);
   const [isReady, setIsReady] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
@@ -289,6 +292,7 @@ export function useModel(
         throw new Error("Model not ready");
       }
 
+      pendingGenerations.current++;
       setIsGenerating(true);
       try {
         const response = await modelRef.current.execute(
@@ -303,7 +307,8 @@ export function useModel(
         setErrorCode(e instanceof LiteRTLMError ? e.code : null);
         throw e;
       } finally {
-        setIsGenerating(false);
+        pendingGenerations.current--;
+        if (pendingGenerations.current === 0) setIsGenerating(false);
       }
     },
     [isReady, refreshMemorySummary],
