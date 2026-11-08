@@ -424,6 +424,7 @@ extension HybridLiteRTLM {
         }
         defer { litert_lm_json_response_delete(response) }
 
+        let endTime = Date()
         var result = ""
         if let rs = litert_lm_json_response_get_string(response) {
             result = extractTextFromResponse(String(cString: rs))
@@ -435,8 +436,10 @@ extension HybridLiteRTLM {
             inputTurns: inputTurns,
             modelResponse: result,
             startTime: startTime,
-            conversation: conversation,
-            tokenCount: 0
+            endTime: endTime,
+            firstTokenTime: nil,
+            engine: exactStats ? Self.lastEngineTurn(conversation) : nil,
+            conversation: conversation
         )
         cleanup()
         promise.resolve(withResult: result)
@@ -445,40 +448,28 @@ extension HybridLiteRTLM {
 
 
     /// Record a finished turn in the transcript and stats. Runs on `queue`.
+    /// `endTime` and `engine` (its numbers, with `exactStats`) are read when the
+    /// turn finished; `firstTokenTime` is when a streamed turn's first token
+    /// reached the callback, nil for a blocking turn.
     func commitExecuteTurn(
         epoch: Int,
         inputTurns: [Message],
         modelResponse: String,
         startTime: Date,
-        conversation: OpaquePointer?,
-        tokenCount: Int
+        endTime: Date,
+        firstTokenTime: Date?,
+        engine: EngineTurn?,
+        conversation: OpaquePointer?
     ) {
         // The conversation was reset or closed while this turn ran: it
         // belongs to neither the new transcript nor the new stats.
         guard withSnapshot({ $0.epoch }) == epoch else { return }
-        let totalTime = Date().timeIntervalSince(startTime)
-        var compTok = Double(tokenCount)
-        var tps = 0.0, ttft = 0.0
-        if let conversation = conversation,
-           let bi = litert_lm_conversation_get_benchmark_info(conversation) {
-            let turns = litert_lm_benchmark_info_get_num_decode_turns(bi)
-            if turns > 0 {
-                let li = turns - 1
-                tps = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(bi, li)
-                compTok = Double(litert_lm_benchmark_info_get_decode_token_count_at(bi, li))
-            }
-            ttft = litert_lm_benchmark_info_get_time_to_first_token(bi)
-            litert_lm_benchmark_info_delete(bi)
-        }
-        let pt = Double(inputTurns.reduce(0) { $0 + $1.content.count }) / 4.0
-        if compTok == 0.0 { compTok = Double(modelResponse.count) / 4.0 }
-        // The engine and Date measure seconds; GenerationStats reports
-        // milliseconds, as documented and as Android does.
-        let stats = GenerationStats(
-            promptTokens: pt, completionTokens: compTok,
-            totalTokens: pt + compTok, timeToFirstToken: ttft * 1000,
-            totalTime: totalTime * 1000,
-            tokensPerSecond: tps > 0 ? tps : (compTok / totalTime)
+        let stats = Self.generationStats(
+            engine: engine,
+            prompt: inputTurns.map(\.content).joined(),
+            response: modelResponse,
+            totalTime: endTime.timeIntervalSince(startTime),
+            streamedFirstToken: firstTokenTime?.timeIntervalSince(startTime)
         )
         // Tool calls move out of the text into structured toolCalls.
         let (text, calls) = Self.splitToolCalls(modelResponse)
@@ -491,6 +482,60 @@ extension HybridLiteRTLM {
             s.history.append(reply)
             s.contextTokens = contextTokens
         }
+    }
+
+    /// The engine's numbers for one message (`LLMConfig.exactStats`).
+    struct EngineTurn {
+        let promptTokens: Int
+        let prefillTokensPerSecond: Double
+        let completionTokens: Int
+        let decodeTokensPerSecond: Double
+    }
+
+    /// The last prefill and decode turns of `conversation`, or nil if the engine
+    /// can't say: the message's stats are then estimated.
+    static func lastEngineTurn(_ conversation: OpaquePointer) -> EngineTurn? {
+        guard let info = litert_lm_conversation_get_benchmark_info(conversation) else { return nil }
+        defer { litert_lm_benchmark_info_delete(info) }
+        let prefill = litert_lm_benchmark_info_get_num_prefill_turns(info) - 1
+        let decode = litert_lm_benchmark_info_get_num_decode_turns(info) - 1
+        guard prefill >= 0, decode >= 0 else { return nil }
+        return EngineTurn(
+            promptTokens: Int(litert_lm_benchmark_info_get_prefill_token_count_at(info, prefill)),
+            prefillTokensPerSecond: litert_lm_benchmark_info_get_prefill_tokens_per_sec_at(info, prefill),
+            completionTokens: Int(litert_lm_benchmark_info_get_decode_token_count_at(info, decode)),
+            decodeTokensPerSecond: litert_lm_benchmark_info_get_decode_tokens_per_sec_at(info, decode)
+        )
+    }
+
+    /// What getStats() reports for a finished message: the engine's last prefill
+    /// and decode turns when it has them, else about 4 characters per token,
+    /// counted in UTF-16 code units as Android and JavaScript count a string's
+    /// length. `streamedFirstToken` is nil for a blocking message, which has no
+    /// first token to time: that reports the last prefill's time, or 0 without
+    /// the engine's numbers. Seconds in; GenerationStats reports milliseconds,
+    /// as documented and as Android does.
+    static func generationStats(
+        engine: EngineTurn?,
+        prompt: String,
+        response: String,
+        totalTime: TimeInterval,
+        streamedFirstToken: TimeInterval?
+    ) -> GenerationStats {
+        let promptTokens = engine.map { Double($0.promptTokens) } ?? Double(prompt.utf16.count) / 4.0
+        let completionTokens = engine.map { Double($0.completionTokens) } ?? Double(response.utf16.count) / 4.0
+        var lastPrefill = 0.0
+        if let engine = engine, engine.prefillTokensPerSecond > 0 {
+            lastPrefill = Double(engine.promptTokens) / engine.prefillTokensPerSecond
+        }
+        return GenerationStats(
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            totalTokens: promptTokens + completionTokens,
+            timeToFirstToken: (streamedFirstToken ?? lastPrefill) * 1000,
+            totalTime: totalTime * 1000,
+            tokensPerSecond: engine?.decodeTokensPerSecond ?? (totalTime > 0 ? completionTokens / totalTime : 0)
+        )
     }
 }
 

@@ -264,6 +264,7 @@ describe('useModel React Hook Unit Tests', () => {
         audioLoraPath: '/lora/audio.bin',
         loraRank: 16,
         forceLoad: true,
+        exactStats: true,
       }));
     });
 
@@ -279,6 +280,7 @@ describe('useModel React Hook Unit Tests', () => {
       audioLoraPath: '/lora/audio.bin',
       loraRank: 16,
       forceLoad: true,
+      exactStats: true,
     });
   });
 
