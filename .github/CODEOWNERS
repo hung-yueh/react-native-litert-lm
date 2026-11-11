@@ -1,0 +1,3 @@
+# The main branch ruleset requires a code-owner approval on every pull request,
+# so every change to main, this file included, needs hung-yueh's review.
+* @hung-yueh
