@@ -666,6 +666,11 @@ On-device memory scenarios (OOM prevention, pressure simulation, peak-RSS regres
 
 `example/` is a full showcase app — Chat + Memory dashboard (pre-flight verdict, live RSS sparkline, context forecast, pressure warnings), typed streaming events, the tuning knobs, and a **Search notes** sheet: on-device semantic search with EmbeddingGemma 2. Run it with `npm run build`, then `cd example && npm install && npx expo prebuild --clean && npx expo run:ios`.
 
+## Maintainers
+
+- [Hugh Chen](https://github.com/hung-yueh): creator
+- [Daisuke Majima](https://github.com/john-rocky): co-maintainer
+
 ## License
 
 Code is [MIT](LICENSE).
