@@ -23,7 +23,7 @@ describe('multi-conversation manager', () => {
     await conv.execute([{ type: 'text', text: 'hi' }]);
 
     expect(mockLiteRTLM.resetConversation).toHaveBeenCalledTimes(1);
-    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined, undefined);
     expect(mockLiteRTLM.execute).toHaveBeenCalledTimes(1);
   });
 
@@ -31,19 +31,41 @@ describe('multi-conversation manager', () => {
     const conv = llm.createConversation({ systemPrompt: 'You are pirate.' });
     await conv.execute([{ type: 'text', text: 'hi' }]);
 
-    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, 'You are pirate.', undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, 'You are pirate.', undefined, undefined);
   });
 
   it('passes the per-conversation speculative decoding switch', async () => {
     const conv = llm.createConversation({ speculativeDecoding: true });
     await conv.execute([{ type: 'text', text: 'hi' }]);
 
-    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, true);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, true, undefined);
   });
 
   it('passes speculative decoding through a manual resetConversation()', () => {
     llm.resetConversation(undefined, 'Be brief.', true);
-    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, 'Be brief.', true);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, 'Be brief.', true, undefined);
+  });
+
+  it('passes a speculative-decoding mode as the mode, not the boolean', async () => {
+    const conv = llm.createConversation({ speculativeDecoding: 'adaptive' });
+    await conv.execute([{ type: 'text', text: 'hi' }]);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, 'adaptive');
+
+    llm.resetConversation(undefined, undefined, undefined, 'off');
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, 'off');
+  });
+
+  it('drops an on/adaptive mode for a loaded bundle without a drafter, but keeps off', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await llm.loadModel('/m/plain.litertlm', { backend: 'cpu' }); // the mock bundle declares no drafter
+    const conv = llm.createConversation({ speculativeDecoding: 'adaptive' });
+    await conv.execute([{ type: 'text', text: 'hi' }]);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, undefined);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('no multi-token-prediction drafter'))).toBe(true);
+
+    llm.resetConversation(undefined, undefined, undefined, 'off');
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, 'off');
+    warn.mockRestore();
   });
 
   it('drops speculative decoding for a loaded bundle without a drafter', async () => {
@@ -52,7 +74,7 @@ describe('multi-conversation manager', () => {
     const conv = llm.createConversation({ speculativeDecoding: true });
     await conv.execute([{ type: 'text', text: 'hi' }]);
 
-    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, undefined);
     expect(warn.mock.calls.some((c) => String(c[0]).includes('no multi-token-prediction drafter'))).toBe(true);
     warn.mockRestore();
   });
@@ -79,7 +101,7 @@ describe('multi-conversation manager', () => {
     // Switching to B snapshots A's native history…
     mockGetHistory.mockReturnValueOnce(historyA);
     await convB.execute([{ type: 'text', text: 'question B' }]);
-    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, undefined);
 
     // …and switching back to A replays that snapshot.
     mockGetHistory.mockReturnValueOnce([
@@ -88,6 +110,7 @@ describe('multi-conversation manager', () => {
     await convA.execute([{ type: 'text', text: 'follow-up A' }]);
     expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(
       JSON.stringify(historyA),
+      undefined,
       undefined,
       undefined,
     );
@@ -103,7 +126,7 @@ describe('multi-conversation manager', () => {
     await llm.execute([{ type: 'text', text: 'top level' }]);
 
     // Default conversation had no prior transcript → plain reset.
-    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, undefined, undefined, undefined);
     expect(mockLiteRTLM.execute).toHaveBeenCalledTimes(2);
   });
 
@@ -164,7 +187,7 @@ describe('multi-conversation manager', () => {
     mockLiteRTLM.resetConversation.mockClear();
     await conv.execute([{ type: 'text', text: 'after reload' }]);
     // Fresh manager state: the conversation re-activates with no seed.
-    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined, undefined);
   });
 
   describe('native failures and manual resets', () => {
@@ -207,7 +230,7 @@ describe('multi-conversation manager', () => {
       await convB.execute([{ type: 'text', text: 'question B' }]);
       // …so switching back to A replays A's own turns
       await convA.execute([{ type: 'text', text: 'follow-up A' }]);
-      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(historyA), undefined, undefined);
+      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(historyA), undefined, undefined, undefined);
     });
 
     it('release() releases the handle even when native refuses the hand-back', async () => {
@@ -221,7 +244,7 @@ describe('multi-conversation manager', () => {
       // Nothing holds the context: the default conversation's next message replays it
       mockReset.mockClear();
       await llm.execute([{ type: 'text', text: 'top level' }]);
-      expect(mockReset).toHaveBeenCalledWith(undefined, undefined, undefined);
+      expect(mockReset).toHaveBeenCalledWith(undefined, undefined, undefined, undefined);
     });
 
     it('a manual reset keeps the turns of the conversation that held the context', async () => {
@@ -238,7 +261,7 @@ describe('multi-conversation manager', () => {
       expect(conv.getHistory()).toEqual(turns);
 
       await conv.execute([{ type: 'text', text: 'follow-up' }]);
-      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(turns), undefined, undefined);
+      expect(mockReset).toHaveBeenLastCalledWith(JSON.stringify(turns), undefined, undefined, undefined);
     });
 
     it.each([
@@ -271,7 +294,7 @@ describe('multi-conversation manager', () => {
       await conv.execute([{ type: 'text', text: 'in conversation' }]);
 
       await llm.execute([{ type: 'text', text: 'top level' }]);
-      expect(mockReset).toHaveBeenLastCalledWith(undefined, 'You are a pirate.', true);
+      expect(mockReset).toHaveBeenLastCalledWith(undefined, 'You are a pirate.', true, undefined);
     });
 
     it("a load forgets the default conversation's reset options", async () => {
@@ -281,7 +304,83 @@ describe('multi-conversation manager', () => {
       await conv.execute([{ type: 'text', text: 'in conversation' }]);
 
       await llm.execute([{ type: 'text', text: 'top level' }]);
-      expect(mockReset).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+      expect(mockReset).toHaveBeenLastCalledWith(undefined, undefined, undefined, undefined);
+    });
+  });
+  describe('a message the engine failed', () => {
+    const turns = [
+      { role: 'user', content: 'My name is Ada.' },
+      { role: 'model', content: 'Hello, Ada.' },
+    ];
+    const contextFull = () =>
+      Promise.reject(
+        new Error('[LiteRTLM:execute:RESOURCE_EXHAUSTED] Not enough space left in the context window for the input'),
+      );
+
+    it('replays the answered turns into a fresh conversation on the next message', async () => {
+      mockExecute.mockImplementationOnce(contextFull);
+      // Android keeps the user turn of the message that failed
+      mockGetHistory.mockReturnValue([...turns, { role: 'user', content: 'a very long message' }]);
+      await expect(llm.execute([{ type: 'text', text: 'a very long message' }])).rejects.toMatchObject({
+        code: 'CONTEXT_FULL',
+      });
+      expect(mockLiteRTLM.resetConversation).not.toHaveBeenCalled();
+
+      await llm.execute([{ type: 'text', text: 'What is my name?' }]);
+      expect(mockLiteRTLM.resetConversation).toHaveBeenCalledTimes(1);
+      expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(
+        JSON.stringify(turns),
+        undefined,
+        undefined,
+        undefined,
+      );
+      // …and only once: the replayed conversation holds the context again
+      await llm.execute([{ type: 'text', text: 'again' }]);
+      expect(mockLiteRTLM.resetConversation).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays a conversation handle with its own options', async () => {
+      const conv = llm.createConversation({ systemPrompt: 'Be brief.' });
+      await conv.execute([{ type: 'text', text: 'hi' }]);
+      mockExecute.mockImplementationOnce(contextFull);
+      mockGetHistory.mockReturnValue(turns);
+      await expect(conv.execute([{ type: 'text', text: 'long' }])).rejects.toMatchObject({ code: 'CONTEXT_FULL' });
+
+      await conv.execute([{ type: 'text', text: 'next' }]);
+      expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(
+        JSON.stringify(turns),
+        'Be brief.',
+        undefined,
+        undefined,
+      );
+    });
+
+    it('needs no replay after a cancelled message', async () => {
+      mockExecute.mockImplementationOnce(() =>
+        Promise.reject(new Error('[LiteRTLM:execute:CANCELLED] cancelled')),
+      );
+      await expect(llm.execute([{ type: 'text', text: 'hi' }])).rejects.toMatchObject({
+        code: 'INFERENCE_CANCELLED',
+      });
+      await llm.execute([{ type: 'text', text: 'next' }]);
+      expect(mockLiteRTLM.resetConversation).not.toHaveBeenCalled();
+    });
+
+    it('a failure the engine returned synchronously is handled the same way', async () => {
+      mockExecute.mockImplementationOnce(() => {
+        throw new Error('[LiteRTLM:execute:INTERNAL] Task failed with state: 7');
+      });
+      mockGetHistory.mockReturnValue(turns);
+      await expect(llm.execute([{ type: 'text', text: 'hi' }])).rejects.toMatchObject({
+        code: 'INFERENCE_FAILED',
+      });
+      await llm.execute([{ type: 'text', text: 'next' }]);
+      expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(
+        JSON.stringify(turns),
+        undefined,
+        undefined,
+        undefined,
+      );
     });
   });
 });

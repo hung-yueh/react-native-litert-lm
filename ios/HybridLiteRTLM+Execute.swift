@@ -155,6 +155,20 @@ extension HybridLiteRTLM {
                 return
             }
 
+            // exactStats: this message's numbers are the engine's first turns
+            // added after this point, so a stream still generating ends first.
+            if self.exactStats {
+                self.awaitStreams()
+                // A reset or close during the wait cancelled this conversation.
+                guard self.withSnapshot({ $0.epoch }) == epoch else {
+                    cleanup()
+                    promise.reject(withError: LiteRTLMNativeError(
+                        .execute, status: "CANCELLED", code: "INFERENCE_CANCELLED",
+                        "The conversation was reset or the model unloaded before this message ran."))
+                    return
+                }
+            }
+
             if let onToken = onToken {
                 self.runExecuteStreaming(
                     conversation: conversation,
@@ -315,9 +329,10 @@ extension HybridLiteRTLM {
 
     // MARK: - Streaming / blocking runners
 
-    /// Build per-message optional args from ExecuteOptions.
-    /// Caller must free the result with `litert_lm_conversation_optional_args_delete`.
-    func makeOptionalArgs(_ options: ExecuteOptions?) -> OpaquePointer? {
+    /// Build per-message optional args from ExecuteOptions; nil when there
+    /// are none. Throws the engine's reason when it rejects one. The caller
+    /// frees the result with `litert_lm_conversation_optional_args_delete`.
+    func makeOptionalArgs(_ options: ExecuteOptions?) throws -> OpaquePointer? {
         guard let options = options else { return nil }
         let hasPenalty = options.repetitionPenalty != nil
             || options.presencePenalty != nil
@@ -333,71 +348,107 @@ extension HybridLiteRTLM {
             || options.thinking != nil
             || hasPenalty
             || hasNgram
-        guard hasAny, let args = litert_lm_conversation_optional_args_create() else {
-            return nil
+        guard hasAny else { return nil }
+
+        func set(_ what: String, _ call: () -> LiteRtLmStatusCode) throws {
+            try LiteRTLMNativeError.check(.execute, "Failed to set \(what)", call)
         }
-        if let maxOut = options.maxOutputTokens {
-            litert_lm_conversation_optional_args_set_max_output_tokens(args, Int32(maxOut))
+        func create(_ what: String, _ call: (UnsafeMutablePointer<OpaquePointer?>) -> LiteRtLmStatusCode) throws -> OpaquePointer {
+            try LiteRTLMNativeError.created(.execute, "Failed to allocate \(what)", call)
         }
-        if let budget = options.visualTokenBudget {
-            litert_lm_conversation_optional_args_set_visual_token_budget(args, Int32(budget))
-        }
-        // v0.15: constrained decoding. Schema takes precedence over regex.
-        if let schema = options.responseSchema {
-            schema.withCString {
-                litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeJsonSchema, $0)
+
+        let args = try create("the message options") { litert_lm_conversation_optional_args_create($0) }
+        do {
+            if let maxOut = options.maxOutputTokens {
+                try set("maxOutputTokens \(Int(maxOut))") {
+                    litert_lm_conversation_optional_args_set_max_output_tokens(args, Int32(maxOut))
+                }
             }
-        } else if let regex = options.responseRegex {
-            regex.withCString {
-                litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeRegex, $0)
+            if let budget = options.visualTokenBudget {
+                try set("visualTokenBudget \(Int(budget))") {
+                    litert_lm_conversation_optional_args_set_visual_token_budget(args, Int32(budget))
+                }
             }
-        }
-        // v0.15: per-turn generation controls. Each opaque config is copied by
-        // the engine on set, so it is deleted immediately after (same
-        // create/set/delete convention as the sampler params).
-        if hasPenalty, let penalty = litert_lm_repetition_penalty_config_create() {
-            if let v = options.repetitionPenalty {
-                litert_lm_repetition_penalty_config_set_repetition_penalty(penalty, Float(v))
+            // v0.15: constrained decoding. Schema takes precedence over regex.
+            if let schema = options.responseSchema {
+                try set("responseSchema") {
+                    schema.withCString {
+                        litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeJsonSchema, $0)
+                    }
+                }
+            } else if let regex = options.responseRegex {
+                try set("responseRegex") {
+                    regex.withCString {
+                        litert_lm_conversation_optional_args_set_constraint(args, kLiteRtLmConstraintTypeRegex, $0)
+                    }
+                }
             }
-            if let v = options.presencePenalty {
-                litert_lm_repetition_penalty_config_set_presence_penalty(penalty, Float(v))
+            // v0.15: per-turn generation controls. Each opaque config is copied by
+            // the engine on set, so it is deleted immediately after (same
+            // create/set/delete convention as the sampler params).
+            if hasPenalty {
+                let penalty = try create("a repetition penalty config") { litert_lm_repetition_penalty_config_create($0) }
+                defer { litert_lm_repetition_penalty_config_delete(penalty) }
+                if let v = options.repetitionPenalty {
+                    try set("repetitionPenalty") { litert_lm_repetition_penalty_config_set_repetition_penalty(penalty, Float(v)) }
+                }
+                if let v = options.presencePenalty {
+                    try set("presencePenalty") { litert_lm_repetition_penalty_config_set_presence_penalty(penalty, Float(v)) }
+                }
+                if let v = options.frequencyPenalty {
+                    try set("frequencyPenalty") { litert_lm_repetition_penalty_config_set_frequency_penalty(penalty, Float(v)) }
+                }
+                if let v = options.penaltyWindowSize {
+                    try set("penaltyWindowSize") { litert_lm_repetition_penalty_config_set_window_size(penalty, Int32(v)) }
+                }
+                try set("the repetition penalties") {
+                    litert_lm_conversation_optional_args_set_repetition_penalty_config(args, penalty)
+                }
             }
-            if let v = options.frequencyPenalty {
-                litert_lm_repetition_penalty_config_set_frequency_penalty(penalty, Float(v))
+            if hasNgram {
+                let ngram = try create("a no-repeat n-gram config") { litert_lm_no_repeat_ngram_config_create($0) }
+                defer { litert_lm_no_repeat_ngram_config_delete(ngram) }
+                if let v = options.noRepeatNgramSize {
+                    try set("noRepeatNgramSize") { litert_lm_no_repeat_ngram_config_set_no_repeat_ngram_size(ngram, Int32(v)) }
+                }
+                if let v = options.noRepeatNgramWindowSize {
+                    try set("noRepeatNgramWindowSize") { litert_lm_no_repeat_ngram_config_set_window_size(ngram, Int32(v)) }
+                }
+                try set("the no-repeat n-gram config") {
+                    litert_lm_conversation_optional_args_set_no_repeat_ngram_config(args, ngram)
+                }
             }
-            if let v = options.penaltyWindowSize {
-                litert_lm_repetition_penalty_config_set_window_size(penalty, Int32(v))
+            if let tokens = options.suppressTokens {
+                let suppress = try create("a suppress-tokens config") { litert_lm_suppress_tokens_config_create($0) }
+                defer { litert_lm_suppress_tokens_config_delete(suppress) }
+                let ids = tokens.map { Int32($0) }
+                try set("suppressTokens") {
+                    ids.withUnsafeBufferPointer {
+                        litert_lm_suppress_tokens_config_set_suppress_tokens(suppress, $0.baseAddress, $0.count)
+                    }
+                }
+                try set("the suppressed tokens") {
+                    litert_lm_conversation_optional_args_set_suppress_tokens_config(args, suppress)
+                }
             }
-            litert_lm_conversation_optional_args_set_repetition_penalty_config(args, penalty)
-            litert_lm_repetition_penalty_config_delete(penalty)
-        }
-        if hasNgram, let ngram = litert_lm_no_repeat_ngram_config_create() {
-            if let v = options.noRepeatNgramSize {
-                litert_lm_no_repeat_ngram_config_set_no_repeat_ngram_size(ngram, Int32(v))
+            if let thinking = options.thinking {
+                let thinkingConfig = try create("a thinking config") { litert_lm_thinking_config_create($0) }
+                defer { litert_lm_thinking_config_delete(thinkingConfig) }
+                try set("thinking.enabled") {
+                    litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
+                }
+                if let budget = thinking.tokenBudget {
+                    try set("thinking.tokenBudget \(Int(budget))") {
+                        litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
+                    }
+                }
+                try set("the thinking options") {
+                    litert_lm_conversation_optional_args_set_thinking_config(args, thinkingConfig)
+                }
             }
-            if let v = options.noRepeatNgramWindowSize {
-                litert_lm_no_repeat_ngram_config_set_window_size(ngram, Int32(v))
-            }
-            litert_lm_conversation_optional_args_set_no_repeat_ngram_config(args, ngram)
-            litert_lm_no_repeat_ngram_config_delete(ngram)
-        }
-        if let tokens = options.suppressTokens,
-           let suppress = litert_lm_suppress_tokens_config_create() {
-            let ids = tokens.map { Int32($0) }
-            ids.withUnsafeBufferPointer { buf in
-                litert_lm_suppress_tokens_config_set_suppress_tokens(suppress, buf.baseAddress, buf.count)
-            }
-            litert_lm_conversation_optional_args_set_suppress_tokens_config(args, suppress)
-            litert_lm_suppress_tokens_config_delete(suppress)
-        }
-        if let thinking = options.thinking,
-           let thinkingConfig = litert_lm_thinking_config_create() {
-            litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
-            if let budget = thinking.tokenBudget {
-                litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
-            }
-            litert_lm_conversation_optional_args_set_thinking_config(args, thinkingConfig)
-            litert_lm_thinking_config_delete(thinkingConfig)
+        } catch {
+            litert_lm_conversation_optional_args_delete(args)
+            throw error
         }
         return args
     }
@@ -412,24 +463,34 @@ extension HybridLiteRTLM {
         cleanup: @escaping () -> Void,
         options: ExecuteOptions?
     ) {
-        let startTime = Date()
-        let optionalArgs = makeOptionalArgs(options)
-        defer { if let optionalArgs = optionalArgs { litert_lm_conversation_optional_args_delete(optionalArgs) } }
-        LiteRTLMNativeError.clearEngineError()
-        guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, optionalArgs) else {
-            let failure = LiteRTLMNativeError.fromEngine(.execute, context: "Inference failed")
+        let optionalArgs: OpaquePointer?
+        do { optionalArgs = try makeOptionalArgs(options) } catch {
             cleanup()
-            promise.reject(withError: failure)
+            promise.reject(withError: error)
             return
         }
-        defer { litert_lm_json_response_delete(response) }
-
-        let endTime = Date()
-        var result = ""
-        if let rs = litert_lm_json_response_get_string(response) {
-            result = extractTextFromResponse(String(cString: rs))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        defer { if let optionalArgs = optionalArgs { litert_lm_conversation_optional_args_delete(optionalArgs) } }
+        // exactStats: the engine's turns so far; this message's are the next ones.
+        let mark = exactStats ? Self.engineTurnMark(conversation) : nil
+        let startTime = Date()
+        let result: String
+        do {
+            let response = try LiteRTLMNativeError.created(.execute, "Inference failed") {
+                litert_lm_conversation_send_message(conversation, msgJson, nil, optionalArgs, $0)
+            }
+            defer { litert_lm_json_response_delete(response) }
+            let json = try LiteRTLMNativeError.read(.execute, "Failed to read the reply", nil) {
+                litert_lm_json_response_get_string(response, $0)
+            }
+            result = json.map {
+                extractTextFromResponse(String(cString: $0)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } ?? ""
+        } catch {
+            cleanup()
+            promise.reject(withError: error)
+            return
         }
+        let endTime = Date()
 
         commitExecuteTurn(
             epoch: epoch,
@@ -438,19 +499,20 @@ extension HybridLiteRTLM {
             startTime: startTime,
             endTime: endTime,
             firstTokenTime: nil,
-            engine: exactStats ? Self.lastEngineTurn(conversation) : nil,
+            engineMark: mark,
             conversation: conversation
         )
         cleanup()
         promise.resolve(withResult: result)
     }
 
-
-
     /// Record a finished turn in the transcript and stats. Runs on `queue`.
-    /// `endTime` and `engine` (its numbers, with `exactStats`) are read when the
-    /// turn finished; `firstTokenTime` is when a streamed turn's first token
-    /// reached the callback, nil for a blocking turn.
+    /// `endTime` is when the turn finished; `firstTokenTime` is when a streamed
+    /// turn's first token reached the callback, nil for a blocking turn.
+    /// `engineMark` (with `exactStats`) is the engine's turn count from before
+    /// the message was sent; its numbers are read here, on `queue`, never in a
+    /// stream callback (the engine forbids it, c/engine.h "Threading model").
+    /// `conversation` is the one the turn ran in; alive while the epoch holds.
     func commitExecuteTurn(
         epoch: Int,
         inputTurns: [Message],
@@ -458,12 +520,18 @@ extension HybridLiteRTLM {
         startTime: Date,
         endTime: Date,
         firstTokenTime: Date?,
-        engine: EngineTurn?,
+        engineMark: EngineTurnMark?,
         conversation: OpaquePointer?
     ) {
         // The conversation was reset or closed while this turn ran: it
-        // belongs to neither the new transcript nor the new stats.
+        // belongs to neither the new transcript nor the new stats. (A reset
+        // moves the epoch before it queues the deletion behind this block,
+        // so with the epoch unchanged the conversation is still alive.)
         guard withSnapshot({ $0.epoch }) == epoch else { return }
+        var engine: EngineTurn?
+        if let mark = engineMark, let conversation = conversation {
+            engine = Self.engineTurn(conversation, since: mark)
+        }
         let stats = Self.generationStats(
             engine: engine,
             prompt: inputTurns.map(\.content).joined(),
@@ -474,7 +542,7 @@ extension HybridLiteRTLM {
         // Tool calls move out of the text into structured toolCalls.
         let (text, calls) = Self.splitToolCalls(modelResponse)
         let reply = Message(role: .model, content: text, toolCalls: calls.isEmpty ? nil : calls, toolName: nil)
-        let contextTokens = conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+        let contextTokens = conversation.map(Self.tokenCount) ?? -1
         withSnapshot { s in
             guard s.epoch == epoch else { return }
             s.stats = stats
@@ -492,29 +560,72 @@ extension HybridLiteRTLM {
         let decodeTokensPerSecond: Double
     }
 
-    /// The last prefill and decode turns of `conversation`, or nil if the engine
-    /// can't say: the message's stats are then estimated.
-    static func lastEngineTurn(_ conversation: OpaquePointer) -> EngineTurn? {
-        guard let info = litert_lm_conversation_get_benchmark_info(conversation) else { return nil }
-        defer { litert_lm_benchmark_info_delete(info) }
-        let prefill = litert_lm_benchmark_info_get_num_prefill_turns(info) - 1
-        let decode = litert_lm_benchmark_info_get_num_decode_turns(info) - 1
-        guard prefill >= 0, decode >= 0 else { return nil }
-        return EngineTurn(
-            promptTokens: Int(litert_lm_benchmark_info_get_prefill_token_count_at(info, prefill)),
-            prefillTokensPerSecond: litert_lm_benchmark_info_get_prefill_tokens_per_sec_at(info, prefill),
-            completionTokens: Int(litert_lm_benchmark_info_get_decode_token_count_at(info, decode)),
-            decodeTokensPerSecond: litert_lm_benchmark_info_get_decode_tokens_per_sec_at(info, decode)
-        )
+    /// How many prefill and decode turns a conversation's benchmark holds.
+    struct EngineTurnMark {
+        let prefillTurns: Int
+        let decodeTurns: Int
     }
 
-    /// What getStats() reports for a finished message: the engine's last prefill
-    /// and decode turns when it has them, else about 4 characters per token,
-    /// counted in UTF-16 code units as Android and JavaScript count a string's
-    /// length. `streamedFirstToken` is nil for a blocking message, which has no
-    /// first token to time: that reports the last prefill's time, or 0 without
-    /// the engine's numbers. Seconds in; GenerationStats reports milliseconds,
-    /// as documented and as Android does.
+    /// Read `conversation`'s benchmark info (benchmark mode only). On `queue`:
+    /// through 0.19.1 GetBenchmarkInfo takes the session's lock, so a stream
+    /// callback must never call it during a decode.
+    private static func withBenchmarkInfo<T>(_ conversation: OpaquePointer, _ body: (OpaquePointer) throws -> T?) -> T? {
+        guard let info = try? LiteRTLMNativeError.created(.execute, "Failed to read the benchmark info", {
+            litert_lm_conversation_get_benchmark_info(conversation, $0)
+        }) else { return nil }
+        defer { litert_lm_benchmark_info_delete(info) }
+        return (try? body(info)) ?? nil
+    }
+
+    private static func turnCounts(_ info: OpaquePointer) throws -> EngineTurnMark {
+        let prefill = try LiteRTLMNativeError.read(.execute, "Failed to count the prefill turns", 0) {
+            litert_lm_benchmark_info_get_num_prefill_turns(info, $0)
+        }
+        let decode = try LiteRTLMNativeError.read(.execute, "Failed to count the decode turns", 0) {
+            litert_lm_benchmark_info_get_num_decode_turns(info, $0)
+        }
+        return EngineTurnMark(prefillTurns: prefill, decodeTurns: decode)
+    }
+
+    /// The engine's turn counts before a message is sent, or nil if it can't say.
+    static func engineTurnMark(_ conversation: OpaquePointer) -> EngineTurnMark? {
+        withBenchmarkInfo(conversation) { try turnCounts($0) }
+    }
+
+    /// One message's numbers: the first prefill and decode turns added since
+    /// `mark`, or nil if the engine can't say (the stats are then estimated).
+    /// The first, not the last: since LiteRT-LM 0.19 a reply that thought
+    /// ends with a second prefill, which refills the reply without its
+    /// thought (the "refill"), in the same message.
+    static func engineTurn(_ conversation: OpaquePointer, since mark: EngineTurnMark) -> EngineTurn? {
+        withBenchmarkInfo(conversation) { info in
+            let now = try turnCounts(info)
+            guard now.prefillTurns > mark.prefillTurns, now.decodeTurns > mark.decodeTurns else { return nil }
+            let prefill = mark.prefillTurns, decode = mark.decodeTurns
+            return EngineTurn(
+                promptTokens: try LiteRTLMNativeError.read(.execute, "Failed to read a prefill turn", 0) {
+                    litert_lm_benchmark_info_get_prefill_token_count_at(info, prefill, $0)
+                },
+                prefillTokensPerSecond: try LiteRTLMNativeError.read(.execute, "Failed to read a prefill rate", 0) {
+                    litert_lm_benchmark_info_get_prefill_tokens_per_sec_at(info, prefill, $0)
+                },
+                completionTokens: try LiteRTLMNativeError.read(.execute, "Failed to read a decode turn", 0) {
+                    litert_lm_benchmark_info_get_decode_token_count_at(info, decode, $0)
+                },
+                decodeTokensPerSecond: try LiteRTLMNativeError.read(.execute, "Failed to read a decode rate", 0) {
+                    litert_lm_benchmark_info_get_decode_tokens_per_sec_at(info, decode, $0)
+                }
+            )
+        }
+    }
+
+    /// What getStats() reports for a finished message: the engine's prefill
+    /// and decode turns for it when it has them, else about 4 characters per
+    /// token, counted in UTF-16 code units as Android and JavaScript count a
+    /// string's length. `streamedFirstToken` is nil for a blocking message,
+    /// which has no first token to time: that reports its prefill's time, or 0
+    /// without the engine's numbers. Seconds in; GenerationStats reports
+    /// milliseconds, as documented and as Android does.
     static func generationStats(
         engine: EngineTurn?,
         prompt: String,
@@ -524,18 +635,17 @@ extension HybridLiteRTLM {
     ) -> GenerationStats {
         let promptTokens = engine.map { Double($0.promptTokens) } ?? Double(prompt.utf16.count) / 4.0
         let completionTokens = engine.map { Double($0.completionTokens) } ?? Double(response.utf16.count) / 4.0
-        var lastPrefill = 0.0
+        var prefillTime = 0.0
         if let engine = engine, engine.prefillTokensPerSecond > 0 {
-            lastPrefill = Double(engine.promptTokens) / engine.prefillTokensPerSecond
+            prefillTime = Double(engine.promptTokens) / engine.prefillTokensPerSecond
         }
         return GenerationStats(
             promptTokens: promptTokens,
             completionTokens: completionTokens,
             totalTokens: promptTokens + completionTokens,
-            timeToFirstToken: (streamedFirstToken ?? lastPrefill) * 1000,
+            timeToFirstToken: (streamedFirstToken ?? prefillTime) * 1000,
             totalTime: totalTime * 1000,
             tokensPerSecond: engine?.decodeTokensPerSecond ?? (totalTime > 0 ? completionTokens / totalTime : 0)
         )
     }
 }
-

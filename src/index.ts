@@ -23,6 +23,7 @@ export type {
   MemoryWarningLevel,
   ToolDefinition,
   ToolCall,
+  SpeculativeDecodingMode,
 } from "./specs/LiteRTLM.nitro";
 
 
@@ -98,7 +99,7 @@ export * from "./hooks";
  * import { createLLM } from 'react-native-litert-lm';
  *
  * const llm = createLLM();
- * await llm.loadModel('/path/to/gemma-3n-e2b.litertlm', {
+ * await llm.loadModel('/path/to/gemma-4-E2B-it.litertlm', {
  *   backend: 'gpu',
  *   temperature: 0.7,
  *   maxContextTokens: 4096,
@@ -137,10 +138,6 @@ export const Models = {
   GEMMA_4_E2B: "gemma-4-E2B-it-litert-lm",
   /** Gemma 4 E4B Instruct (4B parameters, higher quality) */
   GEMMA_4_E4B: "gemma-4-E4B-it-litert-lm",
-  /** Gemma 3n E2B (2B parameters, efficient) */
-  GEMMA_3N_E2B: "gemma-3n-E2B-it-litert-lm-preview",
-  /** Gemma 3n E4B (4B parameters, higher quality) */
-  GEMMA_3N_E4B: "gemma-3n-E4B-it-litert-lm-preview",
   /** Gemma 3 1B (smallest Gemma) */
   GEMMA_3_1B: "Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096",
   /** Phi-4 Mini Instruct */
@@ -232,7 +229,7 @@ export function checkBackendSupport(backend: Backend): string | undefined {
  * Both iOS (v0.12.0 CLiteRTLM xcframework) and Android (LiteRT-LM SDK) ship the
  * vision/audio executor ops, so there is no platform-level block. Whether a
  * given call succeeds depends on the **loaded model**: only multimodal models
- * (e.g. Gemma 3n) bundle the vision/audio executors. Pass `multimodal: true` to
+ * (e.g. Gemma 4) bundle the vision/audio executors. Pass `multimodal: true` to
  * `loadModel` for such models, or rely on filename sniffing ("3n"/"gemma3").
  *
  * @returns Error message if multimodal is not supported, undefined if OK
@@ -253,25 +250,6 @@ export function checkMultimodalSupport(): string | undefined {
   // Supported on both platforms with a multimodal model loaded.
   return undefined;
 }
-
-/**
- * Download URL for the Gemma 3n E2B IT INT4 model (~3.66 GB as served).
- * Public mirror — no authentication required.
- *
- * @deprecated Prefer {@link GEMMA_4_E2B_IT}. It is smaller (2.58 GB), adds
- * audio input, tool calling and thinking, and is served directly from the
- * Hugging Face Hub. Gemma 3n is mirrored here only because the upstream repo
- * `google/gemma-3n-E2B-it-litert-lm` is gated and returns 401 without an
- * access token and manual license approval.
- *
- * Still fully supported. The former `https://litert.dev/...` URL now 301s to
- * this one, so apps already shipped against it keep working unchanged.
- *
- * Note: on iOS this exceeds the ~2 GB threshold, so the Extended Virtual
- * Addressing entitlement is required (same as Gemma 4).
- */
-export const GEMMA_3N_E2B_IT_INT4 =
-  "https://models.litert.dev/gemma-3n-E2B-it-int4.litertlm";
 
 /**
  * Download URL for the Gemma 4 E2B IT model (2.58 GB).

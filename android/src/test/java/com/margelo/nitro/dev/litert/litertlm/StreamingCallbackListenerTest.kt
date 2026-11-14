@@ -5,6 +5,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -90,6 +91,30 @@ class StreamingCallbackListenerTest {
     }
 
     @Test
+    fun aReplyThatThoughtEstimatesThePromptSideButKeepsTheEngineDecode() {
+        // LiteRT-LM 0.19+ re-prefills a reply with channel content at the end of
+        // the same message, so the engine's last prefill turn is that refill.
+        val stats = generationStats(engine, "12345678", "a reply", 4_000.0, refilled = true)
+        assertEquals("estimated from 8 characters", 2.0, stats.promptTokens, 0.0)
+        assertEquals("the engine's decode count", 128.0, stats.completionTokens, 0.0)
+        assertEquals(64.0, stats.tokensPerSecond, 0.0)
+        assertEquals("a blocking message has no prefill time to report then", 0.0, stats.timeToFirstToken, 0.0)
+    }
+
+    @Test
+    fun speculativeDecodingModeComesFromTheModeThenTheBoolean() {
+        assertEquals(SpeculativeDecodingMode.ADAPTIVE, speculativeDecodingModeOf(SpeculativeDecodingMode.ADAPTIVE, false))
+        assertEquals(SpeculativeDecodingMode.ON, speculativeDecodingModeOf(null, true))
+        assertEquals(SpeculativeDecodingMode.OFF, speculativeDecodingModeOf(null, false))
+        assertNull("unset keeps the engine's default", speculativeDecodingModeOf(null, null))
+        assertNull(null.toSdkConfig())
+        assertEquals(
+            com.google.ai.edge.litertlm.SpeculativeDecodingMode.ADAPTIVE,
+            SpeculativeDecodingMode.ADAPTIVE.toSdkConfig()?.mode,
+        )
+    }
+
+    @Test
     fun aMessageWithoutTheEngineNumbersIsAnEstimate() {
         val streamed = generationStats(null, "12345678", "1234", 2_000.0, 90.0)
         assertEquals(2.0, streamed.promptTokens, 0.0)
@@ -107,10 +132,10 @@ class StreamingCallbackListenerTest {
     @Test
     fun benchmarkModeIsSetOnlyWhileTheEngineIsCreated() {
         assertFalse(ExperimentalFlags.enableBenchmark)
-        assertTrue(EngineFlags.forEngine(null, null, benchmark = true) { ExperimentalFlags.enableBenchmark })
+        assertTrue(EngineFlags.forEngine(null, benchmark = true) { ExperimentalFlags.enableBenchmark })
         assertFalse(ExperimentalFlags.enableBenchmark)
-        assertFalse(EngineFlags.forEngine(null, null, benchmark = false) { ExperimentalFlags.enableBenchmark })
-        runCatching { EngineFlags.forEngine<Unit>(null, null, benchmark = true) { throw IllegalStateException() } }
+        assertFalse(EngineFlags.forEngine(null, benchmark = false) { ExperimentalFlags.enableBenchmark })
+        runCatching { EngineFlags.forEngine<Unit>(null, benchmark = true) { throw IllegalStateException() } }
         assertFalse("a failed creation restores it too", ExperimentalFlags.enableBenchmark)
     }
 }

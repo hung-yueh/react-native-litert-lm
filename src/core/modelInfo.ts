@@ -1,6 +1,6 @@
 /**
  * Bundle metadata, backend choice and load pre-flight — pure functions over
- * what the engine reads from a `.litertlm` header (LiteRT-LM 0.18 model info).
+ * what the engine reads from a `.litertlm` header (LiteRT-LM model info).
  * The capability facts come from the bundle itself, never from its file name.
  */
 import type { Backend, LLMConfig } from "../specs/LiteRTLM.nitro";
@@ -13,7 +13,6 @@ import type {
   NpuBrand,
 } from "../specs/ModelInspector.nitro";
 import { LiteRTLMError } from "./errors";
-import { resolveMaxContextTokens } from "./memoryEstimator";
 import { LITERT_LM_VERSION, compareVersions } from "./version";
 
 export type { Modality, ModelType, NpuBrand };
@@ -37,9 +36,19 @@ export interface ModelInfo {
   type: ModelType;
   /** Input modalities the bundle accepts */
   modalities: Record<Modality, boolean>;
-  /** Largest context the bundle supports; 0 when undeclared */
+  /**
+   * The bundle's default context size (LiteRT-LM 0.19+): for an LLM, the
+   * context the engine would start with, not the most it supports; for an
+   * embedding bundle, its longest input. 0 when undeclared.
+   */
+  defaultContextTokens: number;
+  /**
+   * @deprecated Since LiteRT-LM 0.19 this is the bundle's default context, not
+   * its maximum. Use `defaultContextTokens`, which holds the same value.
+   * Removed in 1.0.
+   */
   maxContextTokens: number;
-  /** True when the context is configurable up to `maxContextTokens`; false = fixed */
+  /** True when the model graph's context size is configurable; false = fixed by the graph */
   dynamicContext: boolean;
   /** Oldest LiteRT-LM runtime that can run the bundle, when declared */
   minRuntimeVersion: string | null;
@@ -106,6 +115,7 @@ export function normalizeModelInfo(path: string, native: NativeModelInfo): Model
     fileSizeBytes: native.fileSizeBytes,
     type: native.modelType,
     modalities,
+    defaultContextTokens: Math.max(0, native.maxContextTokens),
     maxContextTokens: Math.max(0, native.maxContextTokens),
     dynamicContext: native.isDynamicContext,
     minRuntimeVersion: native.minRuntimeVersion ?? null,
@@ -308,8 +318,10 @@ export interface PreflightOptions {
  * resolve what the caller left open. Throws `MODEL_TYPE_MISMATCH` (an
  * embedding bundle passed to createLLM, or vice versa), `RUNTIME_TOO_OLD`, and
  * — when no backend was given — `UNSUPPORTED` for a bundle this device can't run.
- * Fills `backend` from {@link recommendBackend} when omitted, and clamps the
- * context (explicit or the 4096 default) to the bundle's declared maximum.
+ * Fills `backend` from {@link recommendBackend} when omitted, and drops a
+ * speculative-decoding request the bundle has no drafter for. The context is
+ * not clamped: since LiteRT-LM 0.19 a bundle declares its default context, not
+ * its maximum, and the engine itself caps a fixed-size graph.
  */
 export function preflightLoad(
   info: ModelInfo,
@@ -330,22 +342,6 @@ export function preflightLoad(
       notes.push(`Using the ${rec.backend} backend: ${rec.reason}`);
     }
   }
-  // A context above the bundle's maximum can't be honored either way: a
-  // fixed-context bundle gets clamped by the engine mid-session, and a
-  // dynamic one is only configurable up to its maximum. Clamp up front so the
-  // memory estimate and the engine agree.
-  const effective = resolveMaxContextTokens(config);
-  if (info.maxContextTokens > 0 && effective > info.maxContextTokens) {
-    resolved.maxContextTokens = info.maxContextTokens;
-    changed = true;
-    const explicit = config?.maxContextTokens !== undefined || config?.maxTokens !== undefined;
-    if (explicit) {
-      notes.push(
-        `maxContextTokens ${effective} exceeds this bundle's maximum of ` +
-          `${info.maxContextTokens}; using ${info.maxContextTokens}.`,
-      );
-    }
-  }
   if (config?.multimodal === true && !info.modalities.vision && !info.modalities.audio) {
     notes.push("multimodal: true, but this bundle has no vision or audio encoder — loading text-only.");
   }
@@ -356,6 +352,14 @@ export function preflightLoad(
     changed = true;
     notes.push(
       "enableSpeculativeDecoding: this bundle has no multi-token-prediction drafter — loading without it.",
+    );
+  }
+  const mode = config?.speculativeDecodingMode;
+  if ((mode === "on" || mode === "adaptive") && info.llm && !info.llm.speculativeDecoding) {
+    resolved.speculativeDecodingMode = "off";
+    changed = true;
+    notes.push(
+      `speculativeDecodingMode '${mode}': this bundle has no multi-token-prediction drafter — loading without it.`,
     );
   }
   return { config: resolved, changed, notes };

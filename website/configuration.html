@@ -85,7 +85,7 @@
           <td><code>maxContextTokens</code></td>
           <td><code>number</code></td>
           <td><code>4096</code></td>
-          <td>Total engine KV-cache budget in tokens (prompt + history + output combined). Must be ≥ total input tokens + desired output tokens. A value above the bundle's declared maximum is clamped to it, so the memory estimate and the engine agree.</td>
+          <td>Total engine KV-cache budget in tokens (prompt + history + output combined). Must be ≥ total input tokens + desired output tokens. Not clamped to the bundle's declared context: since LiteRT-LM 0.19 that is its default (<code>defaultContextTokens</code>), not its maximum. The engine caps a fixed-size graph itself.</td>
         </tr>
         <tr>
           <td><code>maxOutputTokens</code></td>
@@ -133,7 +133,13 @@
           <td><code>enableSpeculativeDecoding</code></td>
           <td><code>boolean</code></td>
           <td><code>false</code></td>
-          <td>Speculative decoding (multi-token prediction), if the bundle has a drafter. The session default; <code>createConversation({ speculativeDecoding })</code> overrides it per conversation. A bundle without a drafter loads without it, with a warning — see <a href="inference.html#speculative-decoding">Speculative decoding</a>.</td>
+          <td>Speculative decoding (multi-token prediction), if the bundle has a drafter. <code>true</code> is the <code>'on'</code> mode. The session default; <code>createConversation({ speculativeDecoding })</code> overrides it per conversation. A bundle without a drafter loads without it, with a warning — see <a href="inference.html#speculative-decoding">Speculative decoding</a>.</td>
+        </tr>
+        <tr>
+          <td><code>speculativeDecodingMode</code></td>
+          <td><code>'off' | 'on' | 'adaptive'</code></td>
+          <td>—</td>
+          <td>The session's speculative-decoding mode; overrides <code>enableSpeculativeDecoding</code>. <code>'adaptive'</code> speculates only while the engine measures it to be faster (LiteRT-LM 0.19+).</td>
         </tr>
         <tr>
           <td><code>chatTemplate</code></td>
@@ -487,8 +493,8 @@ rec.reason;     // why, including any backends it skipped</code></pre>
       <tbody>
         <tr>
           <td>LiteRT-LM engine</td>
-          <td>0.18.1</td>
-          <td>0.18.1</td>
+          <td>0.19.1</td>
+          <td>0.19.1</td>
           <td>iOS: <code>CLiteRTLM.xcframework</code> through the C FFI. Android: the <code>litertlm-android</code> AAR.</td>
         </tr>
         <tr>

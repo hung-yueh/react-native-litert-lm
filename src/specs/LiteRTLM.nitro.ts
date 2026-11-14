@@ -14,6 +14,15 @@ import type { HybridObject } from "react-native-nitro-modules";
 export type Backend = "cpu" | "gpu" | "npu";
 
 /**
+ * How the engine uses a bundle's multi-token-prediction drafter (e.g. Gemma
+ * 4's MTP):
+ * - `'off'`: never;
+ * - `'on'`: always (what `true` means where a boolean is accepted);
+ * - `'adaptive'`: only while the engine measures it to be faster (LiteRT-LM 0.19+).
+ */
+export type SpeculativeDecodingMode = "off" | "on" | "adaptive";
+
+/**
  * Message roles for conversation. `'tool'` turns carry a tool's result back
  * to the model (see `toolResultPart()`).
  */
@@ -166,6 +175,14 @@ export interface LLMConfig {
    * @default false
    */
   enableSpeculativeDecoding?: boolean;
+
+  /**
+   * The session's speculative-decoding mode: `'off'`, `'on'` or `'adaptive'`.
+   * Overrides `enableSpeculativeDecoding` when set (`true` there is `'on'`).
+   * A conversation can override it (`createConversation({ speculativeDecoding })`).
+   * A bundle without a drafter loads without it.
+   */
+  speculativeDecodingMode?: SpeculativeDecodingMode;
 
   /**
    * A Jinja chat template that replaces the bundle's own — the fix for a
@@ -461,7 +478,9 @@ export interface GenerationStats {
    * message: what it prefilled, so with the chat template's tokens, and the
    * system prompt or a replayed transcript if it prefilled them with this
    * message. Without it, an estimate from the message's own text (about 4
-   * characters per token, far off for CJK text).
+   * characters per token, far off for CJK text). On Android a reply with
+   * thinking reports the estimate here even with `exactStats`: the engine's
+   * last prefill there is the reply taken in again without its thought.
    */
   promptTokens: number;
   /**
@@ -472,10 +491,9 @@ export interface GenerationStats {
   completionTokens: number;
   /**
    * `promptTokens + completionTokens`. With `exactStats`, what the message
-   * added to `getContextTokenCount()`, except right after a reply with
-   * thinking: the engine takes that reply's thought back out of the context
-   * at the start of the next message, so the next message adds less than
-   * this, and can even shrink the context.
+   * added to `getContextTokenCount()`, except for a reply with thinking: the
+   * engine takes the thought back out of the context at the end of that
+   * message (LiteRT-LM 0.19+), so the context grows by less than this.
    */
   totalTokens: number;
   /**
@@ -647,6 +665,8 @@ export interface LiteRTLM extends HybridObject<{
    * @param speculativeDecoding Turn speculative decoding on or off for the new
    *   conversation (undefined = the session default). `true` loads the
    *   bundle's drafter on first use if the engine started without it.
+   * @param speculativeDecodingMode The new conversation's speculative-decoding
+   *   mode; overrides `speculativeDecoding` when set.
    *
    * `getHistory()` reflects the new transcript at once, and messages sent
    * after this run in the new conversation. A message sent before it that is
@@ -655,7 +675,12 @@ export interface LiteRTLM extends HybridObject<{
    * create the new conversation from the next `execute()`; Android waits up
    * to 2 s for a cancelled message to return.
    */
-  resetConversation(historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean): void;
+  resetConversation(
+    historyJson?: string,
+    systemPrompt?: string,
+    speculativeDecoding?: boolean,
+    speculativeDecodingMode?: SpeculativeDecodingMode,
+  ): void;
 
   /**
    * Check if a model is loaded and ready for inference. False the moment
@@ -737,11 +762,13 @@ export interface LiteRTLM extends HybridObject<{
    *   `INFERENCE_CANCELLED` if `resetConversation()`, `loadModel()`,
    *   `unload()` or `close()` is called before the message finishes.
    *
-   * After a message fails, call `resetConversation()` before sending another.
-   * In LiteRT-LM 0.18.1, when the engine fails a message (one that doesn't fit
-   * in what is left of the context, say), every later message in that
-   * conversation fails at once with `Task failed with state: 7`, with or
-   * without `LLMConfig.exactStats`.
+   * A message that doesn't fit in what is left of the context rejects with
+   * `CONTEXT_FULL`. After any message the engine fails, the conversation's
+   * next message first replays its answered turns into a fresh engine
+   * conversation (one re-prefill): through LiteRT-LM 0.19.1 the engine fails
+   * every later message on a conversation that failed one ("Task failed with
+   * state: 7"). Through `createLLM()`, that is automatic; on the raw native
+   * object, call `resetConversation()` with the history yourself.
    */
   execute(
     parts: MultimodalPart[],

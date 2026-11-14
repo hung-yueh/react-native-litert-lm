@@ -32,6 +32,11 @@ class LiteRTLMNativeException(
             "UNAUTHENTICATED",
         )
         private val STATUS_PATTERN = Regex("\\b(${STATUS_NAMES.joinToString("|")}):")
+        /**
+         * LiteRT-LM 0.19's SDK reports a failed message by number instead:
+         * "Status Code: 8. Message: Not enough space left in the context window …".
+         */
+        private val STATUS_CODE_PATTERN = Regex("\\bStatus Code: (\\d+)\\b")
 
         /**
          * Classify a LiteRT-LM SDK failure. The SDK's JNI layer throws with
@@ -58,8 +63,13 @@ class LiteRTLMNativeException(
             return LiteRTLMNativeException(phase, status, null, "$context: $message", t)
         }
 
-        /** The first canonical status name written as "NAME:" in [message], if any. */
+        /**
+         * The first canonical status name written as "NAME:" in [message], else
+         * the one a "Status Code: N" names, if any.
+         */
         internal fun statusIn(message: String): String? =
             STATUS_PATTERN.find(message)?.groupValues?.get(1)
+                ?: STATUS_CODE_PATTERN.find(message)?.groupValues?.get(1)?.toIntOrNull()
+                    ?.let { STATUS_NAMES.getOrNull(it - 1) }
     }
 }

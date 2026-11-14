@@ -45,12 +45,15 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         maxVisionTokensPerImage: Double? = nil,
         gpu: GpuOptions? = nil,
         backend: Backend? = nil,
-        exactStats: Bool? = nil
+        exactStats: Bool? = nil,
+        maxContextTokens: Double = 2048,
+        singleThreadedExecution: Bool? = nil,
+        speculativeDecodingMode: SpeculativeDecodingMode? = nil
     ) -> LLMConfig {
         LLMConfig(
             systemPrompt: nil,
             backend: backend ?? testBackend,
-            maxContextTokens: 2048,
+            maxContextTokens: maxContextTokens,
             maxOutputTokens: 64,
             maxTokens: nil,
             temperature: 0.0,
@@ -59,13 +62,14 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
             multimodal: multimodal,
             tools: tools,
             enableSpeculativeDecoding: nil,
+            speculativeDecodingMode: speculativeDecodingMode,
             chatTemplate: chatTemplate,
             enableStructuredOutput: true,
             thinking: ThinkingOptions(enabled: false, tokenBudget: nil),
             numThreads: nil,
             maxVisionTokensPerImage: maxVisionTokensPerImage,
             gpu: gpu,
-            singleThreadedExecution: nil,
+            singleThreadedExecution: singleThreadedExecution,
             prefillChunkSize: nil,
             activationDataType: nil,
             loraPath: nil,
@@ -461,9 +465,11 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     /// it added to getContextTokenCount(), streamed or blocking, ending at the
     /// limit or by itself, in the first message of a conversation or a later
     /// one, after a reset (one that cancels a message, one with a system prompt,
-    /// one replaying a transcript). Not after a reply with thinking, whose
-    /// thought the engine takes back out. The flag holds for one load; without
-    /// it, the stats are the estimate.
+    /// one replaying a transcript). Not for a reply that thought: LiteRT-LM
+    /// 0.19 takes the thought back out at the end of that same message (a
+    /// second prefill, the "refill"), and the stats are still its own prompt
+    /// and decode. The flag holds for one load; without it, the stats are the
+    /// estimate.
     func testX_ExactStatsAddUpToTheContextGrowth() async throws {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
@@ -478,24 +484,30 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         defer { try? bridge.close() }
         _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig(exactStats: true)).await()
 
-        /// One message: its stats, how much it grew the context, and the reply.
+        /// One message: its stats, how much it grew the context, the reply, and
+        /// how many prefill and decode turns it added to the engine's benchmark.
         func measure(_ label: String, _ prompt: String, _ maxOut: Double, stream: Bool = true,
-                     thinking: ThinkingOptions? = nil) async throws -> (stats: GenerationStats, grew: Double, reply: String) {
+                     thinking: ThinkingOptions? = nil)
+            async throws -> (stats: GenerationStats, grew: Double, reply: String, prefills: Int, decodes: Int) {
             let before = try await knownCount(bridge)
+            let turnsBefore = await engineTurns(bridge)
             let reply = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: maxOut, thinking: thinking),
                                       onToken: stream ? { _, _ in } : nil)
             let stats = try bridge.getStats()
             let grew = try bridge.getContextTokenCount() - before
+            let turnsAfter = await engineTurns(bridge)
+            let prefills = (turnsAfter?.prefillTurns ?? 0) - (turnsBefore?.prefillTurns ?? 0)
+            let decodes = (turnsAfter?.decodeTurns ?? 0) - (turnsBefore?.decodeTurns ?? 0)
             print(String(format: "[integration][exact-stats] %@: prompt %.0f + completion %.0f, context grew %.0f, " +
-                         "first token %.1f ms, %.2f tok/s, %d chars",
+                         "first token %.1f ms, %.2f tok/s, %d chars, +%d prefill / +%d decode turns",
                          label, stats.promptTokens, stats.completionTokens, grew,
-                         stats.timeToFirstToken, stats.tokensPerSecond, reply.count))
-            return (stats, grew, reply)
+                         stats.timeToFirstToken, stats.tokensPerSecond, reply.count, prefills, decodes))
+            return (stats, grew, reply, prefills, decodes)
         }
 
         @discardableResult
         func send(_ label: String, _ prompt: String, _ maxOut: Double, stream: Bool = true) async throws -> GenerationStats {
-            let (stats, grew, _) = try await measure(label, prompt, maxOut, stream: stream)
+            let (stats, grew, _, _, _) = try await measure(label, prompt, maxOut, stream: stream)
             XCTAssertEqual(stats.promptTokens + stats.completionTokens, grew, "\(label): prompt + completion")
             XCTAssertEqual(stats.totalTokens, grew, "\(label): total")
             XCTAssertGreaterThan(stats.tokensPerSecond, 0, "\(label): no decode rate")
@@ -542,20 +554,39 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         let replayed = try await send("after a replaying reset", "What is my lucky number?", 16)
         XCTAssertGreaterThan(replayed.promptTokens, 30, "the prefill holds the transcript")
 
-        // Thinking: the engine takes a reply's thought back out of the context.
-        // LiteRT-LM 0.18.1 does it at the start of the next message, so the
-        // reply with the thought adds up, and the next message adds less than
-        // its total, by about the thought's tokens.
+        // Thinking. LiteRT-LM 0.19.1 takes a reply's thought back out of the
+        // context at the end of the same message: it rewinds and prefills the
+        // reply again without its thought (a second prefill turn, the refill).
+        // So a reply that thought grew the context by its prompt plus the
+        // refilled answer, less than its total; promptTokens is still its own
+        // prompt (the first prefill turn), not the refill.
+        func checkRefill(_ label: String, _ m: (stats: GenerationStats, grew: Double, reply: String,
+                                                prefills: Int, decodes: Int)) {
+            XCTAssertEqual(m.prefills, 2, "\(label): the prompt and the refill")
+            XCTAssertEqual(m.decodes, 1, label)
+            XCTAssertLessThan(m.grew, m.stats.totalTokens, "\(label): the thought is taken back out")
+            XCTAssertGreaterThan(m.grew, m.stats.promptTokens, "\(label): the refilled answer stays")
+            XCTAssertGreaterThan(m.stats.promptTokens, m.grew - m.stats.promptTokens,
+                                 "\(label): promptTokens is the prompt's prefill, not the refill's")
+        }
         let thinking = ThinkingOptions(enabled: true, tokenBudget: nil)
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
-        let thought = try await measure("a reply with thinking", "What is 17 × 23? Reply with the number only.", 256,
+        // Gemma 4 E2B thinks for about 280 tokens here on 0.19.1.
+        let thought = try await measure("a reply with thinking", "What is 17 × 23? Reply with the number only.", 1024,
                                         thinking: thinking)
-        let afterThought = try await measure("the message after it", "Now add 9 to it. Reply with the number only.", 16)
-        print(String(format: "[integration][exact-stats] the thought taken out: %.0f tokens",
-                     afterThought.stats.totalTokens - afterThought.grew))
+        XCTAssertTrue(thought.reply.contains("391"), "the answer after the thought: \(thought.reply)")
         XCTAssertGreaterThan(thought.stats.completionTokens, 20, "no thought in the reply: \(thought.reply)")
-        XCTAssertEqual(thought.stats.totalTokens, thought.grew, "the reply with thinking")
-        XCTAssertLessThan(afterThought.grew, afterThought.stats.totalTokens, "the message after a reply with thinking")
+        checkRefill("the reply with thinking", thought)
+        // The next message, with thinking off, adds up again (one prefill
+        // turn) unless it thinks too: on 0.19.1 Gemma 4 E2B goes on thinking
+        // after a reply that thought, so check whichever it did.
+        let afterThought = try await measure("the message after it", "Now add 9 to it. Reply with the number only.", 16)
+        if afterThought.prefills == 1 {
+            XCTAssertEqual(afterThought.stats.totalTokens, afterThought.grew, "the message after a reply with thinking")
+        } else {
+            print("[integration][exact-stats] the message after it thought too: \(afterThought.reply.debugDescription)")
+            checkRefill("the message after it", afterThought)
+        }
 
         // A stream whose whole budget goes to thinking sends no text: no first
         // token to time, so 0, as on Android.
@@ -564,7 +595,8 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                                        thinking: thinking)
         XCTAssertEqual(silent.reply, "", "the thought should use the whole budget")
         XCTAssertEqual(silent.stats.timeToFirstToken, 0, "no text reached the callback")
-        XCTAssertEqual(silent.stats.totalTokens, silent.grew, "a reply that is all thought")
+        XCTAssertEqual(silent.stats.completionTokens, 8, "a reply that is all thought")
+        checkRefill("a reply that is all thought (its empty answer is refilled too)", silent)
 
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
         let exactCJK = try await send("CJK", cjk, 64)
@@ -631,12 +663,13 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     /// A message that fails, here one that fits in the context but not in what
-    /// is left of it, with and without LLMConfig.exactStats. In LiteRT-LM
-    /// 0.18.1 every later message in that conversation waits on the failed one
-    /// and fails at once ("Task failed with state: 7": a task it depends on
-    /// failed), with or without the flag, until a reset. So none of them starts
-    /// a benchmark turn after the one the failed prefill left open. After the
-    /// reset, the flag's numbers are the engine's again.
+    /// is left of it, with and without LLMConfig.exactStats. LiteRT-LM 0.19.1
+    /// rejects it before its prefill starts (RESOURCE_EXHAUSTED: "Not enough
+    /// space left in the context window for the input"). As in 0.18.1, every
+    /// later message in that conversation then waits on the failed one and
+    /// fails at once ("Task failed with state: 7": a task it depends on
+    /// failed), with or without the flag, until a reset. After the reset, the
+    /// flag's numbers are the engine's again.
     func testXc_ExactStatsAfterAFailedMessage() async throws {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
@@ -660,6 +693,9 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
                 XCTFail("\(label): a message that doesn't fit in what is left of the context ran")
             } catch {
                 print("[integration][exact-stats] \(label): the second long message failed: \(error)")
+                let failure = error as? LiteRTLMNativeError
+                XCTAssertEqual(failure?.status, "RESOURCE_EXHAUSTED", "\(error)")
+                XCTAssertTrue(failure?.message.contains("context window") == true, "TS maps it to CONTEXT_FULL: \(error)")
             }
             var outcomes: [String] = []
             for _ in 0..<2 {
@@ -690,9 +726,10 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
     }
 
     /// LLMConfig.exactStats and a blocking message sent while a stream runs on
-    /// the same conversation: the stream reports its own numbers. Its commit
-    /// waits for `queue`, where the blocking message runs first, so the stream
-    /// reads the engine's turns as it ends, not then.
+    /// the same conversation: the stream reports its own numbers. The blocking
+    /// message waits on `queue` for the stream to end before it counts the
+    /// engine's turns, and the stream's commit runs after it there; each reads
+    /// the first turns added after its own count.
     func testXd_ExactStatsOfAStreamWithABlockingMessageBehindIt() async throws {
         guard let path = Self.modelPath else {
             throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
@@ -731,23 +768,162 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         XCTAssertEqual(stats.promptTokens, alone.promptTokens, "the stream's own prefill")
     }
 
+    /// A reply that runs into the end of the context window, then more
+    /// messages in the same conversation, then a reset. LiteRT-LM 0.19.1 ends
+    /// such a reply at the window's last token and keeps it; every message
+    /// after it fails at once with RESOURCE_EXHAUSTED ("Max number of tokens
+    /// reached, the context window is full.", which TS reports as
+    /// CONTEXT_FULL), each on its own: not the "Task failed with state: 7"
+    /// chain a failed prefill leaves (testXc). A reset recovers.
+    func testXe_ContextOverflowThenAnotherMessage() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        await awaitTeardowns()
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        // 2,048 tokens (makeConfig), filled with a long message first. (A
+        // 512-token window is no shortcut: on 0.19.1 the Gemma 4 E2B CPU
+        // engine fails every message there with INTERNAL "Failed to allocate
+        // tensors".)
+        _ = try await bridge.loadModel(modelPath: path, config: Self.makeConfig()).await()
+
+        // About 1,100 of the 2,048 tokens first, so the essay's reply runs into the end.
+        let long = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 110)
+        _ = try await run(bridge, long, options: Self.makeOptions(maxOutputTokens: 8)) { _, _ in }
+        let essay = "Now write a long essay about the history of the bicycle."
+        let reply = try await run(bridge, essay, options: Self.makeOptions(maxOutputTokens: 1024)) { _, _ in }
+        let full = try await knownCount(bridge)
+        print("[integration][overflow] the essay ran into the end: \(reply.count) chars, context \(full), " +
+              "history \(try bridge.getHistory().map(\.role.stringValue))")
+        XCTAssertEqual(full, 2048, "the reply stops at the window's last token")
+        XCTAssertEqual(try bridge.getHistory().count, 4, "and stays in the transcript")
+
+        var later: [LiteRTLMNativeError] = []
+        for stream in [true, false, true] {
+            do {
+                let text = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 8),
+                                         onToken: stream ? { _, _ in } : nil)
+                XCTFail("a message in a full context ran: \(text)")
+            } catch let error as LiteRTLMNativeError {
+                later.append(error)
+            }
+        }
+        print("[integration][overflow] the next messages: \(later.map(\.description))")
+        for error in later {
+            XCTAssertEqual(error.status, "RESOURCE_EXHAUSTED", "\(error)")
+            XCTAssertTrue(error.message.contains("context window"), "TS maps this text to CONTEXT_FULL: \(error)")
+        }
+        let stillFull = try await knownCount(bridge)
+        XCTAssertEqual(stillFull, 2048)
+        XCTAssertEqual(try bridge.getHistory().count, 4, "a failed message adds nothing to the transcript")
+
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        let afterReset = try await run(bridge, "Say hello.", options: Self.makeOptions(maxOutputTokens: 8))
+        print("[integration][overflow] after a reset: \(afterReset)")
+        XCTAssertFalse(afterReset.isEmpty, "a reset recovers the instance")
+    }
+
+    /// LiteRT-LM 0.19: with singleThreadedExecution, queued work runs only
+    /// while a caller drives it (litert_lm_conversation_wait_until_done). A
+    /// stream still delivers its tokens and ends, and a blocking message
+    /// after it runs.
+    func testT_SingleThreadedExecutionStreams() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        await awaitTeardowns()
+        let bridge = HybridLiteRTLM()
+        defer { try? bridge.close() }
+        _ = try await bridge.loadModel(
+            modelPath: path, config: Self.makeConfig(singleThreadedExecution: true)).await()
+
+        let done = expectation(description: "the stream's done token")
+        done.assertForOverFulfill = false
+        let chunks = LockedBox(0)
+        let parts = [textPart("Say hello in five words.")]
+        let options = Self.makeOptions(maxOutputTokens: 16)
+        let stream = Task {
+            try await bridge.execute(parts: parts, onToken: { token, isDone in
+                if !isDone && !token.isEmpty { chunks.value += 1 }
+                if isDone { done.fulfill() }
+            }, options: options).await()
+        }
+        let outcome = await XCTWaiter().fulfillment(of: [done], timeout: 120)
+        guard outcome == .completed else {
+            XCTFail("a stream with singleThreadedExecution never ended (\(chunks.value) chunks)")
+            return
+        }
+        let reply = try await stream.value
+        print("[integration][single-threaded] streamed \(chunks.value) chunks: \(reply)")
+        XCTAssertGreaterThan(chunks.value, 0)
+        XCTAssertFalse(reply.isEmpty)
+
+        let blocking = try await run(bridge, "Now say goodbye.", options: Self.makeOptions(maxOutputTokens: 16))
+        print("[integration][single-threaded] blocking reply: \(blocking)")
+        XCTAssertFalse(blocking.isEmpty)
+        XCTAssertEqual(try bridge.getHistory().count, 4)
+    }
+
     /// Speculative decoding switched on for one conversation (Gemma 4 E2B
-    /// ships an MTP drafter, loaded lazily): output stays sane; speed reported.
+    /// ships an MTP drafter, loaded lazily): the boolean, then LiteRT-LM 0.19's
+    /// modes, which win over it. Output stays sane; speed reported.
     func testS_SpeculativeDecodingPerConversation() async throws {
         let bridge = try await ensureLoaded()
         let prompt = "Write a detailed paragraph about the history of the bicycle."
-        func decode(_ speculative: Bool?) async throws -> (String, Double) {
-            try bridge.resetConversation(historyJson: nil, systemPrompt: nil, speculativeDecoding: speculative)
+        func decode(_ speculative: Bool?, _ mode: SpeculativeDecodingMode? = nil) async throws -> (String, Double) {
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil, speculativeDecoding: speculative,
+                                         speculativeDecodingMode: mode)
             let text = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
             return (text, try bridge.getStats().tokensPerSecond)
         }
         let (plain, plainTps) = try await decode(nil)
         let (fast, fastTps) = try await decode(true)
-        print(String(format: "[integration][mtp] decode %.2f tok/s default, %.2f tok/s speculative", plainTps, fastTps))
+        let (adaptive, adaptiveTps) = try await decode(nil, .adaptive)
+        let (off, offTps) = try await decode(true, .off)
+        print(String(format: "[integration][mtp] decode %.2f tok/s default, %.2f speculative (true), " +
+                     "%.2f adaptive, %.2f off over true", plainTps, fastTps, adaptiveTps, offTps))
         print("[integration][mtp] speculative text: \(fast.prefix(120))")
-        XCTAssertFalse(fast.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        XCTAssertFalse(plain.isEmpty)
+        print("[integration][mtp] adaptive text: \(adaptive.prefix(120))")
+        for text in [plain, fast, adaptive, off] {
+            XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
         try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+    }
+
+    /// LLMConfig.speculativeDecodingMode sets the engine's mode for every
+    /// conversation (on / adaptive load the drafter with the engine), and a
+    /// conversation can still turn it off.
+    func testSb_SpeculativeDecodingModeForTheEngine() async throws {
+        guard let path = Self.modelPath else {
+            throw XCTSkip("No model: set TEST_RUNNER_LITERTLM_TEST_MODEL")
+        }
+        try? Self.sharedBridge?.close()
+        Self.sharedBridge = nil
+        await awaitTeardowns()
+        let prompt = "Write a detailed paragraph about the history of the bicycle."
+        for mode in [SpeculativeDecodingMode.adaptive, .on] {
+            let bridge = HybridLiteRTLM()
+            defer { try? bridge.close() }
+            _ = try await bridge.loadModel(
+                modelPath: path, config: Self.makeConfig(speculativeDecodingMode: mode)).await()
+            let text = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
+            let tps = try bridge.getStats().tokensPerSecond
+            try bridge.resetConversation(historyJson: nil, systemPrompt: nil, speculativeDecodingMode: .off)
+            let plain = try await run(bridge, prompt, options: Self.makeOptions(maxOutputTokens: 64))
+            let plainTps = try bridge.getStats().tokensPerSecond
+            print(String(format: "[integration][mtp] engine %@: %.2f tok/s; a conversation set off: %.2f tok/s",
+                         mode.stringValue, tps, plainTps))
+            print("[integration][mtp] engine \(mode.stringValue) text: \(text.prefix(120))")
+            XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, mode.stringValue)
+            XCTAssertFalse(plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, mode.stringValue)
+            try bridge.close()
+            await awaitTeardowns()
+        }
     }
 
     // MARK: - The JS thread never waits for the engine
@@ -1049,81 +1225,74 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         Self.sharedBridge = nil
         await awaitTeardowns()
 
-        guard let settings = litert_lm_engine_settings_create(path, "cpu", nil, nil) else {
-            XCTFail("engine settings creation failed")
-            return
-        }
-        litert_lm_engine_settings_set_max_num_tokens(settings, 2048)
-        guard let engine = litert_lm_engine_create(settings) else {
-            litert_lm_engine_settings_delete(settings)
-            XCTFail("engine creation failed")
-            return
-        }
-        litert_lm_engine_settings_delete(settings)
+        // C API 1.0: every call returns a status; the wrapper's helper throws it.
+        typealias C = LiteRTLMNativeError
+        let settings = try C.created(.load, "engine settings") { litert_lm_engine_settings_create(path, "cpu", nil, nil, $0) }
+        defer { litert_lm_engine_settings_delete(settings) }
+        try C.check(.load, "max tokens") { litert_lm_engine_settings_set_max_num_tokens(settings, 2048) }
+        let engine = try C.created(.load, "engine") { litert_lm_engine_create(settings, $0) }
         defer { litert_lm_engine_delete(engine) }
 
         /// Build a conversation with greedy sampling and a small output budget.
-        func makeConversation() -> OpaquePointer? {
-            guard let convConfig = litert_lm_conversation_config_create() else { return nil }
+        func makeConversation() throws -> OpaquePointer {
+            let convConfig = try C.created(.load, "conversation config") { litert_lm_conversation_config_create($0) }
             defer { litert_lm_conversation_config_delete(convConfig) }
-            guard let sessionConfig = litert_lm_session_config_create() else { return nil }
+            let sessionConfig = try C.created(.load, "session config") { litert_lm_session_config_create($0) }
             defer { litert_lm_session_config_delete(sessionConfig) }
 
-            litert_lm_session_config_set_max_output_tokens(sessionConfig, 32)
-            if let sampler = litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP) {
-                litert_lm_sampler_params_set_top_k(sampler, 1)
-                litert_lm_sampler_params_set_top_p(sampler, 1.0)
-                litert_lm_sampler_params_set_temperature(sampler, 0.0)
-                litert_lm_sampler_params_set_seed(sampler, 0)
-                litert_lm_session_config_set_sampler_params(sessionConfig, sampler)
-                litert_lm_sampler_params_delete(sampler)
-            }
-            litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
-            return litert_lm_conversation_create(engine, convConfig)
+            try C.check(.load, "max output") { litert_lm_session_config_set_max_output_tokens(sessionConfig, 32) }
+            let sampler = try C.created(.load, "sampler") { litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP, $0) }
+            defer { litert_lm_sampler_params_delete(sampler) }
+            try C.check(.load, "top-k") { litert_lm_sampler_params_set_top_k(sampler, 1) }
+            try C.check(.load, "top-p") { litert_lm_sampler_params_set_top_p(sampler, 1.0) }
+            try C.check(.load, "temperature") { litert_lm_sampler_params_set_temperature(sampler, 0.0) }
+            try C.check(.load, "seed") { litert_lm_sampler_params_set_seed(sampler, 0) }
+            try C.check(.load, "sampler") { litert_lm_session_config_set_sampler_params(sessionConfig, sampler) }
+            try C.check(.load, "session") { litert_lm_conversation_config_set_session_config(convConfig, sessionConfig) }
+            return try C.created(.load, "conversation") { litert_lm_conversation_create(engine, convConfig, $0) }
         }
 
-        guard let convA = makeConversation() else {
-            XCTFail("first conversation could not be created")
-            return
-        }
+        let convA = try makeConversation()
         defer { litert_lm_conversation_delete(convA) }
 
-        guard let convB = makeConversation() else {
+        let convB: OpaquePointer
+        do { convB = try makeConversation() } catch {
             XCTFail("SECOND live conversation on one engine could not be created — " +
-                    "the C API still enforces one conversation per engine")
+                    "the C API still enforces one conversation per engine: \(error)")
             return
         }
         defer { litert_lm_conversation_delete(convB) }
 
         /// Send one user turn and return the model's text.
-        func send(_ conversation: OpaquePointer, _ text: String) -> String {
+        func send(_ conversation: OpaquePointer, _ text: String) throws -> String {
             let payload: [String: Any] = ["role": "user", "content": text]
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let msgJson = String(data: data, encoding: .utf8) else { return "" }
-            guard let response = litert_lm_conversation_send_message(conversation, msgJson, nil, nil) else {
-                return ""
+            let response = try C.created(.execute, "send") {
+                litert_lm_conversation_send_message(conversation, msgJson, nil, nil, $0)
             }
             defer { litert_lm_json_response_delete(response) }
-            guard let raw = litert_lm_json_response_get_string(response) else { return "" }
+            guard let raw = try C.read(.execute, "reply", nil, { litert_lm_json_response_get_string(response, $0) })
+            else { return "" }
             return extractTextFromResponseForTest(String(cString: raw))
         }
 
         // Interleave: seed A, advance B, then ask A about its own fact.
-        let ackA = send(convA, "My lucky number is 47. Acknowledge briefly.")
+        let ackA = try send(convA, "My lucky number is 47. Acknowledge briefly.")
         print("[integration][2807] A ack: \(ackA)")
-        let tokensAfterA = litert_lm_conversation_get_token_count(convA)
+        let tokensAfterA = HybridLiteRTLM.tokenCount(convA)
 
-        let ackB = send(convB, "My favorite animal is the axolotl. Acknowledge briefly.")
+        let ackB = try send(convB, "My favorite animal is the axolotl. Acknowledge briefly.")
         print("[integration][2807] B ack: \(ackB)")
-        let answerB = send(convB, "What is my favorite animal? One word.")
+        let answerB = try send(convB, "What is my favorite animal? One word.")
         print("[integration][2807] B recall: \(answerB)")
 
         // B must actually have advanced, or A's recall proves nothing.
         XCTAssertTrue(answerB.lowercased().contains("axolotl"),
                       "conversation B did not carry its own turn — test would be vacuous: \(answerB)")
 
-        let answerA = send(convA, "What is my lucky number? Reply with just the number.")
-        let tokensAfterRecall = litert_lm_conversation_get_token_count(convA)
+        let answerA = try send(convA, "What is my lucky number? Reply with just the number.")
+        let tokensAfterRecall = HybridLiteRTLM.tokenCount(convA)
         print("[integration][2807] A recall: \(answerA)")
         print("[integration][2807] A token count: after seed \(tokensAfterA), after recall \(tokensAfterRecall)")
 
@@ -1152,6 +1321,14 @@ private extension HybridLiteRTLMIntegrationTests {
             bridge.queue.async { done.resume() }
         }
         return max(0, try bridge.getContextTokenCount())
+    }
+
+    /// The engine's benchmark turn counts for `bridge`'s conversation (exactStats),
+    /// read on its queue once the work queued so far has run.
+    func engineTurns(_ bridge: HybridLiteRTLM) async -> HybridLiteRTLM.EngineTurnMark? {
+        await withCheckedContinuation { done in
+            bridge.queue.async { done.resume(returning: bridge.conversation.flatMap(HybridLiteRTLM.engineTurnMark)) }
+        }
     }
 
     /// Wait until every engine that close() or unload() has queued for

@@ -48,7 +48,7 @@ final class HybridModelVerificationTests: XCTestCase {
         LLMConfig(
             systemPrompt: nil, backend: .cpu, maxContextTokens: 2048, maxOutputTokens: 256, maxTokens: nil,
             temperature: Self.sampler.0, topK: Self.sampler.1, topP: Self.sampler.2, multimodal: false, tools: tools,
-            enableSpeculativeDecoding: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: Self.thinking,
+            enableSpeculativeDecoding: nil, speculativeDecodingMode: nil, chatTemplate: Self.template, enableStructuredOutput: true, thinking: Self.thinking,
             numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
             prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
             streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: nil
@@ -84,7 +84,7 @@ final class HybridModelVerificationTests: XCTestCase {
             let cfg = LLMConfig(
                 systemPrompt: system, backend: .cpu, maxContextTokens: 2048, maxOutputTokens: 128, maxTokens: nil,
                 temperature: 0.0, topK: 1, topP: 1.0, multimodal: false, tools: nil,
-                enableSpeculativeDecoding: nil, chatTemplate: nil, enableStructuredOutput: nil, thinking: Self.thinking,
+                enableSpeculativeDecoding: nil, speculativeDecodingMode: nil, chatTemplate: nil, enableStructuredOutput: nil, thinking: Self.thinking,
                 numThreads: nil, maxVisionTokensPerImage: nil, gpu: nil, singleThreadedExecution: nil,
                 prefillChunkSize: nil, activationDataType: nil, loraPath: nil, audioLoraPath: nil, loraRank: nil,
                 streamToolCalls: nil, toolCallChannelName: nil, forceLoad: true, exactStats: nil)

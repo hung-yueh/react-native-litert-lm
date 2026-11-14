@@ -1,6 +1,7 @@
 import XCTest
 import UIKit
 import NitroModules
+import CLiteRTLM
 @testable import LiteRTLM
 
 class HybridLiteRTLMTests: XCTestCase {
@@ -422,11 +423,71 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertEqual(other.message, "decoder hiccup")
     }
 
-    func testNativeErrorFromEngineWithoutARecordedErrorFallsBack() {
+    func testNativeErrorFromEngineWithoutAMessageKeepsTheStatus() {
         LiteRTLMNativeError.clearEngineError()
-        let e = LiteRTLMNativeError.fromEngine(.load, context: "Nothing recorded")
-        XCTAssertEqual(e.status, "UNKNOWN")
+        let e = LiteRTLMNativeError.fromEngine(.load, status: kLiteRtLmStatusInternal, context: "Nothing recorded")
+        XCTAssertEqual(e.status, "INTERNAL", "C API 1.0: the status is the call's return value")
         XCTAssertEqual(e.message, "Nothing recorded")
+        // A value newer than this build knows reads as UNKNOWN (c/error_reporter.h).
+        let unknown = LiteRTLMNativeError.fromEngine(.load, status: LiteRtLmStatusCode(rawValue: 99), context: "x")
+        XCTAssertEqual(unknown.status, "UNKNOWN")
+    }
+
+    /// C API 1.0 (c/error_reporter.h §6): a failing call's returned status and
+    /// the engine's own message reach the error, under the caller's context.
+    func testCheckThrowsTheReturnedStatusWithTheEnginesMessage() {
+        do {
+            _ = try LiteRTLMNativeError.read(.execute, "Counting tokens", 0) {
+                litert_lm_conversation_get_token_count(nil, $0)
+            }
+            XCTFail("a NULL conversation should fail")
+        } catch let e as LiteRTLMNativeError {
+            print("[unit] C API 1.0 failure: \(e)")
+            XCTAssertEqual(e.phase, .execute)
+            XCTAssertEqual(e.status, "INVALID_ARGUMENT")
+            XCTAssertTrue(e.message.hasPrefix("Counting tokens: "), "the engine's message is missing: \(e)")
+            XCTAssertFalse(e.message.contains("INVALID_ARGUMENT:"), "the status name stays in the tag: \(e)")
+        } catch {
+            XCTFail("expected LiteRTLMNativeError, got \(error)")
+        }
+        // A pointer out-parameter that is NULL on failure: `created` throws, never returns NULL.
+        XCTAssertThrowsError(try LiteRTLMNativeError.created(.load, "No settings") {
+            litert_lm_engine_settings_create(nil, "cpu", nil, nil, $0)
+        })
+    }
+
+    /// The API version check passes against the framework this build links.
+    func testTheLinkedFrameworkSpeaksTheCompiledCAPI() throws {
+        XCTAssertNoThrow(try EngineAPI.requireCompatible(.load))
+        let linked = try XCTUnwrap(EngineAPI.linked, "litert_lm_get_api_version failed")
+        print("[unit] C API: linked \(linked.major).\(linked.minor).\(linked.patch), compiled \(EngineAPI.compiled)")
+        XCTAssertEqual(linked.major, LITERT_LM_C_API_VERSION_MAJOR)
+        XCTAssertGreaterThanOrEqual(linked.minor, LITERT_LM_C_API_VERSION_MINOR)
+    }
+
+    /// LLMConfig.speculativeDecodingMode and resetConversation's mode win over
+    /// the older boolean, where true is 'on'.
+    func testSpeculativeDecodingModeWinsOverTheBoolean() throws {
+        XCTAssertNil(SpeculativeDecodingMode.resolve(nil, legacy: nil))
+        XCTAssertEqual(SpeculativeDecodingMode.resolve(nil, legacy: true), .on)
+        XCTAssertEqual(SpeculativeDecodingMode.resolve(nil, legacy: false), .off)
+        XCTAssertEqual(SpeculativeDecodingMode.resolve(.adaptive, legacy: false), .adaptive)
+        XCTAssertEqual(SpeculativeDecodingMode.resolve(.off, legacy: true), .off)
+
+        // Every mode builds a config the engine accepts, on a session and on engine settings.
+        let session = try LiteRTLMNativeError.created(.load, "session config") { litert_lm_session_config_create($0) }
+        defer { litert_lm_session_config_delete(session) }
+        for mode in [SpeculativeDecodingMode.off, .on, .adaptive] {
+            XCTAssertNoThrow(try mode.apply(.load) { litert_lm_session_config_set_speculative_decoding_config(session, $0) })
+        }
+        // Engine settings need a bundle path; a missing file may already fail here.
+        guard let settings = try? LiteRTLMNativeError.created(.load, "engine settings", {
+            litert_lm_engine_settings_create("/nonexistent/model.litertlm", "cpu", nil, nil, $0)
+        }) else { return }
+        defer { litert_lm_engine_settings_delete(settings) }
+        for mode in [SpeculativeDecodingMode.off, .on, .adaptive] {
+            XCTAssertNoThrow(try mode.apply(.load) { litert_lm_engine_settings_set_speculative_decoding_config(settings, $0) })
+        }
     }
 
     func testLoadModelRejectsMissingFileAsModelNotFound() async throws {

@@ -82,8 +82,10 @@ describe("public API", () => {
     expect(api.ModelRegistry.resolveModel).toBeInstanceOf(Function);
     expect(Object.values(api.Models)).toContain("gemma-4-E2B-it-litert-lm");
     expect(api.GEMMA_4_E2B_IT).toMatch(/^https:\/\//);
+    // Removed in 0.9.0 with the self-hosted Gemma 3n file
+    expect("GEMMA_3N_E2B_IT_INT4" in api).toBe(false);
+    expect(Object.keys(api.Models).some((k) => k.startsWith("GEMMA_3N"))).toBe(false);
     expect(api.GEMMA_4_E4B_IT).toMatch(/^https:\/\//);
-    expect(api.GEMMA_3N_E2B_IT_INT4).toMatch(/^https:\/\//);
     expect(api.EMBEDDING_GEMMA_2_TEXT_270M).toMatch(/embeddinggemma-2-text-270m\.litertlm$/);
     expect(api.EMBEDDING_GEMMA_2_740M).toMatch(/embeddinggemma-2-740m\.litertlm$/);
     expect(api.LFM2_5_1_2B_INSTRUCT).toMatch(/LFM2\.5-1\.2B-Instruct_int4\.litertlm$/);

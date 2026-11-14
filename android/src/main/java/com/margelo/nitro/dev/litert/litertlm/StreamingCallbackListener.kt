@@ -25,8 +25,13 @@ internal class StreamingCallbackListener(
     private val startTime = System.nanoTime()
     private var firstTokenTime = 0L
     private var tokenCount = 0
+    /** The reply carried channel content (thinking), which the engine re-prefills without it. */
+    private var sawChannelContent = false
 
     override fun onMessage(message: com.google.ai.edge.litertlm.Message) {
+        if (!sawChannelContent && message.channels.values.any { it.isNotEmpty() }) {
+            sawChannelContent = true
+        }
         // Text content plus any SDK-parsed tool calls (arriving on the final
         // message), the latter wrapped in the marker protocol the JS event
         // parser understands.
@@ -57,7 +62,9 @@ internal class StreamingCallbackListener(
 
         val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
         val ttftMs = if (firstTokenTime > 0) (firstTokenTime - startTime) / 1_000_000.0 else 0.0
-        onStatsReady(generationStats(engineStats(), userMessage, fullResponse, elapsedMs, ttftMs))
+        onStatsReady(
+            generationStats(engineStats(), userMessage, fullResponse, elapsedMs, ttftMs, refilled = sawChannelContent),
+        )
 
         Log.d("StreamingCallbackListener", "Streaming done. Length: ${fullResponse.length}, TTFT: ${ttftMs.toLong()}ms, Total: ${elapsedMs.toLong()}ms")
 

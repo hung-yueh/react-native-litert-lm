@@ -191,7 +191,7 @@ const runnable = options.filter((o) =&gt; o.estimate.verdict !== "critical");</c
     instance runs the estimate automatically after resolving (and, if needed,
     downloading) the model, and after the
     <a href="models.html#load-pre-flight">bundle pre-flight</a> — so the
-    backend it picked and a clamped <code>maxContextTokens</code> are what get
+    backend it picked is what gets
     estimated. On a <code>'critical'</code> verdict it throws a
     <code>MemoryError</code> instead of loading — unless you pass
     <code>forceLoad: true</code> in the config. The error message follows this
@@ -564,6 +564,7 @@ try {
   <div class="sig">export type LiteRTLMErrorCode =
   | "MEMORY_ESTIMATE_EXCEEDED"
   | "OUT_OF_MEMORY"
+  | "CONTEXT_FULL"
   | "MODEL_NOT_FOUND"
   | "INVALID_MODEL"
   | "MODEL_NOT_LOADED"
@@ -583,6 +584,7 @@ try {
       <tbody>
         <tr><td><code>MEMORY_ESTIMATE_EXCEEDED</code></td><td>The pre-flight refused a load that would not fit — a <code>MemoryError</code> carrying the estimate.</td></tr>
         <tr><td><code>OUT_OF_MEMORY</code></td><td>The engine ran out of memory (<code>RESOURCE_EXHAUSTED</code>).</td></tr>
+        <tr><td><code>CONTEXT_FULL</code></td><td>A message didn't fit in the context window (LiteRT-LM 0.19+). Start a new conversation, summarize, or load with a larger <code>maxContextTokens</code>; <code>getMemoryForecast().nearingLimit</code> warns before it happens. Not a memory error.</td></tr>
         <tr><td><code>MODEL_NOT_FOUND</code> / <code>INVALID_MODEL</code></td><td>No file at the path, or not a usable bundle.</td></tr>
         <tr><td><code>MODEL_TYPE_MISMATCH</code> / <code>RUNTIME_TOO_OLD</code> / <code>UNSUPPORTED</code></td><td>The bundle can't run here — the wrong model type, a bundle that needs a newer engine, or hardware this device lacks (see <a href="models.html#load-pre-flight">the load pre-flight</a>). <code>UNSUPPORTED</code> also covers requests the engine or platform doesn't implement, such as media sent to an engine without the matching encoder.</td></tr>
         <tr><td><code>MODEL_NOT_LOADED</code></td><td>Inference before <code>loadModel()</code> (or after <code>unload()</code>).</td></tr>
@@ -620,7 +622,7 @@ export type NativePhase = "load" | "execute" | "embed" | "inspect";</div>
     <table>
       <thead><tr><th>Engine status</th><th>Code</th></tr></thead>
       <tbody>
-        <tr><td><code>RESOURCE_EXHAUSTED</code></td><td><code>OUT_OF_MEMORY</code></td></tr>
+        <tr><td><code>RESOURCE_EXHAUSTED</code></td><td><code>CONTEXT_FULL</code> for a message whose engine text mentions the context window; <code>OUT_OF_MEMORY</code> otherwise.</td></tr>
         <tr><td><code>CANCELLED</code></td><td><code>INFERENCE_CANCELLED</code></td></tr>
         <tr><td><code>UNIMPLEMENTED</code></td><td><code>UNSUPPORTED</code></td></tr>
         <tr><td><code>NOT_FOUND</code></td><td><code>MODEL_NOT_FOUND</code> while loading or inspecting; <code>INVALID_INPUT</code> otherwise.</td></tr>

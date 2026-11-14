@@ -86,6 +86,28 @@ describe("errorCodeForStatus", () => {
   ] as const)("%s during %s → %s", (status, phase, code) => {
     expect(errorCodeForStatus(status, phase)).toBe(code);
   });
+
+  it("tells a full context window (LiteRT-LM 0.19+) apart from running out of memory", () => {
+    const full = "Max number of tokens reached, the context window is full.";
+    const noRoom = "Not enough space left in the context window for the input";
+    expect(errorCodeForStatus("RESOURCE_EXHAUSTED", "execute", full)).toBe("CONTEXT_FULL");
+    expect(errorCodeForStatus("RESOURCE_EXHAUSTED", "execute", noRoom)).toBe("CONTEXT_FULL");
+    expect(errorCodeForStatus("RESOURCE_EXHAUSTED", "execute", "KV cache allocation failed")).toBe("OUT_OF_MEMORY");
+    // Only a message is ever "full"; a load that runs out stays OUT_OF_MEMORY
+    expect(errorCodeForStatus("RESOURCE_EXHAUSTED", "load", full)).toBe("OUT_OF_MEMORY");
+  });
+
+  it("a full context window is CONTEXT_FULL end to end, and not a memory error", () => {
+    const e = toLiteRTLMError(
+      new Error(
+        "[LiteRTLM:execute:RESOURCE_EXHAUSTED] Max number of tokens reached, the context window is full.",
+      ),
+      "execute",
+    );
+    expect(e.code).toBe("CONTEXT_FULL");
+    expect(e.nativeStatus?.name).toBe("RESOURCE_EXHAUSTED");
+    expect(isMemoryError(e)).toBe(false);
+  });
 });
 
 describe("toLiteRTLMError", () => {

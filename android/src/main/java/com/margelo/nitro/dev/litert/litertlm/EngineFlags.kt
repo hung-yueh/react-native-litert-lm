@@ -14,27 +14,25 @@ internal object EngineFlags {
     private val lock = Any()
 
     /**
-     * Create an engine with speculative decoding and a per-image vision-token
-     * cap (null: defaults), in benchmark mode if asked.
+     * Create an engine with a per-image vision-token cap (null: the default),
+     * in benchmark mode if asked. Speculative decoding is per engine since
+     * LiteRT-LM 0.19 (`EngineConfig.speculativeDecodingConfig`), so it is no
+     * longer set here.
      */
     fun <T> forEngine(
-        speculativeDecoding: Boolean?,
         maxVisionTokensPerImage: Int?,
         benchmark: Boolean,
         create: () -> T,
     ): T =
         synchronized(lock) {
             val benchmarkBefore = ExperimentalFlags.enableBenchmark
-            val speculative = ExperimentalFlags.enableSpeculativeDecoding
             val budget = ExperimentalFlags.visualTokenBudget
             ExperimentalFlags.enableBenchmark = benchmark
-            ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
             ExperimentalFlags.visualTokenBudget = maxVisionTokensPerImage
             try {
                 create()
             } finally {
                 ExperimentalFlags.enableBenchmark = benchmarkBefore
-                ExperimentalFlags.enableSpeculativeDecoding = speculative
                 ExperimentalFlags.visualTokenBudget = budget
             }
         }

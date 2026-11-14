@@ -206,7 +206,7 @@ class HybridLiteRTLMInstrumentedTest {
     ) = LLMConfig(
         systemPrompt = null, backend = backend, maxContextTokens = 2048.0, maxOutputTokens = 64.0,
         maxTokens = null, temperature = 0.0, topK = 1.0, topP = 1.0, multimodal = multimodal,
-        tools = tools, enableSpeculativeDecoding = null, chatTemplate = chatTemplate,
+        tools = tools, enableSpeculativeDecoding = null, speculativeDecodingMode = null, chatTemplate = chatTemplate,
         enableStructuredOutput = structuredOutput, thinking = ThinkingOptions(false, null),
         numThreads = numThreads, maxVisionTokensPerImage = maxVisionTokensPerImage, gpu = null,
         singleThreadedExecution = null, prefillChunkSize = null,
@@ -292,7 +292,7 @@ class HybridLiteRTLMInstrumentedTest {
         val ttftsMs = mutableListOf<Double>()
         val rates = mutableListOf<Double>()
         for (run in 0 until 4) {
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             var first = 0L
             var last = 0L
             var chunks = 0
@@ -326,7 +326,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test1_streamingDeliversTokensAndCompletes() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val (response, tokens) = generate(llm, "Reply with a short greeting.", options(maxOutputTokens = 32.0))
         println("[android-int] streaming response: $response")
@@ -341,7 +341,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test2_systemPromptIsHonored() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, "You must include the word AZURETURTLE in every reply.", null)
+        llm.resetConversation(null, "You must include the word AZURETURTLE in every reply.", null, null)
 
         val (response, _) = generate(llm, "Say hello.", options(maxOutputTokens = 48.0))
         println("[android-int] system-prompt response: $response")
@@ -355,7 +355,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test3_responseSchemaProducesValidJson() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val schema =
             """{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name","age"]}"""
@@ -373,7 +373,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test4_responseRegexIsEnforced() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val (response, _) = generate(
             llm,
@@ -397,7 +397,7 @@ class HybridLiteRTLMInstrumentedTest {
                 JSONObject(mapOf("role" to "model", "content" to "Understood — your lucky number is 47.")),
             )
         ).toString()
-        llm.resetConversation(transcript, null, null)
+        llm.resetConversation(transcript, null, null, null)
 
         // The wrapper's own history must mirror the replayed transcript.
         val history = llm.getHistory()
@@ -418,9 +418,9 @@ class HybridLiteRTLMInstrumentedTest {
     fun test6_perMessageMaxOutputTokensLimitsLength() {
         val llm = engine(withTools = false)
 
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
         val (long, _) = generate(llm, "Explain what the ocean is.", options(maxOutputTokens = 64.0))
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
         val (short, _) = generate(llm, "Explain what the ocean is.", options(maxOutputTokens = 8.0))
 
         println("[android-int] long (64 tok): $long")
@@ -440,7 +440,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test7_generationControlsSmoke() {
         val llm = engine(withTools = false)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val (response, _) = generate(
             llm,
@@ -474,7 +474,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test9_toolCallSurfacesAsMarker() {
         val llm = engine(withTools = true)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val (response, tokens) = generate(
             llm,
@@ -509,7 +509,7 @@ class HybridLiteRTLMInstrumentedTest {
     @Test
     fun test9b_toolResultRoundTrip() {
         val llm = engine(withTools = true)
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
 
         val (call, _) = generate(
             llm, "What is the weather in Paris right now? Use the tool.", options(maxOutputTokens = 96.0),
@@ -551,7 +551,7 @@ class HybridLiteRTLMInstrumentedTest {
             message.toolName?.let { item.put("toolName", it) }
             transcript.put(item)
         }
-        llm.resetConversation(transcript.toString(), null, null)
+        llm.resetConversation(transcript.toString(), null, null, null)
         assertEquals(listOf(Role.USER, Role.MODEL, Role.TOOL, Role.MODEL), llm.getHistory().map { it.role })
         val (recall, _) = generate(
             llm, "What condition did the weather tool report? Answer in one word.", options(maxOutputTokens = 16.0),
@@ -640,7 +640,7 @@ class HybridLiteRTLMInstrumentedTest {
         // Reset cancels the message and waits only for it to return; the next
         // message runs in the new conversation, without the cancelled one.
         var started = System.nanoTime()
-        ms("resetConversation") { llm.resetConversation(null, null, null) }
+        ms("resetConversation") { llm.resetConversation(null, null, null, null) }
         assertCancelled("reset", sent)
         println("[android-int][nonblocking] reset cancelled the message in ${(System.nanoTime() - started) / 1_000_000} ms")
         val (hello, _) = generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
@@ -655,7 +655,7 @@ class HybridLiteRTLMInstrumentedTest {
         val streaming = CountDownLatch(1)
         sent = send(llm) { token, done -> if (!done && token.isNotEmpty()) streaming.countDown() }
         assertTrue("no streamed token", streaming.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
-        ms("resetConversation mid-stream") { llm.resetConversation(null, null, null) }
+        ms("resetConversation mid-stream") { llm.resetConversation(null, null, null, null) }
         val atOnce = llm.getContextTokenCount()
         assertCancelled("reset mid-stream", sent)
         val read = knownContextTokens(llm)
@@ -745,9 +745,9 @@ class HybridLiteRTLMInstrumentedTest {
         val read = llm.readContextTokens
         try {
             // Without a transcript the count is read at once, system prompt or not.
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val empty = knownContextTokens(llm)
-            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null)
+            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null, null)
             val prompted = knownContextTokens(llm)
             println("[android-int][reset-count] after a reset $empty, with a system prompt $prompted")
             assertTrue("no count after a reset: $empty", empty >= 0)
@@ -759,14 +759,14 @@ class HybridLiteRTLMInstrumentedTest {
                 Thread.sleep(1_000)
                 return reply to llm.getContextTokenCount()
             }
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             knownContextTokens(llm)
             val (firstReply, firstCount) = hello()
             println("[android-int][reset-count] reference: $firstCount, '$firstReply'")
             var compared = 0
             repeat(20) { i ->
                 val started = System.nanoTime()
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 val (reply, count) = hello()
                 Thread.sleep(1_000)
                 val later = llm.getContextTokenCount()
@@ -786,7 +786,7 @@ class HybridLiteRTLMInstrumentedTest {
             // The read has its number, then a message finishes: the message's count stays.
             run {
                 val hold = HeldRead(llm, 1, afterEngine = true)
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
                 generate(llm, "Say hello.", short)
                 val message = llm.getContextTokenCount()
@@ -804,7 +804,7 @@ class HybridLiteRTLMInstrumentedTest {
             // count stays -1 while the message generates and is then the message's own.
             for (afterEngine in listOf(false, true)) {
                 val hold = HeldRead(llm, 1, afterEngine)
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
                 val firstToken = CountDownLatch(1)
                 val done = CountDownLatch(1)
@@ -843,10 +843,10 @@ class HybridLiteRTLMInstrumentedTest {
             // reset's 2 s wait: the reset waits for it, and the second count lands.
             run {
                 val hold = HeldRead(llm, 1, afterEngine = true)
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
                 val letGo = thread { Thread.sleep(500); hold.release.countDown() }
-                ms("resetConversation while the first read is held for 0.5 s") { llm.resetConversation(null, null, null) }
+                ms("resetConversation while the first read is held for 0.5 s") { llm.resetConversation(null, null, null, null) }
                 letGo.join()
                 val second = knownContextTokens(llm)
                 Thread.sleep(1_000)
@@ -863,9 +863,9 @@ class HybridLiteRTLMInstrumentedTest {
             // first read has returned, and the next message records its own count.
             run {
                 val hold = HeldRead(llm, 1, afterEngine = true)
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
-                ms("resetConversation while the first read is held past its wait") { llm.resetConversation(null, null, null) }
+                ms("resetConversation while the first read is held past its wait") { llm.resetConversation(null, null, null, null) }
                 Thread.sleep(1_000)
                 val whileHeld = llm.getContextTokenCount()
                 hold.release.countDown()
@@ -891,7 +891,7 @@ class HybridLiteRTLMInstrumentedTest {
         val closing = HybridLiteRTLM()
         closing.loadModelBlocking(model.absolutePath, llmConfig())
         val heldForClose = HeldRead(closing, 1, afterEngine = false)
-        closing.resetConversation(null, null, null)
+        closing.resetConversation(null, null, null, null)
         assertTrue("the read never ran", heldForClose.reached.await(10, TimeUnit.SECONDS))
         assertTrue(ms("close during the read") { closing.close() } < 50.0)
         assertFalse(closing.isReady())
@@ -907,7 +907,7 @@ class HybridLiteRTLMInstrumentedTest {
         val unloading = HybridLiteRTLM()
         unloading.loadModelBlocking(model.absolutePath, llmConfig())
         val heldForUnload = HeldRead(unloading, 1, afterEngine = false)
-        unloading.resetConversation(null, null, null)
+        unloading.resetConversation(null, null, null, null)
         assertTrue("the read never ran", heldForUnload.reached.await(10, TimeUnit.SECONDS))
         val settled = CountDownLatch(1)
         unloading.unload().then { settled.countDown() }.catch { settled.countDown() }
@@ -936,7 +936,7 @@ class HybridLiteRTLMInstrumentedTest {
                     llmConfig(backend = Backend.CPU, numThreads = threads, exactStats = true),
                 )
                 generate(llm, "Hi", options(maxOutputTokens = 4.0)) // warm-up
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 val (text, _) = generate(
                     llm, "Write a detailed paragraph about the history of the bicycle.", options(maxOutputTokens = 64.0),
                 )
@@ -1025,7 +1025,7 @@ class HybridLiteRTLMInstrumentedTest {
             )
             send("blocking", "Say hello.", 16.0, stream = false)
 
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             assertEquals("a reset leaves no stats of the last conversation", 0.0, llm.getStats().totalTokens, 0.0)
             send("after a reset", explain, 16.0)
 
@@ -1037,11 +1037,11 @@ class HybridLiteRTLMInstrumentedTest {
                 if (isDone) cancelled.countDown()
             }, options(maxOutputTokens = 512.0))
             assertTrue("no streamed token", firstToken.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             assertTrue("the cancelled message never ended", cancelled.await(GENERATE_TIMEOUT_SEC, TimeUnit.SECONDS))
             send("after a reset that cancelled a message", explain, 16.0)
 
-            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null)
+            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null, null)
             send("after a reset with a system prompt", "Say hello.", 16.0)
 
             // The engine prefills a replayed transcript with the next message.
@@ -1051,40 +1051,50 @@ class HybridLiteRTLMInstrumentedTest {
                     JSONObject(mapOf("role" to "model", "content" to "Understood — your lucky number is 47.")),
                 )
             ).toString()
-            llm.resetConversation(transcript, null, null)
+            llm.resetConversation(transcript, null, null, null)
             assertEquals("the count is unknown until that message", -1.0, llm.getContextTokenCount(), 0.0)
             // The count stays -1 until this message ends, by design: it starts from 0.
             val replayed = send("after a replaying reset", "What is my lucky number?", 16.0, startsFrom = 0.0)
             assertTrue("the prefill holds the transcript: ${replayed.promptTokens}", replayed.promptTokens > 30)
 
             // Thinking: the engine takes a reply's thought back out of the context.
-            // LiteRT-LM 0.18.1 does it at the start of the next message, so the reply
-            // with the thought adds up, and the next message adds less than its
-            // total, by about the thought's tokens.
+            // LiteRT-LM 0.19 does it at the end of the same message, by prefilling
+            // the reply again without it, so the engine's last prefill turn is that
+            // refill. The SDK shows only the last turn, so the prompt side of a
+            // reply that thought is the estimate; the decode side is still the
+            // engine's, thought included. The context grows by less than the total.
+            // (0.18.1 took the thought out at the start of the next message.)
             val thinking = ThinkingOptions(true, null)
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
+            val thoughtPrompt = "What is 17 × 23? Reply with the number only."
             val (thought, thoughtGrew, thoughtReply) =
-                measure("a reply with thinking", "What is 17 × 23? Reply with the number only.", 256.0, thinking = thinking)
+                measure("a reply with thinking", thoughtPrompt, 256.0, thinking = thinking)
             val (afterThought, afterThoughtGrew, _) =
                 measure("the message after it", "Now add 9 to it. Reply with the number only.", 16.0)
-            println("[android-int][exact-stats] the thought taken out: ${afterThought.totalTokens - afterThoughtGrew} tokens")
+            println("[android-int][exact-stats] the thought taken out: ${thought.totalTokens - thoughtGrew} tokens")
             assertTrue("no thought in the reply: $thoughtReply", thought.completionTokens > 20)
-            assertEquals("the reply with thinking", thoughtGrew, thought.totalTokens, 0.0)
+            assertEquals("the prompt side is the estimate", thoughtPrompt.length / 4.0, thought.promptTokens, 0.0)
             assertTrue(
-                "the message after a reply with thinking: grew $afterThoughtGrew, total ${afterThought.totalTokens}",
-                afterThoughtGrew < afterThought.totalTokens,
+                "the reply with thinking: grew $thoughtGrew, total ${thought.totalTokens}",
+                thoughtGrew < thought.totalTokens,
+            )
+            assertTrue(
+                "the message after it: grew $afterThoughtGrew, total ${afterThought.totalTokens}",
+                afterThoughtGrew <= afterThought.totalTokens,
             )
 
             // A stream whose whole budget goes to thinking sends no text: no first
             // token to time, so 0, as on iOS.
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val (silent, silentGrew, silentReply) =
-                measure("all of the budget to thinking", "What is 17 × 23? Reply with the number only.", 8.0, thinking = thinking)
+                measure("all of the budget to thinking", thoughtPrompt, 8.0, thinking = thinking)
             assertEquals("the thought should use the whole budget", "", silentReply)
             assertEquals("no text reached the callback", 0.0, silent.timeToFirstToken, 0.0)
-            assertEquals("a reply that is all thought", silentGrew, silent.totalTokens, 0.0)
+            // Its estimated prompt leaves out the chat template, so its total can be
+            // below what the context grew (0.19.1 emulator: total 19, grew 33).
+            println("[android-int][exact-stats] all thought: grew $silentGrew, total ${silent.totalTokens}")
 
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val exactCjk = send("CJK", cjk, 64.0)
 
             // The next load without the flag: the estimate, and a context count as exact as before.
@@ -1175,7 +1185,7 @@ class HybridLiteRTLMInstrumentedTest {
             }
             send("image", textPart("Describe this picture in one short sentence."), mediaPart(PartType.IMAGE, image!!))
             send("the text message after an image", textPart("Say that again in one word."))
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             send("audio", textPart("What do you hear? One short sentence."), mediaPart(PartType.AUDIO, audio!!))
             send("the text message after audio", textPart("Say that again in one word."))
             assertTrue("prompt + completion differs from the context's growth: $mismatches", mismatches.isEmpty())
@@ -1219,7 +1229,7 @@ class HybridLiteRTLMInstrumentedTest {
                 assertTrue("$label: a message that doesn't fit in what is left of the context ran", failed.isFailure)
                 later[exact] = List(2) { streamed(llm, "Say hello.").fold({ "ran: $it" }, { "failed: $it" }) }
                 println("[android-int][exact-stats] $label: the next two messages ${later[exact]}")
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 val before = knownContextTokens(llm).coerceAtLeast(0.0)
                 val (reply, _) = generate(llm, "Say hello.", options(maxOutputTokens = 16.0))
                 val stats = llm.getStats()
@@ -1248,17 +1258,17 @@ class HybridLiteRTLMInstrumentedTest {
     fun testS_speculativeDecodingPerConversation() {
         val llm = engine(withTools = false)
         val prompt = "Write a detailed paragraph about the history of the bicycle."
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
         val (plain, _) = generate(llm, prompt, options(maxOutputTokens = 64.0))
         val plainTps = llm.getStats().tokensPerSecond
-        llm.resetConversation(null, null, true)
+        llm.resetConversation(null, null, true, null)
         val (fast, _) = generate(llm, prompt, options(maxOutputTokens = 64.0))
         val fastTps = llm.getStats().tokensPerSecond
         println("[android-int][mtp] decode ${"%.2f".format(plainTps)} tok/s default, ${"%.2f".format(fastTps)} tok/s speculative")
         println("[android-int][mtp] speculative text: ${fast.take(120)}")
         assertTrue(plain.isNotBlank())
         assertTrue(fast.isNotBlank())
-        llm.resetConversation(null, null, null)
+        llm.resetConversation(null, null, null, null)
     }
 
     /**
@@ -1283,7 +1293,7 @@ class HybridLiteRTLMInstrumentedTest {
             assertNull("the load must restore the global budget", com.google.ai.edge.litertlm.ExperimentalFlags.visualTokenBudget)
             assumeTrue("this bundle has no vision encoder", llm.hasVisionEncoder)
             fun describe(budget: Double?): Pair<String, Long> {
-                llm.resetConversation(null, null, null)
+                llm.resetConversation(null, null, null, null)
                 val start = System.nanoTime()
                 val (text, _) = generateParts(
                     llm,
@@ -1478,7 +1488,7 @@ class HybridLiteRTLMInstrumentedTest {
             }
             val audio = fixture("test.wav")
             if (bundleAudio && audio != null) {
-                multi.resetConversation(null, null, null)
+                multi.resetConversation(null, null, null, null)
                 val turn = System.nanoTime()
                 val reply = awaitResult(
                     multi.execute(

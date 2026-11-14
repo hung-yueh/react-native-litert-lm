@@ -152,7 +152,7 @@ import { inspectModel, recommendBackend, getDeviceInfo } from "react-native-lite
 const info = await inspectModel(path); // a local path, or a URL that is already downloaded
 info.type;              // 'llm' | 'embedding' | 'unknown'
 info.modalities;        // { text, vision, audio, video }
-info.maxContextTokens;  // the bundle's limit
+info.defaultContextTokens; // the bundle's default context (not its maximum)
 info.backends.text;     // backends it was built for, most preferred first
 recommendBackend(info); // { backend, reason, candidates } for this device
 getDeviceInfo();        // platform, SoC, memory, GPU availability
@@ -164,7 +164,7 @@ getDeviceInfo();        // platform, SoC, memory, GPU availability
 - **A bundle that needs a newer engine** rejects with `RUNTIME_TOO_OLD`.
 - **With `backend` omitted**, the bundle's preferred backend that this device can run is used (CPU when the bundle declares none). A per-SoC NPU build on another phone rejects with `UNSUPPORTED`.
 - **Image and audio encoders** load only if the bundle has them, on the backends it declares; `multimodal: false` keeps an engine text-only.
-- **`maxContextTokens`** above the bundle's maximum is clamped, so the memory estimate and the engine agree.
+- **`maxContextTokens`** is yours to choose. Since LiteRT-LM 0.19 a bundle declares its default context (`defaultContextTokens`; Gemma 4 E2B says 4096), not its maximum, so nothing is clamped to it. The engine caps a fixed-size graph itself. `maxContextTokens` on `ModelInfo` is the same value, deprecated, and goes away in 1.0.
 
 `llm.getModelInfo()` and `useModel().modelInfo` return what the loaded bundle declared.
 
@@ -176,6 +176,7 @@ Every failure is a `LiteRTLMError` with a stable `code`, so you branch on codes 
 | --- | --- |
 | `MEMORY_ESTIMATE_EXCEEDED` | The pre-flight refused a load that would not fit (a `MemoryError` carrying the estimate) |
 | `OUT_OF_MEMORY` | The engine ran out of memory |
+| `CONTEXT_FULL` | A message didn't fit in the context window: start a new conversation, summarize, or load with a larger `maxContextTokens`. `getMemoryForecast().nearingLimit` warns before it happens |
 | `MODEL_NOT_FOUND` / `INVALID_MODEL` | No file at the path, or not a usable bundle |
 | `MODEL_TYPE_MISMATCH` / `RUNTIME_TOO_OLD` / `UNSUPPORTED` | The bundle can't run here ([see above](#know-the-model-before-loading-it)) |
 | `MODEL_NOT_LOADED` | Inference before `loadModel()` |
@@ -378,7 +379,7 @@ showAnswer(stripToolCalls(reply));
 
 ### Speculative decoding
 
-Bundles with a multi-token-prediction drafter (Gemma 4 E2B ships one) can decode faster. `enableSpeculativeDecoding: true` turns it on for the engine, and `createConversation({ speculativeDecoding })` overrides it per conversation. A bundle without a drafter ignores the request with a warning. Measure on your target devices: on CPU it isn't always a win.
+Bundles with a multi-token-prediction drafter (Gemma 4 E2B ships one) can decode faster. `speculativeDecodingMode` sets it for the engine: `'off'`, `'on'`, or `'adaptive'`, which speculates only while the engine measures it to be faster. `enableSpeculativeDecoding: true` is the same as `'on'`. `createConversation({ speculativeDecoding })` overrides it per conversation and takes a mode or a boolean. A bundle without a drafter ignores the request with a warning. Measure on your target devices: on CPU it isn't always a win, which is what `'adaptive'` is for.
 
 ### Chat templates
 
@@ -510,13 +511,12 @@ The exported constants are **public, no auth required**. Pass any of them to `us
 | `LFM2_5_1_2B_INSTRUCT` | Liquid AI LFM2.5 1.2B Instruct — a fast small chat model, CPU | 736 MB | 3 GB+ |
 | `EMBEDDING_GEMMA_2_TEXT_270M` | EmbeddingGemma 2 — text embeddings | 165 MB | 2 GB+ |
 | `EMBEDDING_GEMMA_2_740M` | EmbeddingGemma 2 — text, image and audio embeddings | 485 MB | 3 GB+ |
-| `GEMMA_3N_E2B_IT_INT4` _(deprecated)_ | Gemma 3n E2B (int4, multimodal) | ~3.66 GB | 6 GB+ |
 
 Gemma 4 E2B, LFM2.5 and both EmbeddingGemma 2 models were verified end to end on the iOS simulator and an Android emulator for this release. LFM2.5 is under the [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/blob/main/LICENSE), not Apache; check its commercial terms.
 
-> **`GEMMA_3N_E2B_IT_INT4` is deprecated** — prefer `GEMMA_4_E2B_IT`: it is smaller (2.58 GB), adds audio, tool calling and thinking, and comes straight from the Hub. Gemma 3n is mirrored on `models.litert.dev` only because the upstream repo `google/gemma-3n-E2B-it-litert-lm` is gated (401 without a token and manual license approval). It still works, and the old `litert.dev/...` URL 301s to the mirror.
+> **`GEMMA_3N_E2B_IT_INT4` was removed in 0.9.0**, with the `GEMMA_3N_E2B` / `GEMMA_3N_E4B` identifiers. Use `GEMMA_4_E2B_IT`: it is smaller (2.58 GB) and adds audio, tool calling and thinking. A Gemma 3n file already on the device still loads: pass its path to `loadModel()`.
 
-> **iOS:** models over ~2 GB need the [Extended Virtual Addressing entitlement](#ios-entitlements) — that includes the Gemma 4 and Gemma 3n models above. LFM2.5 and the embedding models fit without it.
+> **iOS:** models over ~2 GB need the [Extended Virtual Addressing entitlement](#ios-entitlements) — that includes both Gemma 4 models above. LFM2.5 and the embedding models fit without it.
 
 ## Manifest Resolution
 
@@ -562,7 +562,8 @@ Lower-level pieces are exported too, so you can drive the steps yourself: `fetch
 | `thinking` | engine default | `{ enabled, tokenBudget }` reasoning controls (Gemma 4) |
 | `tools` | — | Tool definitions — see [Tool calling](#tool-calling-agents) |
 | `chatTemplate` | the bundle's | Jinja template that replaces the bundle's — see [Chat templates](#chat-templates) |
-| `enableSpeculativeDecoding` | `false` | Multi-token prediction, if the bundle has a drafter |
+| `enableSpeculativeDecoding` | `false` | Multi-token prediction, if the bundle has a drafter (`true` = `'on'`) |
+| `speculativeDecodingMode` | — | `'off'` / `'on'` / `'adaptive'`; overrides `enableSpeculativeDecoding` |
 | `forceLoad` | `false` | Skip the pre-flight memory check |
 | `exactStats` | `false` | `getStats()` reports the engine's numbers for each message instead of estimates (about 4 characters per token); what it costs is on the [docs site](https://litert.dev/inference.html#getstats) |
 | memory tuning | — | `numThreads`, `prefillChunkSize`, `activationDataType`, `maxVisionTokensPerImage`, `gpu.metalResidencySet`, `loraPath` — see [Tuning knobs](#tuning-knobs) |

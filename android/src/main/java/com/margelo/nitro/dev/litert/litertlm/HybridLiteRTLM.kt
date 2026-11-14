@@ -239,7 +239,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var sessionThinking: ThinkingOptions? = null
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
-    private var enableSpeculativeDecoding: Boolean = false
+    /** The session's speculative-decoding mode (null: the engine's default). */
+    private var speculativeDecodingMode: SpeculativeDecodingMode? = null
     /** LLMConfig.exactStats: the live engine is in benchmark mode, so getStats() can read its numbers. */
     @Volatile
     private var exactStats: Boolean = false
@@ -335,7 +336,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 }
                 cfg.systemPrompt?.let { systemPrompt = it }
                 tools = cfg.tools
-                enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                speculativeDecodingMode = speculativeDecodingModeOf(
+                    cfg.speculativeDecodingMode,
+                    cfg.enableSpeculativeDecoding?.takeIf { it },
+                )
                 chatTemplate = cfg.chatTemplate
                 numThreads = cfg.numThreads?.toInt()
                 maxVisionTokensPerImage = cfg.maxVisionTokensPerImage?.toInt()
@@ -414,10 +418,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             maxNumTokens = maxContextTokens,
                             cacheDir = cacheDirectory,
                             activationDataType = activationDataType?.toSdk(),
+                            // Per engine since LiteRT-LM 0.19 (was a process-wide flag)
+                            speculativeDecodingConfig = speculativeDecodingMode.toSdkConfig(),
                         )
                         // Process-wide SDK flags, set for this creation only.
                         EngineFlags.forEngine(
-                            speculativeDecoding = if (enableSpeculativeDecoding) true else null,
                             maxVisionTokensPerImage = maxVisionTokensPerImage,
                             benchmark = exactStats,
                         ) { Engine(cfg).also { it.initialize() } }
@@ -622,7 +627,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    override fun resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Boolean?) {
+    override fun resetConversation(
+        historyJson: String?,
+        systemPrompt: String?,
+        speculativeDecoding: Boolean?,
+        speculativeDecodingMode: SpeculativeDecodingMode?,
+    ) {
         val transcript = parseTranscript(historyJson)
         val fresh = stateLock.withLock {
             // A message still generating is cancelled and given up to 2 s to
@@ -644,7 +654,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 eng,
                 transcript = transcript,
                 systemPromptOverride = systemPrompt,
-                speculativeDecoding = speculativeDecoding,
+                speculativeDecoding = speculativeDecodingModeOf(speculativeDecodingMode, speculativeDecoding),
             ).also { conversation = it }
         }
         // The engine prefills a replayed transcript with the next message, so it
@@ -975,7 +985,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         engine: Engine,
         transcript: List<Message> = emptyList(),
         systemPromptOverride: String? = null,
-        speculativeDecoding: Boolean? = null,
+        speculativeDecoding: SpeculativeDecodingMode? = null,
     ): Conversation {
         // Map tools. The SDK's tool() adapter requires a {name, description,
         // parameters} description JSON — parameters alone makes it throw, and
@@ -1036,8 +1046,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             // responseFormat (structured output)
             enableResponseFormat = enableStructuredOutput,
             thinkingConfig = sessionThinking?.toSdkThinkingConfig(),
-            // Unset inherits the engine's setting; true loads the drafter lazily.
-            enableSpeculativeDecoding = speculativeDecoding,
+            // Unset inherits the engine's mode; ON/ADAPTIVE load the drafter lazily.
+            speculativeDecodingConfig = speculativeDecoding.toSdkConfig(),
             chatTemplate = chatTemplate,
         )
         return engine.createConversation(convConfig)
@@ -1341,7 +1351,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                     history.add(Message(Role.MODEL, textResponse, responseMsg.toolCalls.toNitroToolCalls(), null))
 
-                    lastStats.set(conv to generationStats(engineStats(conv), userTextRepresentation, response, elapsedMs))
+                    val refilled = responseMsg.channels.values.any { it.isNotEmpty() }
+                    lastStats.set(
+                        conv to generationStats(engineStats(conv), userTextRepresentation, response, elapsedMs, refilled = refilled),
+                    )
                     recordContextTokens(conv)
                     response
                 }
@@ -1369,6 +1382,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
  * decode turns when it has them (exactStats), else about 4 characters per token.
  * [streamedFirstTokenMs] is null for a blocking message, which has no first
  * token to time: that reports the last prefill's time, or 0 without the engine's numbers.
+ *
+ * [refilled]: the reply carried channel content (thinking). LiteRT-LM 0.19+
+ * then prefills the reply again without it, at the end of the same message, so
+ * the engine's last prefill turn is that refill, not the prompt. The SDK
+ * exposes only the last turn, so the prompt side is estimated then; the decode
+ * side is still the engine's.
  */
 internal fun generationStats(
     engine: BenchmarkInfo?,
@@ -1376,10 +1395,12 @@ internal fun generationStats(
     response: String,
     elapsedMs: Double,
     streamedFirstTokenMs: Double? = null,
+    refilled: Boolean = false,
 ): GenerationStats {
-    val promptTokens = engine?.lastPrefillTokenCount?.toDouble() ?: (prompt.length / 4.0)
+    val prefill = engine?.takeIf { !refilled }
+    val promptTokens = prefill?.lastPrefillTokenCount?.toDouble() ?: (prompt.length / 4.0)
     val completionTokens = engine?.lastDecodeTokenCount?.toDouble() ?: (response.length / 4.0)
-    val lastPrefillMs = engine?.takeIf { it.lastPrefillTokensPerSecond > 0 }
+    val lastPrefillMs = prefill?.takeIf { it.lastPrefillTokensPerSecond > 0 }
         ?.let { it.lastPrefillTokenCount / it.lastPrefillTokensPerSecond * 1000.0 }
         ?: 0.0
     return GenerationStats(

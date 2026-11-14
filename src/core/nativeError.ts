@@ -75,6 +75,7 @@ export function cleanNativeMessage(message: string): string {
 const ERROR_CODES: ReadonlySet<string> = new Set<LiteRTLMErrorCode>([
   "MEMORY_ESTIMATE_EXCEEDED",
   "OUT_OF_MEMORY",
+  "CONTEXT_FULL",
   "MODEL_NOT_FOUND",
   "INVALID_MODEL",
   "MODEL_NOT_LOADED",
@@ -111,14 +112,28 @@ export function parseNativeStatus(
   return { status, code: explicit };
 }
 
-/** Map a canonical status to the error code a caller can act on, per phase. */
+/**
+ * The engine's account of a message that doesn't fit the context window
+ * (LiteRT-LM 0.19+): "Max number of tokens reached, the context window is
+ * full." or "Not enough space left in the context window for the input".
+ */
+const CONTEXT_FULL_MESSAGE = /context window/i;
+
+/**
+ * Map a canonical status to the error code a caller can act on, per phase.
+ * `message` is the engine's text, which tells a full context window apart
+ * from running out of memory (both are `RESOURCE_EXHAUSTED`).
+ */
 export function errorCodeForStatus(
   name: NativeStatusName,
   phase: NativePhase,
+  message?: string,
 ): LiteRTLMErrorCode {
   switch (name) {
     case "RESOURCE_EXHAUSTED":
-      return "OUT_OF_MEMORY";
+      return phase === "execute" && message !== undefined && CONTEXT_FULL_MESSAGE.test(message)
+        ? "CONTEXT_FULL"
+        : "OUT_OF_MEMORY";
     case "CANCELLED":
       return "INFERENCE_CANCELLED";
     case "UNIMPLEMENTED":
@@ -166,7 +181,7 @@ export function toLiteRTLMError(e: unknown, phase: NativePhase): LiteRTLMError {
   const raw = messageOf(e);
   const parsed = parseNativeStatus(raw);
   if (parsed) {
-    const code = parsed.code ?? errorCodeForStatus(parsed.status.name, phase);
+    const code = parsed.code ?? errorCodeForStatus(parsed.status.name, phase, parsed.status.message);
     return new LiteRTLMError(code, parsed.status.message || raw, {
       nativeStatus: parsed.status,
       cause: e,

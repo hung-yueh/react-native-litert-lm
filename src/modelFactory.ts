@@ -5,6 +5,7 @@ import {
   Message,
   MultimodalPart,
   ExecuteOptions,
+  SpeculativeDecodingMode,
 } from "./specs/LiteRTLM.nitro";
 import { createMemoryTracker, MemoryTracker } from "./memoryTracker";
 import { ModelRegistry, type ModelDownloadOptions } from "./modelRegistry";
@@ -44,11 +45,14 @@ export interface ConversationOptions {
   /** Override the session-level `systemPrompt` for this conversation. */
   systemPrompt?: string;
   /**
-   * Turn speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
-   * MTP) on or off for this conversation; unset follows
-   * `LLMConfig.enableSpeculativeDecoding`. `true` loads the drafter on first use.
+   * Speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
+   * MTP) for this conversation: `'off'`, `'on'`, `'adaptive'` (speculate only
+   * while the engine measures it to be faster), or a boolean (`true` is
+   * `'on'`). Unset follows the session's `LLMConfig.speculativeDecodingMode` /
+   * `enableSpeculativeDecoding`. `'on'` and `'adaptive'` load the drafter on
+   * first use.
    */
-  speculativeDecoding?: boolean;
+  speculativeDecoding?: boolean | SpeculativeDecodingMode;
 }
 
 /**
@@ -395,19 +399,25 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     const rethrow = (e: unknown): never => {
       throw toTypedError(e, "execute");
     };
+    // Native can also throw before it hands back a promise
+    const call = (callback: TokenCallback | undefined): Promise<string> => {
+      try {
+        return native.execute(processedParts, callback, options);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
     if (onToken) {
       const wrapped: TokenCallback = (token, done) => {
         onToken(token, done);
         if (done) recordMemorySnapshot();
       };
-      return native.execute(processedParts, wrapped, options).catch(rethrow);
+      return call(wrapped).catch(rethrow);
     }
-    return native
-      .execute(processedParts, undefined, options)
-      .then((result: string) => {
-        recordMemorySnapshot();
-        return result;
-      }, rethrow);
+    return call(undefined).then((result: string) => {
+      recordMemorySnapshot();
+      return result;
+    }, rethrow);
   };
 
   /** Typed-event streaming: raw token stream → token/toolCall/thinking events. */
@@ -461,8 +471,11 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
    * A per-conversation speculative-decoding request the loaded bundle can
    * honor: without a drafter the engine would fail the first message.
    */
-  const supportedSpeculativeDecoding = (requested: boolean | undefined): boolean | undefined => {
-    if (requested === true && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
+  const supportedSpeculativeDecoding = (
+    requested: boolean | SpeculativeDecodingMode | undefined,
+  ): boolean | SpeculativeDecodingMode | undefined => {
+    const wantsDrafter = requested === true || requested === "on" || requested === "adaptive";
+    if (wantsDrafter && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
       console.warn(
         "[react-native-litert-lm] speculativeDecoding: this bundle has no multi-token-prediction drafter — ignoring it.",
       );
@@ -470,6 +483,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     }
     return requested;
   };
+
+  /** Native's two speculative-decoding parameters: the boolean, or the mode. */
+  const nativeSpeculativeDecoding = (
+    value: boolean | SpeculativeDecodingMode | undefined,
+  ): [boolean | undefined, SpeculativeDecodingMode | undefined] =>
+    typeof value === "string" ? [undefined, value] : [value, undefined];
 
   /**
    * Give conversation `id` the native context: save the outgoing
@@ -491,7 +510,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       native.resetConversation(
         transcript.length > 0 ? JSON.stringify(transcript) : undefined,
         switchOptions?.systemPrompt,
-        supportedSpeculativeDecoding(switchOptions?.speculativeDecoding),
+        ...nativeSpeculativeDecoding(supportedSpeculativeDecoding(switchOptions?.speculativeDecoding)),
       );
     } catch (e) {
       throw toLiteRTLMError(e, "load");
@@ -509,6 +528,22 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     let end = turns.length;
     while (end > 0 && (turns[end - 1].role === "user" || turns[end - 1].role === "tool")) end--;
     return end === turns.length ? turns : turns.slice(0, end);
+  };
+
+  /**
+   * After a message the engine failed, its native conversation is dead:
+   * through LiteRT-LM 0.19.1 every later message on it fails at once ("Task
+   * failed with state: 7"), until a reset. Keep the conversation's answered
+   * turns instead, so its next message replays them into a fresh native
+   * conversation (one re-prefill). A cancelled message needs none of this:
+   * whatever cancelled it already replaced the native conversation.
+   */
+  const retireFailedConversation = (e: unknown) => {
+    const code = e instanceof LiteRTLMError ? e.code : undefined;
+    if (code === "INFERENCE_CANCELLED" || code === "MODEL_NOT_LOADED") return;
+    if (activeConversationId === undefined) return;
+    savedTranscripts.set(activeConversationId, answeredTurns(native.getHistory()));
+    activeConversationId = undefined;
   };
 
   /**
@@ -548,7 +583,8 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
    * When its turn comes, it rejects with INFERENCE_CANCELLED, without
    * reaching native, if the engine was replaced since it was sent or, in
    * the default conversation, the conversation was reset. Then `check`
-   * runs, and once conversations are in use the native context switches to
+   * runs, and once conversations are in use — or after a failed message left
+   * no conversation holding the context — the native context switches to
    * `id`. On a closed instance the call rejects at once.
    */
   const withConversation = <T>(
@@ -568,8 +604,19 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
         );
       }
       check?.();
-      if (conversationsInUse) switchTo(id, options);
-      return fn();
+      if (conversationsInUse || activeConversationId === undefined) switchTo(id, options);
+      const ranOn = engineEpoch;
+      const failed = (e: unknown): never => {
+        if (engineEpoch === ranOn) retireFailedConversation(e);
+        throw e;
+      };
+      let running: Promise<T>;
+      try {
+        running = fn();
+      } catch (e) {
+        return failed(e);
+      }
+      return running.catch(failed);
     });
   };
 
@@ -698,7 +745,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
           );
       }
       if (prop === "resetConversation") {
-        return (historyJson?: string, systemPrompt?: string, speculativeDecoding?: boolean) => {
+        return (
+          historyJson?: string,
+          systemPrompt?: string,
+          speculativeDecoding?: boolean,
+          speculativeDecodingMode?: SpeculativeDecodingMode,
+        ) => {
           // A manual reset starts the default conversation over and gives it
           // the live context. Native cancels the message generating; the
           // default conversation's messages waiting behind it are cancelled
@@ -712,13 +764,13 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
           // Switching back to the default conversation replays it with this
           // reset's options. If native fails, no conversation holds the
           // context, and the default conversation starts over empty.
-          const supported = supportedSpeculativeDecoding(speculativeDecoding);
+          const supported = supportedSpeculativeDecoding(speculativeDecodingMode ?? speculativeDecoding);
           savedTranscripts.delete(null);
           defaultConversationOptions = { systemPrompt, speculativeDecoding: supported };
           activeConversationId = undefined;
           let result: void;
           try {
-            result = target.resetConversation(historyJson, systemPrompt, supported);
+            result = target.resetConversation(historyJson, systemPrompt, ...nativeSpeculativeDecoding(supported));
           } catch (e) {
             throw toLiteRTLMError(e, "load");
           }

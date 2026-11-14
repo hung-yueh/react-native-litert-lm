@@ -96,14 +96,18 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var maxOutputTokens: Int = 1024
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
-    private var enableSpeculativeDecoding: Bool = false
+    /// The engine's speculative-decoding mode (LLMConfig), nil for the default (off).
+    private var speculativeDecodingMode: SpeculativeDecodingMode?
+    /// Whether the loaded bundle ships a drafter (e.g. Gemma 4's MTP). Without
+    /// one, a request to speculate is skipped.
+    private var bundleHasDrafter = false
     /// LLMConfig.exactStats: the live engine is in benchmark mode, so getStats() can read its numbers.
     private(set) var exactStats: Bool = false
     private var chatTemplate: String?
     private var numThreads: Int?
     private var maxVisionTokensPerImage: Int?
     private var metalResidencySet: Bool?
-    private var singleThreadedExecution: Bool?
+    private(set) var singleThreadedExecution: Bool?
     private var prefillChunkSize: Int?
     private var activationDataType: ActivationDataType?
     private var loraPath: String?
@@ -143,7 +147,14 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     /// still generating in the old conversation is cancelled, and `queue`
     /// replaces the conversation before any message sent after this call. A
     /// failure to create the new conversation is reported by the next execute().
-    public func resetConversation(historyJson: String?, systemPrompt: String?, speculativeDecoding: Bool? = nil) throws {
+    public func resetConversation(
+        historyJson: String?,
+        systemPrompt: String?,
+        speculativeDecoding: Bool? = nil,
+        speculativeDecodingMode: SpeculativeDecodingMode? = nil
+    ) throws {
+        // The mode wins over the boolean; unset inherits the engine's.
+        let speculative = SpeculativeDecodingMode.resolve(speculativeDecodingMode, legacy: speculativeDecoding)
         // Mirror the replayed transcript into the wrapper's own history so
         // getHistory() stays truthful for the restored conversation.
         let transcript = Self.parseTranscript(historyJson)
@@ -163,13 +174,13 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             self.conversationFailure = self.createNewConversation(
                 initialMessagesJson: messagesJson,
                 systemPromptOverride: systemPrompt,
-                speculativeDecoding: speculativeDecoding
+                speculativeDecoding: speculative
             )
             // The engine prefills a replayed transcript with the next message,
             // so until that one completes the count stays -1, as on Android:
             // the 0 it reads now would understate what the message builds on.
             guard messagesJson == nil else { return }
-            let tokens = self.conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+            let tokens = self.conversation.map(Self.tokenCount) ?? -1
             self.withSnapshot { s in
                 if s.epoch == epoch { s.contextTokens = tokens }
             }
@@ -186,11 +197,25 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     public func countTokens(text: String) throws -> Double {
         engineLock.lock()
         defer { engineLock.unlock() }
-        guard let engine = engine, let result = litert_lm_engine_tokenize(engine, text) else {
-            return -1.0
-        }
+        guard let engine = engine,
+              let result = try? LiteRTLMNativeError.created(.execute, "Failed to tokenize", {
+                  litert_lm_engine_tokenize(engine, text, $0)
+              })
+        else { return -1.0 }
         defer { litert_lm_tokenize_result_delete(result) }
-        return Double(litert_lm_tokenize_result_get_num_tokens(result))
+        let count = try? LiteRTLMNativeError.read(.execute, "Failed to count the tokens", 0) {
+            litert_lm_tokenize_result_get_num_tokens(result, $0)
+        }
+        return count.map(Double.init) ?? -1.0
+    }
+
+    /// Tokens in `conversation`'s context (KV cache), or -1 when the engine
+    /// can't say. On `queue`.
+    static func tokenCount(_ conversation: OpaquePointer) -> Double {
+        let count = try? LiteRTLMNativeError.read(.execute, "Failed to count the context's tokens", 0) {
+            litert_lm_conversation_get_token_count(conversation, $0)
+        }
+        return count.map(Double.init) ?? -1
     }
     
     public func getMemoryUsage() throws -> MemoryUsage {
@@ -354,6 +379,12 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             // being freed on its own queue; don't hold both in memory.
             Teardowns.wait(through: teardownsBefore)
 
+            // A framework from another C API version must not be called at all.
+            do { try EngineAPI.requireCompatible(.load) } catch {
+                promise.reject(withError: error)
+                return
+            }
+
             // A missing file would otherwise burn through all four engine
             // attempts below and surface as a generic creation failure.
             guard FileManager.default.fileExists(atPath: modelPath) else {
@@ -380,7 +411,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 }
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
-                self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
+                self.speculativeDecodingMode = SpeculativeDecodingMode.resolve(
+                    config.speculativeDecodingMode, legacy: config.enableSpeculativeDecoding)
                 self.exactStats = config.exactStats ?? false
                 self.chatTemplate = config.chatTemplate
                 self.numThreads = config.numThreads.map { Int($0) }
@@ -398,7 +430,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 self.thinkingOptions = config.thinking
             } else {
                 self.tools = nil
-                self.enableSpeculativeDecoding = false
+                self.speculativeDecodingMode = nil
                 self.exactStats = false
                 self.chatTemplate = nil
                 self.numThreads = nil
@@ -435,93 +467,57 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 NSLog("[LiteRTLM] multimodal: true, but this bundle has no vision or audio encoder — loading text-only")
             }
             
+            // Whether the bundle ships a drafter; without one, speculation is skipped.
+            self.bundleHasDrafter = (try? ModelBundle.read(modelPath))?.hasSpeculativeDecoding ?? false
+
             var rawEngine: OpaquePointer? = nil
             /// The engine's own reason for the most recent failed attempt.
             var lastEngineError: LiteRTLMNativeError?
-            
+
             // Set LiteRT C Log Level to WARNING for clean production output.
             // v0.15: takes a typed LiteRtLmLogSeverity (previously a raw int,
             // where 2 was INFO — WARNING is the intended level).
-            litert_lm_set_min_log_level(kLiteRtLmLogSeverityWarning)
-            
-            // Creation helper with scoped FFI pointer lifetime
-            let createEngine = { (main: String, vision: String?, audio: String?) -> OpaquePointer? in
-                LiteRTLMNativeError.clearEngineError()
-                let settings = modelPath.withCString { modelC in
-                    withOptionalCString(main) { mainC in
-                        withOptionalCString(vision) { visionC in
-                            withOptionalCString(audio) { audioC in
-                                return litert_lm_engine_settings_create(modelC, mainC, visionC, audioC)
+            do {
+                try LiteRTLMNativeError.check(.load, "Failed to set the engine's log level") {
+                    litert_lm_set_min_log_level(kLiteRtLmLogSeverityWarning)
+                }
+            } catch {
+                NSLog("[LiteRTLM] %@", "\(error)")
+            }
+
+            // One attempt: the engine, or nil with the engine's reason in
+            // `lastEngineError`. A setting the engine rejects throws instead:
+            // every attempt would fail on it the same way.
+            let createEngine = { (main: String, vision: String?, audio: String?) throws -> OpaquePointer? in
+                let settings: OpaquePointer
+                do {
+                    settings = try LiteRTLMNativeError.created(.load, "Invalid engine settings (\(main))") { out in
+                        modelPath.withCString { modelC in
+                            withOptionalCString(main) { mainC in
+                                withOptionalCString(vision) { visionC in
+                                    withOptionalCString(audio) { audioC in
+                                        litert_lm_engine_settings_create(modelC, mainC, visionC, audioC, out)
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                
-                guard let s = settings else {
-                    lastEngineError = LiteRTLMNativeError.fromEngine(
-                        .load, context: "Invalid engine settings (\(main))")
+                } catch let error as LiteRTLMNativeError {
+                    lastEngineError = error
                     return nil
                 }
-                defer { litert_lm_engine_settings_delete(s) }
-                
-                litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxContextTokens))
-                if self.exactStats {
-                    litert_lm_engine_settings_enable_benchmark(s)
-                }
+                defer { litert_lm_engine_settings_delete(settings) }
 
-                // Memory tuning knobs (v0.14 C API)
-                if let threads = self.numThreads {
-                    litert_lm_engine_settings_set_num_threads(s, Int32(threads))
-                }
-                if let chunk = self.prefillChunkSize {
-                    litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk))
-                }
-                // LiteRT-LM 0.18 engine knobs; unset leaves the engine default.
-                if let tokens = self.maxVisionTokensPerImage {
-                    litert_lm_engine_settings_set_max_vision_tokens_per_image(s, Int32(tokens))
-                }
-                if let residency = self.metalResidencySet {
-                    litert_lm_engine_settings_set_gpu_enable_metal_residency_set(s, residency)
-                }
-                if let single = self.singleThreadedExecution {
-                    litert_lm_engine_settings_set_single_threaded_execution(s, single)
-                }
-                if let adt = self.activationDataType {
-                    litert_lm_engine_settings_set_activation_data_type(s, adt.cValue)
-                }
-                if let rank = self.loraRank {
-                    litert_lm_engine_settings_set_lora_rank(s, Int32(rank))
-                    var ranks: [Int32] = [Int32(rank)]
-                    _ = ranks.withUnsafeBufferPointer { buf in
-                        litert_lm_engine_settings_set_supported_lora_ranks(s, buf.baseAddress, 1)
-                    }
-                }
+                try self.configureEngineSettings(settings, modelPath: modelPath)
 
-                if self.enableSpeculativeDecoding {
-                    if let loadedFile = litert_lm_loaded_file_create((modelPath as NSString).utf8String) {
-                        let hasMtp = litert_lm_loaded_file_has_speculative_decoding_support(loadedFile)
-                        litert_lm_loaded_file_delete(loadedFile)
-                        if hasMtp {
-                            litert_lm_engine_settings_set_enable_speculative_decoding(s, true)
-                        }
+                do {
+                    return try LiteRTLMNativeError.created(.load, "Failed to create the engine (\(main))") {
+                        litert_lm_engine_create(settings, $0)
                     }
+                } catch let error as LiteRTLMNativeError {
+                    lastEngineError = error
+                    return nil
                 }
-                
-                // Cache dir set to parent directory of model path
-                let cacheDir = (modelPath as NSString).deletingLastPathComponent
-                cacheDir.withCString { cacheC in
-                    litert_lm_engine_settings_set_cache_dir(s, cacheC)
-                }
-                
-                // Read the engine's thread-local error right after the call,
-                // on this same queue thread (c/error_reporter.h).
-                LiteRTLMNativeError.clearEngineError()
-                let created = litert_lm_engine_create(s)
-                if created == nil {
-                    lastEngineError = LiteRTLMNativeError.fromEngine(
-                        .load, context: "Failed to create the engine (\(main))")
-                }
-                return created
             }
             
             // The requested configuration first, then progressively more
@@ -540,7 +536,12 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if index == 1 {
                     NSLog("[LiteRTLM] %@ engine failed — trying the CPU fallbacks", mainBackendStr.uppercased())
                 }
-                rawEngine = createEngine(attempt.main, attempt.vision, attempt.audio)
+                do {
+                    rawEngine = try createEngine(attempt.main, attempt.vision, attempt.audio)
+                } catch {
+                    promise.reject(withError: error)
+                    return
+                }
                 if rawEngine != nil {
                     self.hasVisionEncoder = attempt.vision != nil
                     self.hasAudioEncoder = attempt.audio != nil
@@ -577,7 +578,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
 
             let attributes = try? FileManager.default.attributesOfItem(atPath: modelPath)
-            let tokens = self.conversation.map { Double(litert_lm_conversation_get_token_count($0)) } ?? -1
+            let tokens = self.conversation.map(Self.tokenCount) ?? -1
             self.withSnapshot { s in
                 // A close() or unload() called during the load wins; its
                 // teardown is already queued behind this block.
@@ -673,98 +674,211 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     // MARK: - Internal Engine Helpers
-    
+
+    /// Apply the load's settings to one engine attempt. Throws when the engine
+    /// rejects one (C API 1.0 setters return a status). Runs on `queue`.
+    private func configureEngineSettings(_ s: OpaquePointer, modelPath: String) throws {
+        func set(_ what: String, _ call: () -> LiteRtLmStatusCode) throws {
+            try LiteRTLMNativeError.check(.load, "Failed to set \(what)", call)
+        }
+        try set("maxContextTokens \(maxContextTokens)") {
+            litert_lm_engine_settings_set_max_num_tokens(s, Int32(maxContextTokens))
+        }
+        if exactStats {
+            try set("benchmark mode (exactStats)") { litert_lm_engine_settings_enable_benchmark(s) }
+        }
+
+        // Memory tuning knobs (v0.14 C API)
+        if let threads = numThreads {
+            try set("numThreads \(threads)") { litert_lm_engine_settings_set_num_threads(s, Int32(threads)) }
+        }
+        if let chunk = prefillChunkSize {
+            try set("prefillChunkSize \(chunk)") { litert_lm_engine_settings_set_prefill_chunk_size(s, Int32(chunk)) }
+        }
+        // LiteRT-LM 0.18 engine knobs; unset leaves the engine default.
+        if let tokens = maxVisionTokensPerImage {
+            try set("maxVisionTokensPerImage \(tokens)") {
+                litert_lm_engine_settings_set_max_vision_tokens_per_image(s, Int32(tokens))
+            }
+        }
+        if let residency = metalResidencySet {
+            try set("gpu.metalResidencySet") { litert_lm_engine_settings_set_gpu_enable_metal_residency_set(s, residency) }
+        }
+        if let single = singleThreadedExecution {
+            try set("singleThreadedExecution") { litert_lm_engine_settings_set_single_threaded_execution(s, single) }
+        }
+        if let adt = activationDataType {
+            try set("activationDataType") { litert_lm_engine_settings_set_activation_data_type(s, adt.cValue) }
+        }
+        if let rank = loraRank {
+            try set("loraRank \(rank)") { litert_lm_engine_settings_set_lora_rank(s, Int32(rank)) }
+            let ranks: [Int32] = [Int32(rank)]
+            try set("the supported LoRA ranks") {
+                ranks.withUnsafeBufferPointer { litert_lm_engine_settings_set_supported_lora_ranks(s, $0.baseAddress, $0.count) }
+            }
+        }
+
+        // The engine's default for every conversation. On or adaptive loads
+        // the bundle's drafter now; a bundle without one loads without it.
+        if let mode = speculativeDecodingMode {
+            if mode == .off || bundleHasDrafter {
+                try mode.apply(.load) { litert_lm_engine_settings_set_speculative_decoding_config(s, $0) }
+            } else {
+                NSLog("[LiteRTLM] speculativeDecoding %@ skipped: this bundle has no drafter", mode.stringValue)
+            }
+        }
+
+        // Cache dir set to parent directory of model path
+        let cacheDir = (modelPath as NSString).deletingLastPathComponent
+        try set("the cache directory") {
+            cacheDir.withCString { litert_lm_engine_settings_set_cache_dir(s, $0) }
+        }
+    }
+
     /// Replace the active conversation. Returns the failure (nil on success);
     /// must run on `queue` so the engine's thread-local error is readable.
     @discardableResult
     private func createNewConversation(
         initialMessagesJson: String? = nil,
         systemPromptOverride: String? = nil,
-        speculativeDecoding: Bool? = nil
+        speculativeDecoding: SpeculativeDecodingMode? = nil
     ) -> LiteRTLMNativeError? {
         guard let engine = self.engine else {
             return LiteRTLMNativeError(.load, status: "FAILED_PRECONDITION", code: "MODEL_NOT_LOADED",
                                        "No model loaded. Call loadModel() first.")
         }
-        
+
         if self.conversation != nil {
             settleStreams()
             if let oldConv = swapConversation(nil) {
                 litert_lm_conversation_delete(oldConv)
             }
         }
-        
-        guard let convConfig = litert_lm_conversation_config_create() else {
-            return LiteRTLMNativeError(.load, status: "INTERNAL", "Failed to allocate a conversation config")
+
+        do {
+            let created = try makeConversation(
+                engine,
+                initialMessagesJson: initialMessagesJson,
+                systemPromptOverride: systemPromptOverride,
+                speculativeDecoding: speculativeDecoding)
+            swapConversation(created)
+            return nil
+        } catch let error as LiteRTLMNativeError {
+            return error
+        } catch {
+            return LiteRTLMNativeError(.load, status: "UNKNOWN", "Failed to create the conversation: \(error)")
+        }
+    }
+
+    /// A new conversation on `engine` with this load's settings. Throws the
+    /// engine's reason when a setting or the creation fails. On `queue`.
+    private func makeConversation(
+        _ engine: OpaquePointer,
+        initialMessagesJson: String?,
+        systemPromptOverride: String?,
+        speculativeDecoding: SpeculativeDecodingMode?
+    ) throws -> OpaquePointer {
+        func set(_ what: String, _ call: () -> LiteRtLmStatusCode) throws {
+            try LiteRTLMNativeError.check(.load, "Failed to set \(what)", call)
+        }
+
+        let convConfig = try LiteRTLMNativeError.created(.load, "Failed to allocate a conversation config") {
+            litert_lm_conversation_config_create($0)
         }
         defer { litert_lm_conversation_config_delete(convConfig) }
-        
-        guard let sessionConfig = litert_lm_session_config_create() else {
-            return LiteRTLMNativeError(.load, status: "INTERNAL", "Failed to allocate a session config")
+
+        let sessionConfig = try LiteRTLMNativeError.created(.load, "Failed to allocate a session config") {
+            litert_lm_session_config_create($0)
         }
         defer { litert_lm_session_config_delete(sessionConfig) }
-        
-        litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
-        
+
+        try set("maxOutputTokens \(maxOutputTokens)") {
+            litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(maxOutputTokens))
+        }
+
         // v0.14: LiteRtLmSamplerParams is an opaque handle (create/set/delete)
-        if let sampler = litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP) {
-            litert_lm_sampler_params_set_top_k(sampler, Int32(self.topK))
-            litert_lm_sampler_params_set_top_p(sampler, Float(self.topP))
-            litert_lm_sampler_params_set_temperature(sampler, Float(self.temperature))
-            litert_lm_sampler_params_set_seed(sampler, 0)
-            litert_lm_session_config_set_sampler_params(sessionConfig, sampler)
-            litert_lm_sampler_params_delete(sampler)
+        let sampler = try LiteRTLMNativeError.created(.load, "Failed to allocate the sampler parameters") {
+            litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP, $0)
         }
+        defer { litert_lm_sampler_params_delete(sampler) }
+        try set("topK \(topK)") { litert_lm_sampler_params_set_top_k(sampler, Int32(topK)) }
+        try set("topP \(topP)") { litert_lm_sampler_params_set_top_p(sampler, Float(topP)) }
+        try set("temperature \(temperature)") { litert_lm_sampler_params_set_temperature(sampler, Float(temperature)) }
+        try set("the sampler seed") { litert_lm_sampler_params_set_seed(sampler, 0) }
+        try set("the sampler parameters") { litert_lm_session_config_set_sampler_params(sessionConfig, sampler) }
 
-        if let loraPath = self.loraPath {
-            let status = loraPath.withCString { litert_lm_session_config_set_lora_path(sessionConfig, $0) }
-            if status != 0 {
-                NSLog("[LiteRTLM] Failed to set LoRA path (status %d): %@", status, loraPath)
+        // A LoRA file the engine can't open is reported and skipped, as before 0.19.
+        if let loraPath = loraPath {
+            do {
+                try set("the LoRA path \(loraPath)") {
+                    loraPath.withCString { litert_lm_session_config_set_lora_path(sessionConfig, $0) }
+                }
+            } catch {
+                NSLog("[LiteRTLM] %@ — continuing without it", "\(error)")
             }
         }
-        if let audioLoraPath = self.audioLoraPath {
-            let status = audioLoraPath.withCString { litert_lm_session_config_set_audio_lora_path(sessionConfig, $0) }
-            if status != 0 {
-                NSLog("[LiteRTLM] Failed to set audio LoRA path (status %d): %@", status, audioLoraPath)
-            }
-        }
-
-        // Per conversation: unset inherits the engine's setting; true loads the
-        // bundle's drafter lazily on first use.
-        if let speculative = speculativeDecoding {
-            litert_lm_session_config_set_enable_speculative_decoding(sessionConfig, speculative)
-        }
-
-        litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
-
-        if let template = self.chatTemplate {
-            template.withCString { litert_lm_conversation_config_set_prompt_template(convConfig, $0) }
-        }
-
-        if self.streamToolCalls {
-            self.toolCallChannelName.withCString { channelC in
-                litert_lm_conversation_config_set_stream_tool_calls(convConfig, true, channelC)
+        if let audioLoraPath = audioLoraPath {
+            do {
+                try set("the audio LoRA path \(audioLoraPath)") {
+                    audioLoraPath.withCString { litert_lm_session_config_set_audio_lora_path(sessionConfig, $0) }
+                }
+            } catch {
+                NSLog("[LiteRTLM] %@ — continuing without it", "\(error)")
             }
         }
 
-        if self.enableStructuredOutput {
+        // Per conversation: unset inherits the engine's mode; on or adaptive
+        // loads the bundle's drafter lazily on first use, so a bundle without
+        // one skips it.
+        if let mode = speculativeDecoding {
+            if mode == .off || bundleHasDrafter {
+                try mode.apply(.load) { litert_lm_session_config_set_speculative_decoding_config(sessionConfig, $0) }
+            } else {
+                NSLog("[LiteRTLM] speculativeDecoding %@ skipped: this bundle has no drafter", mode.stringValue)
+            }
+        }
+
+        try set("the session config") { litert_lm_conversation_config_set_session_config(convConfig, sessionConfig) }
+
+        if let template = chatTemplate {
+            try set("chatTemplate") {
+                template.withCString { litert_lm_conversation_config_set_prompt_template(convConfig, $0) }
+            }
+        }
+
+        if streamToolCalls {
+            try set("streamToolCalls") {
+                toolCallChannelName.withCString { litert_lm_conversation_config_set_stream_tool_calls(convConfig, true, $0) }
+            }
+        }
+
+        if enableStructuredOutput {
             // v0.15: initialize the LLGuidance constraint provider so per-message
             // responseSchema/responseRegex constraints can be applied.
-            litert_lm_conversation_config_set_enable_constrained_decoding(convConfig, true)
-            var provider = kLiteRtLmConstraintProviderTypeLlGuidance
-            litert_lm_conversation_config_set_constraint_provider(convConfig, &provider)
+            try set("enableStructuredOutput") {
+                litert_lm_conversation_config_set_enable_constrained_decoding(convConfig, true)
+            }
+            try set("the LLGuidance constraint provider") {
+                litert_lm_conversation_config_set_constraint_provider(convConfig, kLiteRtLmConstraintProviderTypeLlGuidance)
+            }
         }
 
-        if let thinking = self.thinkingOptions,
-           let thinkingConfig = litert_lm_thinking_config_create() {
-            litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
-            if let budget = thinking.tokenBudget {
-                litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
+        if let thinking = thinkingOptions {
+            let thinkingConfig = try LiteRTLMNativeError.created(.load, "Failed to allocate a thinking config") {
+                litert_lm_thinking_config_create($0)
             }
-            litert_lm_conversation_config_set_thinking_config(convConfig, thinkingConfig)
-            litert_lm_thinking_config_delete(thinkingConfig)
+            defer { litert_lm_thinking_config_delete(thinkingConfig) }
+            try set("thinking.enabled") {
+                litert_lm_thinking_config_set_enable_thinking(thinkingConfig, thinking.enabled ?? true)
+            }
+            if let budget = thinking.tokenBudget {
+                try set("thinking.tokenBudget \(budget)") {
+                    litert_lm_thinking_config_set_thinking_token_budget(thinkingConfig, Int32(budget))
+                }
+            }
+            try set("the thinking config") { litert_lm_conversation_config_set_thinking_config(convConfig, thinkingConfig) }
         }
-        
+
         if let systemPrompt = systemPromptOverride ?? self.systemPrompt {
             // The engine wraps this payload itself ({"role":"system","content":<payload>}),
             // so pass content only, as a content-part ARRAY: the Gemma chat template
@@ -775,8 +889,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             let contentParts: [[String: Any]] = [["type": "text", "text": systemPrompt]]
             if let data = try? JSONSerialization.data(withJSONObject: contentParts),
                let systemMsgJson = String(data: data, encoding: .utf8) {
-                systemMsgJson.withCString { systemMsgC in
-                    litert_lm_conversation_config_set_system_message(convConfig, systemMsgC)
+                try set("the system prompt") {
+                    systemMsgJson.withCString { litert_lm_conversation_config_set_system_message(convConfig, $0) }
                 }
             }
         }
@@ -784,25 +898,23 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         if let messagesJson = initialMessagesJson, !messagesJson.isEmpty {
             // Seed the conversation with a prior transcript (multi-conversation
             // switching). The engine re-prefills these on the next message.
-            messagesJson.withCString { messagesC in
-                litert_lm_conversation_config_set_messages(convConfig, messagesC)
+            try set("the replayed transcript") {
+                messagesJson.withCString { litert_lm_conversation_config_set_messages(convConfig, $0) }
             }
         }
-        
-        if let tools = self.tools, !tools.isEmpty {
-            Self.toolsJson(tools).withCString { toolsC in
-                litert_lm_conversation_config_set_tools(convConfig, toolsC)
+
+        if let tools = tools, !tools.isEmpty {
+            try set("the tools") {
+                Self.toolsJson(tools).withCString { litert_lm_conversation_config_set_tools(convConfig, $0) }
             }
         }
-        
-        LiteRTLMNativeError.clearEngineError()
-        guard let created = litert_lm_conversation_create(engine, convConfig) else {
-            return LiteRTLMNativeError.fromEngine(.load, context: "Failed to create the conversation")
+
+        return try LiteRTLMNativeError.created(.load, "Failed to create the conversation") {
+            litert_lm_conversation_create(engine, convConfig, $0)
         }
-        swapConversation(created)
-        return nil
     }
     
+
     /// Free the conversation and engine. Runs on `queue` (or in deinit).
     private func closeInternal() {
         hasVisionEncoder = false
@@ -858,7 +970,19 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         conversationLock.lock()
         defer { conversationLock.unlock() }
         if let conversation = conversation {
-            litert_lm_conversation_cancel_process(conversation)
+            Self.cancel(conversation)
+        }
+    }
+
+    /// Request a cancel (c/conversation.h: it doesn't wait). Fails only for a
+    /// NULL conversation, which never reaches here; logged if it ever does.
+    private static func cancel(_ conversation: OpaquePointer) {
+        do {
+            try LiteRTLMNativeError.check(.execute, "Failed to cancel the message generating") {
+                litert_lm_conversation_cancel_process(conversation)
+            }
+        } catch {
+            NSLog("[LiteRTLM] %@", "\(error)")
         }
     }
 
@@ -870,7 +994,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     /// JS thread.
     private func settleStreams() {
         guard withSnapshot({ $0.streamsInFlight }) > 0, let conversation = conversation else { return }
-        litert_lm_conversation_cancel_process(conversation)
+        Self.cancel(conversation)
         // A cancel lands at the next decode step, but a prefill runs to the
         // end first, which can take a while for a long prompt. Freeing the
         // conversation before the stream's last callback would pull it out
@@ -891,6 +1015,16 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     func streamEnded() {
         withSnapshot { $0.streamsInFlight -= 1 }
         streams.leave()
+    }
+
+    /// On `queue`, before a message with `exactStats` counts the engine's
+    /// turns: wait for streams still generating, which would otherwise add
+    /// their own turns (a reply's thinking refill among them) after the count.
+    /// The engine runs the two messages one after the other anyway.
+    func awaitStreams() {
+        while streams.wait(timeout: .now() + 10) == .timedOut {
+            NSLog("[LiteRTLM] Still waiting for a stream to end before counting the next message's turns")
+        }
     }
     
     /// 0.7's default for `multimodal` when unset (on for Gemma 3n / Gemma 3

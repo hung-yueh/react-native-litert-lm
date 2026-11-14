@@ -47,6 +47,18 @@ class LiteRTLMNativeExceptionTest {
     }
 
     @Test
+    fun readsTheNumberedStatusOfAFailedMessage() {
+        // LiteRT-LM 0.19.1 on the litert_e2e emulator, a message that didn't fit
+        val full = "Status Code: 8. Message: Not enough space left in the context window for the input"
+        assertEquals("RESOURCE_EXHAUSTED", LiteRTLMNativeException.statusIn(full))
+        assertEquals("INTERNAL", LiteRTLMNativeException.statusIn("Status Code: 13. Message: Task failed with state: 7"))
+        assertNull("not a canonical code", LiteRTLMNativeException.statusIn("Status Code: 99. Message: ?"))
+        val e = LiteRTLMNativeException.from("execute", "Inference failed", RuntimeException(full))
+        assertEquals("RESOURCE_EXHAUSTED", e.status)
+        assertTrue(e.message!!.contains("context window"))
+    }
+
+    @Test
     fun fallsBackToTheExceptionType() {
         fun statusOf(t: Throwable) = LiteRTLMNativeException.from("execute", "ctx", t).status
         assertEquals("RESOURCE_EXHAUSTED", statusOf(OutOfMemoryError("java heap")))

@@ -111,13 +111,13 @@ const reply = await llm.execute(
     </p>
   </div>
   <p>
-    After a message fails, call
-    <a href="#resetconversation"><code>resetConversation()</code></a> before
-    sending another. In LiteRT-LM 0.18.1, when the engine fails a message (one
-    that doesn't fit in what is left of the context, say), every later message
-    in that conversation fails at once with
-    <code>Task failed with state: 7</code>, with or without
-    <code>exactStats</code>.
+    A message that doesn't fit in what is left of the context rejects with
+    <code>CONTEXT_FULL</code>. Through LiteRT-LM 0.19.1 the engine then fails
+    every later message on that conversation at once
+    (<code>Task failed with state: 7</code>), so after any message the engine
+    fails, the conversation's next message first replays its answered turns
+    into a fresh engine conversation. That costs one re-prefill, and you don't
+    have to call <a href="#resetconversation"><code>resetConversation()</code></a>.
   </p>
 
   <h2 id="multimodalpart">MultimodalPart</h2>
@@ -465,10 +465,14 @@ await llm.execute([{ type: 'text', text: 'Pick a priority.' }], undefined, {
   <h2 id="speculative-decoding">Speculative decoding</h2>
   <p>
     Bundles with a multi-token-prediction drafter (Gemma 4 E2B ships one) can
-    decode faster. <code>enableSpeculativeDecoding: true</code> turns it on for
-    the engine, and <code>createConversation({ speculativeDecoding })</code>
-    overrides it per conversation — <code>true</code> loads the bundle's
-    drafter on first use if the engine started without it.
+    decode faster. <code>speculativeDecodingMode</code> sets it for the
+    engine: <code>'off'</code>, <code>'on'</code>, or <code>'adaptive'</code>,
+    which speculates only while the engine measures it to be faster
+    (LiteRT-LM 0.19+). <code>enableSpeculativeDecoding: true</code> is the
+    same as <code>'on'</code>. <code>createConversation({ speculativeDecoding })</code>
+    overrides it per conversation with a mode or a boolean; <code>'on'</code>
+    and <code>'adaptive'</code> load the bundle's drafter on first use if the
+    engine started without it.
   </p>
   <div class="code">
     <div class="code-head"><span>typescript</span></div>
@@ -477,7 +481,9 @@ await llm.loadModel(GEMMA_4_E2B_IT, { enableSpeculativeDecoding: true });
 
 // Or per conversation
 const drafting = llm.createConversation({ speculativeDecoding: true });
-const plain = llm.createConversation({ speculativeDecoding: false });</code></pre>
+const plain = llm.createConversation({ speculativeDecoding: false });
+// Speculate only while it measures faster
+const adaptive = llm.createConversation({ speculativeDecoding: "adaptive" });</code></pre>
   </div>
   <p>
     A bundle without a drafter ignores the request with a warning;
@@ -571,9 +577,9 @@ export function createStreamEventParser(
     <table>
       <thead><tr><th>Field</th><th>Type</th><th>Without <code>exactStats</code> (the default)</th><th>With <code>exactStats</code></th></tr></thead>
       <tbody>
-        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Estimate: the message's text length ÷ 4.</td><td>The engine's count for the message's prefill: with the chat template's tokens, and the system prompt or a replayed transcript if it prefilled them with this message.</td></tr>
+        <tr><td><code>promptTokens</code></td><td><code>number</code></td><td>Estimate: the message's text length ÷ 4.</td><td>The engine's count for the message's prefill: with the chat template's tokens, and the system prompt or a replayed transcript if it prefilled them with this message. On Android, a reply with thinking reports the estimate here: the engine's last prefill there is the reply taken in again without its thought.</td></tr>
         <tr><td><code>completionTokens</code></td><td><code>number</code></td><td>Estimate: the reply's text length ÷ 4.</td><td>The engine's count for the message's decode, which can include the end-of-turn token when the model stopped by itself.</td></tr>
-        <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>The sum of the two estimates.</td><td><code>promptTokens + completionTokens</code>: what the message added to <code>getContextTokenCount()</code>, except right after a reply with thinking. The engine takes that reply's thought back out of the context at the start of the next message, so that message adds less, and can even shrink the context.</td></tr>
+        <tr><td><code>totalTokens</code></td><td><code>number</code></td><td>The sum of the two estimates.</td><td><code>promptTokens + completionTokens</code>: what the message added to <code>getContextTokenCount()</code>, except for a reply with thinking. The engine takes the thought back out of the context at the end of that message (LiteRT-LM 0.19+), so the context grows by less.</td></tr>
         <tr><td><code>timeToFirstToken</code></td><td><code>number</code></td><td>A streamed message's own first token, in milliseconds, or <code>0</code> if no text reached the callback (say all of its budget went to thinking). <code>0</code> for a message sent without a callback.</td><td>The same for a streamed message. Without a callback, the engine's time for the message's prefill (the engine's own time to first token also counts the first decode step).</td></tr>
         <tr><td><code>totalTime</code></td><td><code>number</code></td><td colspan="2">Total generation time in milliseconds.</td></tr>
         <tr><td><code>tokensPerSecond</code></td><td><code>number</code></td><td>The estimated <code>completionTokens</code> over <code>totalTime</code>, which also covers the prefill.</td><td>The engine's decode rate for the message.</td></tr>

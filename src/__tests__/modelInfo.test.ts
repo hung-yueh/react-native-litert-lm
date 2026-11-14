@@ -105,6 +105,8 @@ describe("normalizeModelInfo", () => {
     expect(info.modalities).toEqual({ text: true, vision: true, audio: true, video: false });
     expect(info.backends.text).toEqual(["gpu", "cpu"]);
     expect(info.backends.audio).toEqual(["cpu"]);
+    expect(info.defaultContextTokens).toBe(32768);
+    // Deprecated alias, same value until 1.0
     expect(info.maxContextTokens).toBe(32768);
     expect(info.dynamicContext).toBe(true);
     expect(info.llm).toEqual({
@@ -138,6 +140,7 @@ describe("normalizeModelInfo", () => {
     expect(info.llm?.samplerDefaults).toBeNull();
     expect(info.llm?.maxVisionTokenBudget).toBeNull();
     expect(info.minRuntimeVersion).toBeNull();
+    expect(info.defaultContextTokens).toBe(0);
     expect(info.maxContextTokens).toBe(0);
   });
 
@@ -243,6 +246,23 @@ describe("preflightLoad", () => {
     expect(kept.changed).toBe(false);
   });
 
+  it("turns a speculative-decoding mode off for a bundle without a drafter", () => {
+    const plain = normalizeModelInfo("/m/plain.litertlm", native({ hasSpeculativeDecoding: false }));
+    for (const mode of ["on", "adaptive"] as const) {
+      const pf = preflightLoad(plain, { backend: "cpu", speculativeDecodingMode: mode });
+      expect(pf.config.speculativeDecodingMode).toBe("off");
+      expect(pf.changed).toBe(true);
+      expect(pf.notes[0]).toContain(`speculativeDecodingMode '${mode}'`);
+    }
+    // 'off' needs no drafter
+    expect(preflightLoad(plain, { backend: "cpu", speculativeDecodingMode: "off" }).changed).toBe(false);
+
+    const mtp = normalizeModelInfo("/m/mtp.litertlm", native({ hasSpeculativeDecoding: true }));
+    const kept = preflightLoad(mtp, { backend: "cpu", speculativeDecodingMode: "adaptive" });
+    expect(kept.config.speculativeDecodingMode).toBe("adaptive");
+    expect(kept.changed).toBe(false);
+  });
+
   it("fills the backend the bundle prefers, and only then", () => {
     const pf = preflightLoad(gemma, { temperature: 0.2 }, { device: ios });
     expect(pf.config).toEqual({ temperature: 0.2, backend: "gpu" });
@@ -270,22 +290,20 @@ describe("preflightLoad", () => {
     expect(preflightLoad(npuOnlyLlm, { backend: "cpu" }, { device: pixel }).changed).toBe(false);
   });
 
-  it("clamps the context to the bundle's maximum", () => {
+  it("doesn't clamp the context to the bundle's declared size", () => {
+    // LiteRT-LM 0.19+ declares the default context, not the maximum (Gemma 4
+    // E2B says 4096 but runs far more), and the engine itself caps a
+    // fixed-size graph.
+    const declared4096 = normalizeModelInfo("/m/g.litertlm", native({ maxContextTokens: 4096 }));
+    const big = preflightLoad(declared4096, { backend: "cpu", maxContextTokens: 32768 });
+    expect(big.config.maxContextTokens).toBe(32768);
+    expect(big.changed).toBe(false);
+    expect(big.notes).toEqual([]);
+
+    // Neither the implicit default nor legacy maxTokens is touched
     const small = normalizeModelInfo("/m/s.litertlm", native({ maxContextTokens: 2048 }));
-    const explicit = preflightLoad(small, { maxContextTokens: 8192 });
-    expect(explicit.config.maxContextTokens).toBe(2048);
-    expect(explicit.notes[0]).toContain("exceeds this bundle's maximum of 2048");
-
-    // The implicit 4096 default is clamped silently
-    const implicit = preflightLoad(small, undefined);
-    expect(implicit.config.maxContextTokens).toBe(2048);
-    expect(implicit.notes).toEqual([]);
-
-    // Legacy maxTokens counts as a request
-    expect(preflightLoad(small, { maxTokens: 4096 }).notes).toHaveLength(1);
-
-    // Within the limit: untouched
-    expect(preflightLoad(gemma, { backend: "cpu", maxContextTokens: 8192 }).changed).toBe(false);
+    expect(preflightLoad(small, { backend: "cpu" }).config.maxContextTokens).toBeUndefined();
+    expect(preflightLoad(small, { backend: "cpu", maxTokens: 4096 }).changed).toBe(false);
   });
 });
 

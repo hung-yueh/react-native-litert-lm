@@ -134,7 +134,7 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
     budget before touching the engine:
   </p>
   <ol>
-    <li><strong>Bundle pre-flight.</strong> It reads the bundle's metadata and refuses the wrong model type (<code>MODEL_TYPE_MISMATCH</code>), a bundle that needs a newer engine (<code>RUNTIME_TOO_OLD</code>), or one this device can't run (<code>UNSUPPORTED</code>). It fills an omitted <code>backend</code> from the bundle and clamps <code>maxContextTokens</code> to the bundle's maximum — see <a href="models.html#load-pre-flight">the load pre-flight</a>.</li>
+    <li><strong>Bundle pre-flight.</strong> It reads the bundle's metadata and refuses the wrong model type (<code>MODEL_TYPE_MISMATCH</code>), a bundle that needs a newer engine (<code>RUNTIME_TOO_OLD</code>), or one this device can't run (<code>UNSUPPORTED</code>). It fills an omitted <code>backend</code> from the bundle and drops a speculative-decoding request the bundle has no drafter for — see <a href="models.html#load-pre-flight">the load pre-flight</a>.</li>
     <li><strong>Memory pre-flight.</strong> It estimates weights, KV cache and overhead against the memory the OS reports as available — see <a href="memory.html#automatic-pre-flight">Memory &amp; errors</a>.</li>
   </ol>
   <p>
@@ -171,7 +171,7 @@ llm.unload(); // free the engine; llm stays reusable</code></pre>
 
 const info = llm.getModelInfo();
 info?.modalities.vision;          // show the image picker?
-info?.maxContextTokens;           // the bundle's context limit
+info?.defaultContextTokens;       // the bundle's default context (not its maximum)
 info?.llm?.supportsFunctionCalling;</code></pre>
   </div>
 
@@ -397,11 +397,12 @@ await summarizer.release(); // drop a side-chain when done</code></pre>
   /** Override the session-level `systemPrompt` for this conversation. */
   systemPrompt?: string;
   /**
-   * Turn speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
-   * MTP) on or off for this conversation; unset follows
-   * `LLMConfig.enableSpeculativeDecoding`. `true` loads the drafter on first use.
+   * Speculative decoding (the bundle's multi-token drafter, e.g. Gemma 4's
+   * MTP) for this conversation: 'off', 'on', 'adaptive', or a boolean (true is
+   * 'on'). Unset follows the session's speculativeDecodingMode /
+   * enableSpeculativeDecoding. 'on' and 'adaptive' load the drafter on first use.
    */
-  speculativeDecoding?: boolean;
+  speculativeDecoding?: boolean | SpeculativeDecodingMode;
 }</div>
   <p>
     A bundle without a drafter ignores <code>speculativeDecoding: true</code>

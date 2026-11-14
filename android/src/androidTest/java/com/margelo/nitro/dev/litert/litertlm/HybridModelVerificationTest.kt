@@ -66,7 +66,7 @@ class HybridModelVerificationTest {
     private fun config(tools: Array<ToolDefinition>? = null) = LLMConfig(
         systemPrompt = null, backend = Backend.CPU, maxContextTokens = 2048.0, maxOutputTokens = 256.0,
         maxTokens = null, temperature = 0.0, topK = 1.0, topP = 1.0, multimodal = false, tools = tools,
-        enableSpeculativeDecoding = null, chatTemplate = null, enableStructuredOutput = true, thinking = thinking(),
+        enableSpeculativeDecoding = null, speculativeDecodingMode = null, chatTemplate = null, enableStructuredOutput = true, thinking = thinking(),
         numThreads = null, maxVisionTokensPerImage = null, gpu = null, singleThreadedExecution = null,
         prefillChunkSize = null, activationDataType = null, loraPath = null, audioLoraPath = null, loraRank = null,
         streamToolCalls = null, toolCallChannelName = null, forceLoad = true, exactStats = null,
@@ -153,7 +153,7 @@ class HybridModelVerificationTest {
 
             // Multi-turn memory, from a fresh conversation (a one-word answer just
             // before primes small models to keep answering in one word)
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val reset = knownContextTokens(llm)
             assertTrue("context tokens after a reset: $reset", reset >= 0)
             ask(llm, "My favorite color is teal. Please remember it.", options(maxOutputTokens = 48.0))
@@ -166,7 +166,7 @@ class HybridModelVerificationTest {
 
             // A reset that replays the transcript: the engine prefills it with the
             // next message, so the count stays unknown until that one completes.
-            llm.resetConversation(transcriptJson(llm.getHistory()), null, null)
+            llm.resetConversation(transcriptJson(llm.getHistory()), null, null, null)
             Thread.sleep(1_000)
             val replayed = llm.getContextTokenCount()
             val again = ask(llm, "What is my favorite color? Answer with one word.")
@@ -175,24 +175,24 @@ class HybridModelVerificationTest {
             assertEquals("context tokens after a reset that replays a transcript", -1.0, replayed, 0.0)
             assertTrue("context tokens after the replaying reset's first message: $afterReplay", afterReplay > 0)
 
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             started = System.nanoTime()
             val (story, chunks) = run(llm, arrayOf(text("Write two sentences about the ocean.")), options(maxOutputTokens = 96.0))
             println("[verify] streamed $chunks chunks in ${"%.1f".format((System.nanoTime() - started) / 1e9)}s: ${story.take(160)}")
             assertTrue("streaming", chunks > 1)
 
-            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null)
+            llm.resetConversation(null, "You are a pirate. Begin every reply with the word Arr.", null, null)
             val pirate = ask(llm, "Say hello to me.", options(maxOutputTokens = 48.0))
             println("[verify] system prompt: $pirate")
             assertTrue("system prompt: $pirate", answer(pirate).lowercase().contains("arr"))
 
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val schema = """{"type":"object","properties":{"city":{"type":"string"},"country":{"type":"string"}},"required":["city","country"]}"""
             val json = ask(llm, "Name one city in Japan and its country.", options(maxOutputTokens = 64.0, responseSchema = schema))
             println("[verify] structured: $json")
             assertNotNull("structured output: $json", runCatching { JSONObject(answer(json)).getString("city") }.getOrNull())
 
-            llm.resetConversation(null, null, null)
+            llm.resetConversation(null, null, null, null)
             val math = ask(
                 llm, "I have 3 apples, buy 5 more, then eat 2. How many apples do I have? End with the number.",
                 options(maxOutputTokens = 256.0),

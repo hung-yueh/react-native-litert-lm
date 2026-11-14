@@ -38,7 +38,7 @@ function compareVersions(a, b) {
 /** Plugin option → entitlement key. */
 const IOS_ENTITLEMENTS = {
   // Lifts the ~2 GB virtual-memory cap; without it Jetsam kills the app while
-  // loading Gemma 4 or Gemma 3n.
+  // loading Gemma 4.
   extendedVirtualAddressing: 'com.apple.developer.kernel.extended-virtual-addressing',
   // Raises the app's memory limit on devices that allow it.
   increasedMemoryLimit: 'com.apple.developer.kernel.increased-memory-limit',

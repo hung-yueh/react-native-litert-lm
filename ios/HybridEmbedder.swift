@@ -48,6 +48,11 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
         let promise = Promise<Void>()
         queue.async {
             self.unloadInternal()
+            // A framework from another C API version must not be called at all.
+            do { try EngineAPI.requireCompatible(.load) } catch {
+                promise.reject(withError: error)
+                return
+            }
             guard FileManager.default.fileExists(atPath: modelPath) else {
                 promise.reject(withError: LiteRTLMNativeError(
                     .load, status: "NOT_FOUND", code: "MODEL_NOT_FOUND", "Model file not found: \(modelPath)"))
@@ -92,40 +97,51 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
     private static func createEngine(
         _ modelPath: String, _ config: EmbedderConfig?, main: String, vision: String?, audio: String?
     ) -> Result<OpaquePointer, LiteRTLMNativeError> {
-        LiteRTLMNativeError.clearEngineError()
-        let settings = modelPath.withCString { modelC in
-            main.withCString { mainC in
-                withOptionalCString(vision) { visionC in
-                    withOptionalCString(audio) { audioC in
-                        litert_lm_embedding_engine_settings_create(modelC, mainC, visionC, audioC)
+        do {
+            let settings = try LiteRTLMNativeError.created(.load, "Invalid embedding engine settings") { out in
+                modelPath.withCString { modelC in
+                    main.withCString { mainC in
+                        withOptionalCString(vision) { visionC in
+                            withOptionalCString(audio) { audioC in
+                                litert_lm_embedding_engine_settings_create(modelC, mainC, visionC, audioC, out)
+                            }
+                        }
                     }
                 }
             }
-        }
-        guard let settings = settings else {
-            return .failure(LiteRTLMNativeError.fromEngine(.load, context: "Invalid embedding engine settings"))
-        }
-        defer { litert_lm_embedding_engine_settings_delete(settings) }
+            defer { litert_lm_embedding_engine_settings_delete(settings) }
 
-        if let length = config?.maxInputLength {
-            litert_lm_embedding_engine_settings_set_max_input_length(settings, Int32(length))
-        }
-        if let tokens = config?.visionTokensPerImage {
-            litert_lm_embedding_engine_settings_set_vision_tokens_per_image(settings, Int32(tokens))
-        }
-        if let adt = config?.activationDataType {
-            litert_lm_embedding_engine_settings_set_activation_data_type(settings, adt.cValue)
-        }
-        (modelPath as NSString).deletingLastPathComponent.withCString {
-            litert_lm_embedding_engine_settings_set_cache_dir(settings, $0)
-        }
+            func set(_ what: String, _ call: () -> LiteRtLmStatusCode) throws {
+                try LiteRTLMNativeError.check(.load, "Failed to set \(what)", call)
+            }
+            if let length = config?.maxInputLength {
+                try set("maxInputLength \(Int(length))") {
+                    litert_lm_embedding_engine_settings_set_max_input_length(settings, Int32(length))
+                }
+            }
+            if let tokens = config?.visionTokensPerImage {
+                try set("visionTokensPerImage \(Int(tokens))") {
+                    litert_lm_embedding_engine_settings_set_vision_tokens_per_image(settings, Int32(tokens))
+                }
+            }
+            if let adt = config?.activationDataType {
+                try set("activationDataType") {
+                    litert_lm_embedding_engine_settings_set_activation_data_type(settings, adt.cValue)
+                }
+            }
+            let cacheDir = (modelPath as NSString).deletingLastPathComponent
+            try set("the cache directory") {
+                cacheDir.withCString { litert_lm_embedding_engine_settings_set_cache_dir(settings, $0) }
+            }
 
-        LiteRTLMNativeError.clearEngineError()
-        guard let engine = litert_lm_embedding_engine_create(settings) else {
-            return .failure(LiteRTLMNativeError.fromEngine(
-                .load, context: "Failed to create the embedding engine (\(main))"))
+            return .success(try LiteRTLMNativeError.created(.load, "Failed to create the embedding engine (\(main))") {
+                litert_lm_embedding_engine_create(settings, $0)
+            })
+        } catch let error as LiteRTLMNativeError {
+            return .failure(error)
+        } catch {
+            return .failure(LiteRTLMNativeError(.load, status: "UNKNOWN", "\(error)"))
         }
-        return .success(engine)
     }
 
     public func isReady() throws -> Bool {
@@ -217,15 +233,14 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
     ) throws -> ArrayBuffer {
         let handles = try createAll(inputs)
         defer { handles.forEach { litert_lm_input_data_delete($0) } }
-        let opts = makeOptions(options)
+        let opts = try makeOptions(options)
         defer { if let opts = opts { litert_lm_embedding_options_delete(opts) } }
 
-        LiteRTLMNativeError.clearEngineError()
-        let response: OpaquePointer? = handles.map { Optional($0) }.withUnsafeBufferPointer { buf in
-            litert_lm_embedding_engine_compute_embedding(engine, buf.baseAddress, buf.count, opts)
-        }
-        guard let response = response else {
-            throw LiteRTLMNativeError.fromEngine(.embed, context: "Embedding failed")
+        let inputs = handles.map { Optional($0) }
+        let response = try LiteRTLMNativeError.created(.embed, "Embedding failed") { out in
+            inputs.withUnsafeBufferPointer { buf in
+                litert_lm_embedding_engine_compute_embedding(engine, buf.baseAddress, buf.count, opts, out)
+            }
         }
         defer { litert_lm_embedding_response_delete(response) }
         return try copyVector(response)
@@ -239,7 +254,7 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
         var handles: [[OpaquePointer]] = []
         defer { handles.forEach { $0.forEach { litert_lm_input_data_delete($0) } } }
         for group in groups { handles.append(try createAll(group)) }
-        let opts = makeOptions(options)
+        let opts = try makeOptions(options)
         defer { if let opts = opts { litert_lm_embedding_options_delete(opts) } }
 
         // C wants `const LiteRtLmInputData* const* const*`: an array of
@@ -250,23 +265,25 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
             return row
         }
         defer { rows.forEach { $0.deallocate() } }
-        var rowPointers: [UnsafePointer<OpaquePointer?>?] = rows.map { UnsafePointer($0) }
-        var counts: [Int] = handles.map { $0.count }
+        let rowPointers: [UnsafePointer<OpaquePointer?>?] = rows.map { UnsafePointer($0) }
+        let counts: [Int] = handles.map { $0.count }
 
-        LiteRTLMNativeError.clearEngineError()
-        let responses = rowPointers.withUnsafeMutableBufferPointer { rowBuf in
-            counts.withUnsafeMutableBufferPointer { countBuf in
-                litert_lm_embedding_engine_compute_embedding_batch(
-                    engine, rowBuf.baseAddress, countBuf.baseAddress, groups.count, opts)
+        let responses = try LiteRTLMNativeError.created(.embed, "Batch embedding failed") { out in
+            rowPointers.withUnsafeBufferPointer { rowBuf in
+                counts.withUnsafeBufferPointer { countBuf in
+                    litert_lm_embedding_engine_compute_embedding_batch(
+                        engine, rowBuf.baseAddress, countBuf.baseAddress, groups.count, opts, out)
+                }
             }
         }
-        guard let responses = responses else {
-            throw LiteRTLMNativeError.fromEngine(.embed, context: "Batch embedding failed")
-        }
         defer { litert_lm_embedding_responses_delete(responses) }
-        let n = litert_lm_embedding_responses_get_size(responses)
+        let n = try LiteRTLMNativeError.read(.embed, "Failed to count the batch results", 0) {
+            litert_lm_embedding_responses_get_size(responses, $0)
+        }
         return try (0..<n).map { index in
-            guard let response = litert_lm_embedding_responses_get_at(responses, index) else {
+            guard let response = try LiteRTLMNativeError.read(.embed, "Failed to read batch result \(index)", nil, {
+                litert_lm_embedding_responses_get_at(responses, index, $0)
+            }) else {
                 throw LiteRTLMNativeError(.embed, status: "INTERNAL", "Missing batch result \(index)")
             }
             return try copyVector(response)
@@ -285,27 +302,45 @@ public class HybridEmbedder: HybridEmbedderSpec_base, HybridEmbedderSpec_protoco
         return handles
     }
 
-    private static func makeOptions(_ options: EmbeddingOptions?) -> OpaquePointer? {
-        guard let options = options, let opts = litert_lm_embedding_options_create() else { return nil }
-        if let normalize = options.normalize {
-            litert_lm_embedding_options_set_normalize(opts, normalize)
+    private static func makeOptions(_ options: EmbeddingOptions?) throws -> OpaquePointer? {
+        guard let options = options else { return nil }
+        let opts = try LiteRTLMNativeError.created(.embed, "Failed to allocate the embedding options") {
+            litert_lm_embedding_options_create($0)
         }
-        if let size = options.outputSize {
-            litert_lm_embedding_options_set_output_size(opts, Int32(size))
+        func set(_ what: String, _ call: () -> LiteRtLmStatusCode) throws {
+            try LiteRTLMNativeError.check(.embed, "Failed to set \(what)", call)
         }
-        if let special = options.insertSpecialTokens {
-            litert_lm_embedding_options_set_insert_special_tokens(opts, special)
-        }
-        if let tokens = options.visionTokensPerImage {
-            litert_lm_embedding_options_set_vision_tokens_per_image(opts, Int32(tokens))
+        do {
+            if let normalize = options.normalize {
+                try set("normalize") { litert_lm_embedding_options_set_normalize(opts, normalize) }
+            }
+            if let size = options.outputSize {
+                try set("outputSize \(Int(size))") { litert_lm_embedding_options_set_output_size(opts, Int32(size)) }
+            }
+            if let special = options.insertSpecialTokens {
+                try set("insertSpecialTokens") { litert_lm_embedding_options_set_insert_special_tokens(opts, special) }
+            }
+            if let tokens = options.visionTokensPerImage {
+                try set("visionTokensPerImage \(Int(tokens))") {
+                    litert_lm_embedding_options_set_vision_tokens_per_image(opts, Int32(tokens))
+                }
+            }
+        } catch {
+            litert_lm_embedding_options_delete(opts)
+            throw error
         }
         return opts
     }
 
     /// Copy a response's floats into a native-owned buffer JS reads as a Float32Array.
     private static func copyVector(_ response: OpaquePointer) throws -> ArrayBuffer {
-        let count = litert_lm_embedding_response_get_size(response)
-        guard count > 0, let values = litert_lm_embedding_response_get_values(response) else {
+        let count = try LiteRTLMNativeError.read(.embed, "Failed to read the embedding's size", 0) {
+            litert_lm_embedding_response_get_size(response, $0)
+        }
+        let values = try LiteRTLMNativeError.read(.embed, "Failed to read the embedding", nil) {
+            litert_lm_embedding_response_get_values(response, $0)
+        }
+        guard count > 0, let values = values else {
             throw LiteRTLMNativeError(.embed, status: "INTERNAL", "The engine returned an empty embedding")
         }
         let bytes = count * MemoryLayout<Float>.size
@@ -362,20 +397,22 @@ private enum EmbeddingInput {
 
     /// Create the engine-side input (the engine copies the bytes). Run on the queue.
     func create() throws -> OpaquePointer {
-        let handle: OpaquePointer?
+        let context = "Failed to create an embedding input"
         switch self {
         case .text(let text):
-            handle = text.withCString { litert_lm_input_data_create(kLiteRtLmInputDataTypeText, $0, strlen($0)) }
+            return try LiteRTLMNativeError.created(.embed, context) { out in
+                text.withCString { litert_lm_input_data_create(kLiteRtLmInputDataTypeText, $0, strlen($0), out) }
+            }
         case .image(let media):
             let data = try media.read("Image")
-            handle = data.withUnsafeBytes { litert_lm_input_data_create(kLiteRtLmInputDataTypeImage, $0.baseAddress, data.count) }
+            return try LiteRTLMNativeError.created(.embed, context) { out in
+                data.withUnsafeBytes { litert_lm_input_data_create(kLiteRtLmInputDataTypeImage, $0.baseAddress, data.count, out) }
+            }
         case .audio(let media):
             let data = try media.read("Audio")
-            handle = data.withUnsafeBytes { litert_lm_input_data_create(kLiteRtLmInputDataTypeAudio, $0.baseAddress, data.count) }
+            return try LiteRTLMNativeError.created(.embed, context) { out in
+                data.withUnsafeBytes { litert_lm_input_data_create(kLiteRtLmInputDataTypeAudio, $0.baseAddress, data.count, out) }
+            }
         }
-        guard let handle = handle else {
-            throw LiteRTLMNativeError.fromEngine(.embed, context: "Failed to create an embedding input")
-        }
-        return handle
     }
 }

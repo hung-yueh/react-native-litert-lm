@@ -115,12 +115,6 @@
           <td>485&nbsp;MB</td>
           <td>3&nbsp;GB+</td>
         </tr>
-        <tr>
-          <td><code>GEMMA_3N_E2B_IT_INT4</code> <span class="pill dep">deprecated</span></td>
-          <td>Gemma 3n E2B (int4, multimodal)</td>
-          <td>~3.66&nbsp;GB</td>
-          <td>6&nbsp;GB+</td>
-        </tr>
       </tbody>
     </table>
   </div>
@@ -139,10 +133,7 @@ export const EMBEDDING_GEMMA_2_TEXT_270M =
   "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm";
 
 export const EMBEDDING_GEMMA_2_740M =
-  "https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/main/embeddinggemma-2-740m.litertlm";
-
-export const GEMMA_3N_E2B_IT_INT4 =
-  "https://models.litert.dev/gemma-3n-E2B-it-int4.litertlm";</code></pre>
+  "https://huggingface.co/litert-community/embeddinggemma-2-740m-litert-lm/resolve/main/embeddinggemma-2-740m.litertlm";</code></pre>
   </div>
   <div class="note">
     <span class="note-label">Verified for this release</span>
@@ -168,16 +159,13 @@ export const GEMMA_3N_E2B_IT_INT4 =
     </p>
   </div>
   <div class="note">
-    <span class="note-label">Prefer Gemma 4</span>
+    <span class="note-label">Gemma 3n removed in 0.9.0</span>
     <p>
-      <code>GEMMA_3N_E2B_IT_INT4</code> is deprecated. <code>GEMMA_4_E2B_IT</code>
-      is smaller (2.58&nbsp;GB), adds audio, tool calling and thinking, and is
-      served straight from the Hub. Gemma 3n is mirrored on
-      <code>models.litert.dev</code> only because the upstream repo
-      <code>google/gemma-3n-E2B-it-litert-lm</code> is gated — it returns 401
-      without an access token and manual license approval. The constant still
-      works, and the former <code>litert.dev/&hellip;</code> URL redirects to the
-      mirror, so shipped apps are unaffected.
+      <code>GEMMA_3N_E2B_IT_INT4</code> and the <code>GEMMA_3N_E2B</code> /
+      <code>GEMMA_3N_E4B</code> identifiers were removed in 0.9.0. Use
+      <code>GEMMA_4_E2B_IT</code>: it is smaller (2.58&nbsp;GB) and adds audio,
+      tool calling and thinking. A Gemma 3n file already on the device still
+      loads: pass its path to <code>loadModel()</code>.
     </p>
   </div>
   <div class="note">
@@ -185,7 +173,7 @@ export const GEMMA_3N_E2B_IT_INT4 =
     <p>
       Models over ~2&nbsp;GB need the
       <a href="getting-started.html#entitlements">Extended Virtual Addressing
-      entitlement</a> on iOS — that includes the Gemma 4 and Gemma 3n models
+      entitlement</a> on iOS — that includes both Gemma 4 models
       above. Without it, iOS caps virtual memory and kills the app during
       load. LFM2.5 and the embedding models fit without it.
     </p>
@@ -221,7 +209,7 @@ export const GEMMA_3N_E2B_IT_INT4 =
 const info = await inspectModel(path); // a local path, or a URL that is already downloaded
 info.type;              // 'llm' | 'embedding' | 'unknown'
 info.modalities;        // { text, vision, audio, video }
-info.maxContextTokens;  // the bundle's limit
+info.defaultContextTokens; // the bundle's default context (not its maximum)
 info.backends.text;     // backends it was built for, most preferred first
 recommendBackend(info); // { backend, reason, candidates } for this device
 getDeviceInfo();        // platform, SoC, memory, GPU availability</code></pre>
@@ -270,9 +258,11 @@ getDeviceInfo();        // platform, SoC, memory, GPU availability</code></pre>
   type: ModelType;
   /** Input modalities the bundle accepts */
   modalities: Record&lt;Modality, boolean&gt;;
-  /** Largest context the bundle supports; 0 when undeclared */
+  /** The bundle's default context (LiteRT-LM 0.19+), not its maximum; an embedding bundle's longest input. 0 when undeclared */
+  defaultContextTokens: number;
+  /** @deprecated The same value as defaultContextTokens. Removed in 1.0 */
   maxContextTokens: number;
-  /** True when the context is configurable up to maxContextTokens; false = fixed */
+  /** True when the model graph's context size is configurable; false = fixed by the graph */
   dynamicContext: boolean;
   /** Oldest LiteRT-LM runtime that can run the bundle, when declared */
   minRuntimeVersion: string | null;
@@ -284,7 +274,7 @@ getDeviceInfo();        // platform, SoC, memory, GPU availability</code></pre>
   llm?: {
     supportsThinking: boolean;
     supportsFunctionCalling: boolean;
-    /** Ships a multi-token-prediction drafter (enableSpeculativeDecoding) */
+    /** Ships a multi-token-prediction drafter (speculativeDecodingMode / enableSpeculativeDecoding) */
     speculativeDecoding: boolean;
     /** The author's intended sampler, when declared */
     samplerDefaults: { type: SamplerType; temperature: number; topK: number; topP: number } | null;
@@ -394,15 +384,15 @@ await llm.loadModel(path, { backend });</code></pre>
   </p>
   <ul>
     <li><strong>The wrong kind of bundle</strong> rejects with <code>MODEL_TYPE_MISMATCH</code>: an embedding model in <code>createLLM()</code>, or an LLM in <code>createEmbedder()</code>.</li>
-    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>: its <code>minRuntimeVersion</code> is compared with <code>LITERT_LM_VERSION</code>, the engine this package ships (<code>"0.18.1"</code>).</li>
+    <li><strong>A bundle that needs a newer engine</strong> rejects with <code>RUNTIME_TOO_OLD</code>: its <code>minRuntimeVersion</code> is compared with <code>LITERT_LM_VERSION</code>, the engine this package ships (<code>"0.19.1"</code>).</li>
     <li><strong>With <code>backend</code> omitted</strong>, the bundle's preferred backend that this device can run is used (CPU when the bundle declares none). A per-SoC NPU build on another phone rejects with <code>UNSUPPORTED</code>.</li>
     <li><strong>Image and audio encoders</strong> load only if the bundle has them, on the backends it declares; <code>multimodal: false</code> keeps an engine text-only.</li>
-    <li><strong><code>maxContextTokens</code></strong> above the bundle's maximum is clamped, so the memory estimate and the engine agree.</li>
-    <li><strong><code>enableSpeculativeDecoding</code></strong> on a bundle without a drafter loads without it.</li>
+    <li><strong><code>maxContextTokens</code></strong> is not clamped. Since LiteRT-LM 0.19 a bundle declares its default context (<code>defaultContextTokens</code>; Gemma 4 E2B says 4096), not its maximum. The engine caps a fixed-size graph itself.</li>
+    <li><strong><code>enableSpeculativeDecoding</code></strong> or a <code>speculativeDecodingMode</code> of <code>'on'</code> / <code>'adaptive'</code> on a bundle without a drafter loads without it.</li>
   </ul>
   <p>
     It notes what it changed with <code>console.warn</code> — a backend it
-    picked, a context you set that was clamped, a flag it dropped. Then the
+    picked, a flag it dropped. Then the
     <a href="memory.html#automatic-pre-flight">memory pre-flight</a> runs on
     the adjusted config. A bundle whose metadata can't be read (an older
     bundle) skips this step with a warning and the engine has the final say;
@@ -436,7 +426,7 @@ interface PreflightOptions {
 
 /** EmbedderPreflightResult has the same shape, with an EmbedderConfig. */
 interface PreflightResult {
-  /** The config to load with: backend chosen, context clamped */
+  /** The config to load with: backend chosen, speculative request dropped if no drafter */
   config: LLMConfig;
   /** Whether config differs from the caller's */
   changed: boolean;
@@ -456,10 +446,6 @@ interface PreflightResult {
   GEMMA_4_E2B: "gemma-4-E2B-it-litert-lm",
   /** Gemma 4 E4B Instruct (4B parameters, higher quality) */
   GEMMA_4_E4B: "gemma-4-E4B-it-litert-lm",
-  /** Gemma 3n E2B (2B parameters, efficient) */
-  GEMMA_3N_E2B: "gemma-3n-E2B-it-litert-lm-preview",
-  /** Gemma 3n E4B (4B parameters, higher quality) */
-  GEMMA_3N_E4B: "gemma-3n-E4B-it-litert-lm-preview",
   /** Gemma 3 1B (smallest Gemma) */
   GEMMA_3_1B: "Gemma3-1B-IT_multi-prefill-seq_q4_ekv4096",
   /** Phi-4 Mini Instruct */
@@ -477,8 +463,8 @@ interface PreflightResult {
 export type ModelId = (typeof Models)[keyof typeof Models];</code></pre>
   </div>
   <p>
-    Models without a bundled URL constant — Gemma 3n E4B, Gemma 3 1B, Phi-4
-    Mini, and Qwen 2.5 1.5B — download manually from Hugging Face
+    Models without a bundled URL constant — Gemma 3 1B, Phi-4 Mini, and
+    Qwen 2.5 1.5B — download manually from Hugging Face
     (<code>litert-community</code>), then load by local path or by your own
     HTTPS URL.
   </p>

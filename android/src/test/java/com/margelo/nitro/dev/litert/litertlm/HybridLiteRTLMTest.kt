@@ -192,6 +192,7 @@ class HybridLiteRTLMTest {
             multimodal = null,
             tools = null,
             enableSpeculativeDecoding = true,
+            speculativeDecodingMode = null,
             chatTemplate = null,
             enableStructuredOutput = true,
             thinking = null,
@@ -227,7 +228,8 @@ class HybridLiteRTLMTest {
         assertEquals(0.8, field("topP") as Double, 1e-9)
         assertEquals(8192, field("maxContextTokens"))
         assertEquals(512, field("maxOutputTokens"))
-        assertEquals(true, field("enableSpeculativeDecoding"))
+        // enableSpeculativeDecoding = true is the ON mode (speculativeDecodingMode unset)
+        assertEquals(SpeculativeDecodingMode.ON, field("speculativeDecodingMode"))
         assertEquals(true, field("enableStructuredOutput"))
         assertEquals("/lora/adapter.bin", field("loraPath"))
         assertEquals(true, field("exactStats"))
@@ -262,7 +264,7 @@ class HybridLiteRTLMTest {
                 repeat(20) {
                     try {
                         bridge.unload()
-                        bridge.resetConversation(null, null, null)
+                        bridge.resetConversation(null, null, null, null)
                     } catch (t: Throwable) {
                         if (t.message?.contains("No model loaded") != true) {
                             errors.add(t)

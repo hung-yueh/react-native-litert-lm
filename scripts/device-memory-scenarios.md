@@ -14,7 +14,7 @@ npm run build && cd example && npm install && npx expo prebuild --clean
 npx expo run:android   # or: npx expo run:ios
 ```
 
-Use Gemma 3n E2B INT4 (~1.3 GB) unless stated otherwise.
+Use Gemma 4 E2B (`GEMMA_4_E2B_IT`, 2.58 GB) unless stated otherwise.
 
 ## Scenario 1 — OOM prevention (pre-flight rejection)
 

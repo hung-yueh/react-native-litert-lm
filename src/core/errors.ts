@@ -9,6 +9,7 @@ import type { NativeStatus } from "./nativeError";
  * | --- | --- |
  * | `MEMORY_ESTIMATE_EXCEEDED` | `loadModel()` refused: the pre-flight estimate says it won't fit |
  * | `OUT_OF_MEMORY` | The engine ran out of memory (`RESOURCE_EXHAUSTED`) |
+ * | `CONTEXT_FULL` | A message didn't fit in the context window: start a new conversation, summarize, or load with a larger `maxContextTokens` |
  * | `MODEL_NOT_FOUND` | No file at the model path |
  * | `INVALID_MODEL` | The file is not a readable `.litertlm` bundle |
  * | `MODEL_NOT_LOADED` | Inference before `loadModel()` (or after `unload()`) |
@@ -26,6 +27,7 @@ import type { NativeStatus } from "./nativeError";
 export type LiteRTLMErrorCode =
   | "MEMORY_ESTIMATE_EXCEEDED"
   | "OUT_OF_MEMORY"
+  | "CONTEXT_FULL"
   | "MODEL_NOT_FOUND"
   | "INVALID_MODEL"
   | "MODEL_NOT_LOADED"

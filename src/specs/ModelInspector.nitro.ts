@@ -36,9 +36,12 @@ export interface NativeModalityInfo {
 export interface NativeModelInfo {
   modelType: ModelType;
   fileSizeBytes: number;
-  /** Maximum context the bundle supports (0 = not declared) */
+  /**
+   * LiteRT-LM 0.19+: an LLM bundle's default context size (not its maximum);
+   * an embedding bundle's longest input. 0 = not declared.
+   */
   maxContextTokens: number;
-  /** True when the context size is configurable up to `maxContextTokens` */
+  /** True when the model graph's context size is configurable */
   isDynamicContext: boolean;
   /** Minimum LiteRT-LM runtime version the bundle needs, when declared */
   minRuntimeVersion?: string;

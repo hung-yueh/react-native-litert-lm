@@ -30,7 +30,6 @@ import {
   useModel,
   estimateMemory,
   getDeviceInfo,
-  GEMMA_3N_E2B_IT_INT4,
   GEMMA_4_E2B_IT,
   type MemoryEstimate,
   type MemoryUsage,
@@ -53,9 +52,7 @@ const TEST_IMAGE_ASSET = require("./test.jpeg");
 const TEST_AUDIO_ASSET = require("./test.wav");
 
 // ─── Models ──────────────────────────────────────────────────────────────────
-// Gemma 4 first: it is the recommended model. Gemma 3n is deprecated —
-// larger, no audio/tools/thinking, and mirrored only because the upstream
-// Hub repo is gated.
+// Gemma 4 E2B: the recommended model (text, image and audio, tools, thinking).
 const MODELS = {
   gemma4: {
     label: "Gemma 4 E2B",
@@ -63,13 +60,6 @@ const MODELS = {
     sizeBytes: 2_580_000_000,
     url: GEMMA_4_E2B_IT,
     fileName: "gemma-4-E2B-it.litertlm",
-  },
-  gemma3n: {
-    label: "Gemma 3n E2B",
-    size: "3.7 GB · legacy",
-    sizeBytes: 3_655_827_456,
-    url: GEMMA_3N_E2B_IT_INT4,
-    fileName: "gemma-3n-E2B-it-int4.litertlm",
   },
 } as const;
 type ModelKey = keyof typeof MODELS;
