@@ -319,7 +319,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
             // Apply configuration
             exactStats = config?.exactStats ?: false
-            config?.let { cfg ->
+            if (config != null) {
+                val cfg = config
                 cfg.backend?.let { backend = it }
                 cfg.temperature?.let { temperature = it }
                 cfg.topK?.let { topK = it.toInt() }
@@ -338,7 +339,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 tools = cfg.tools
                 speculativeDecodingMode = speculativeDecodingModeOf(
                     cfg.speculativeDecodingMode,
-                    cfg.enableSpeculativeDecoding?.takeIf { it },
+                    cfg.enableSpeculativeDecoding,
                 )
                 chatTemplate = cfg.chatTemplate
                 numThreads = cfg.numThreads?.toInt()
@@ -358,6 +359,20 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         "toolCall events when generation finishes; only token-by-token " +
                         "tool-call streaming is iOS-only for now.")
                 }
+            } else {
+                // A load without a config keeps none of the last one's
+                // per-load settings (matching iOS). Sampling, context and the
+                // backend carry over on both platforms.
+                tools = null
+                speculativeDecodingMode = null
+                chatTemplate = null
+                numThreads = null
+                maxVisionTokensPerImage = null
+                enableStructuredOutput = false
+                sessionThinking = null
+                loraPath = null
+                audioLoraPath = null
+                activationDataType = null
             }
 
             // A missing file would otherwise burn through every engine

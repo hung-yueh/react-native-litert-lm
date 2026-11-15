@@ -3,7 +3,7 @@
  * what the engine reads from a `.litertlm` header (LiteRT-LM model info).
  * The capability facts come from the bundle itself, never from its file name.
  */
-import type { Backend, LLMConfig } from "../specs/LiteRTLM.nitro";
+import type { Backend, LLMConfig, SpeculativeDecodingMode } from "../specs/LiteRTLM.nitro";
 import type { EmbedderConfig } from "../specs/Embedder.nitro";
 import type {
   Modality,
@@ -14,6 +14,7 @@ import type {
 } from "../specs/ModelInspector.nitro";
 import { LiteRTLMError } from "./errors";
 import { LITERT_LM_VERSION, compareVersions } from "./version";
+import { resolveMaxContextTokens } from "./memoryEstimator";
 
 export type { Modality, ModelType, NpuBrand };
 
@@ -294,9 +295,38 @@ function compatibleRecommendation(info: ModelInfo, device?: DeviceInfo): Backend
   return rec;
 }
 
+/**
+ * The one speculative-decoding mode a mode and the legacy boolean ask for:
+ * the mode wins; `true` is `'on'` and `false` is `'off'`; neither leaves the
+ * engine's default. Native code gets only the mode.
+ */
+export function speculativeModeOf(
+  mode: SpeculativeDecodingMode | undefined,
+  enabled: boolean | undefined,
+): SpeculativeDecodingMode | undefined {
+  if (mode !== undefined) return mode;
+  if (enabled === undefined) return undefined;
+  return enabled ? "on" : "off";
+}
+
+/**
+ * The config to size memory with: `config`, with the context capped at the
+ * size a fixed-size graph declares. The engine can't give such a graph more
+ * than that, so the memory estimate and `getMemoryForecast()` shouldn't
+ * assume more either. Only the sizing changes: native still gets the
+ * caller's number. A dynamic graph's declared size is just its default
+ * (LiteRT-LM 0.19), so it caps nothing.
+ */
+export function sizingConfig(info: ModelInfo | null, config: LLMConfig | undefined): LLMConfig | undefined {
+  if (!info || info.dynamicContext || info.defaultContextTokens <= 0) return config;
+  const requested = resolveMaxContextTokens(config);
+  if (requested <= info.defaultContextTokens) return config;
+  return { ...config, maxContextTokens: info.defaultContextTokens };
+}
+
 /** Result of {@link preflightLoad}. */
 export interface PreflightResult {
-  /** The config to load with: backend chosen, context clamped */
+  /** The config to load with: backend chosen, unsupported options dropped */
   config: LLMConfig;
   /** Whether `config` differs from the caller's */
   changed: boolean;
@@ -345,22 +375,18 @@ export function preflightLoad(
   if (config?.multimodal === true && !info.modalities.vision && !info.modalities.audio) {
     notes.push("multimodal: true, but this bundle has no vision or audio encoder — loading text-only.");
   }
-  // Without a drafter there is nothing to speculate with: iOS skips the flag,
-  // but Android's SDK fails the whole load, so drop it up front on both.
-  if (config?.enableSpeculativeDecoding === true && info.llm && !info.llm.speculativeDecoding) {
-    resolved.enableSpeculativeDecoding = false;
+  // Without a drafter there is nothing to speculate with: iOS skips the
+  // setting, but Android's SDK fails the whole load, so drop it up front on
+  // both: the engine's default, as before speculative modes existed.
+  const requested = speculativeModeOf(config?.speculativeDecodingMode, config?.enableSpeculativeDecoding);
+  if ((requested === "on" || requested === "adaptive") && info.llm && !info.llm.speculativeDecoding) {
+    const setting = config?.speculativeDecodingMode !== undefined
+      ? `speculativeDecodingMode '${config.speculativeDecodingMode}'`
+      : "enableSpeculativeDecoding";
+    delete resolved.speculativeDecodingMode;
+    delete resolved.enableSpeculativeDecoding;
     changed = true;
-    notes.push(
-      "enableSpeculativeDecoding: this bundle has no multi-token-prediction drafter — loading without it.",
-    );
-  }
-  const mode = config?.speculativeDecodingMode;
-  if ((mode === "on" || mode === "adaptive") && info.llm && !info.llm.speculativeDecoding) {
-    resolved.speculativeDecodingMode = "off";
-    changed = true;
-    notes.push(
-      `speculativeDecodingMode '${mode}': this bundle has no multi-token-prediction drafter — loading without it.`,
-    );
+    notes.push(`${setting}: this bundle has no multi-token-prediction drafter — loading without it.`);
   }
   return { config: resolved, changed, notes };
 }

@@ -164,6 +164,29 @@ function defaultCodeFor(phase: NativePhase): LiteRTLMErrorCode {
   }
 }
 
+/** Errors made from a tag with an explicit code: the wrapper raised them itself. */
+const wrapperRejections = new WeakSet<LiteRTLMError>();
+
+/**
+ * True for a failure the native wrapper detected itself (its tag carries an
+ * explicit code): a missing file, a part the model has no encoder for, an
+ * option the load didn't enable. The engine never saw the call.
+ */
+export function isWrapperRejection(e: unknown): boolean {
+  return e instanceof LiteRTLMError && wrapperRejections.has(e);
+}
+
+/**
+ * True for a message that failed because the context window was already
+ * full ("Max number of tokens reached, the context window is full."). Unlike
+ * a message too large for the space left, it leaves the engine's conversation
+ * usable (LiteRT-LM 0.19.1): every later message fails the same way, each on
+ * its own.
+ */
+export function isContextWindowFull(e: unknown): boolean {
+  return e instanceof LiteRTLMError && e.code === "CONTEXT_FULL" && /context window is full/i.test(e.message);
+}
+
 function messageOf(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
@@ -182,10 +205,12 @@ export function toLiteRTLMError(e: unknown, phase: NativePhase): LiteRTLMError {
   const parsed = parseNativeStatus(raw);
   if (parsed) {
     const code = parsed.code ?? errorCodeForStatus(parsed.status.name, phase, parsed.status.message);
-    return new LiteRTLMError(code, parsed.status.message || raw, {
+    const error = new LiteRTLMError(code, parsed.status.message || raw, {
       nativeStatus: parsed.status,
       cause: e,
     });
+    if (parsed.code) wrapperRejections.add(error);
+    return error;
   }
   return new LiteRTLMError(defaultCodeFor(phase), cleanNativeMessage(raw), { cause: e });
 }

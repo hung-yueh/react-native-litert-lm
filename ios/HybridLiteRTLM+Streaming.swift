@@ -231,8 +231,13 @@ extension HybridLiteRTLM {
 
     func emitExecuteStreamChunk(ctx: ExecuteStreamContext, chunk: UnsafePointer<CChar>) {
         let token = String(cString: chunk)
-        let raw = token.hasPrefix("{") && token.contains("\"role\"")
-            ? extractTextFromResponse(token) : token
+        let isMessage = token.hasPrefix("{") && token.contains("\"role\"")
+        // Thought text goes to JS only: it isn't part of the reply.
+        if isMessage {
+            let thought = extractThoughtFromResponse(token)
+            if !thought.isEmpty { ctx.onToken(Self.thinkingMarker(thought), false) }
+        }
+        let raw = isMessage ? extractTextFromResponse(token) : token
         ctx.rawResponse += raw
         let cleaned = stripControlTokens(ctx.rawResponse)
             .trimmingLeadingCharacters(in: .whitespacesAndNewlines)

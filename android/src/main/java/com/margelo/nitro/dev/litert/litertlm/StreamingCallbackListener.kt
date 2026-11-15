@@ -6,6 +6,21 @@ import com.google.ai.edge.litertlm.Content
 import java.util.concurrent.CancellationException
 
 /**
+ * Thought text in the marker pair JS turns into `thinking` events
+ * (NATIVE_THINKING_CHANNEL in src/core/streamEvents.ts; mirrors iOS).
+ */
+internal fun thinkingMarker(text: String) = "<litertlm:thinking>$text</litertlm:thinking>"
+
+/**
+ * The thought text of a streamed message: LiteRT-LM 0.19 parses a bundle's
+ * reasoning channel (Gemma 4's "thought") out of the reply into
+ * [com.google.ai.edge.litertlm.Message.channels]. A tool-call channel isn't
+ * thought.
+ */
+internal fun thoughtText(message: com.google.ai.edge.litertlm.Message): String =
+    message.channels.filterKeys { it != "tool_call" }.values.joinToString("")
+
+/**
  * Named implementation of the LiteRT-LM MessageCallback for streaming inference.
  *
  * Accumulates response chunks, forwards tokens to JS, and appends the final
@@ -32,6 +47,9 @@ internal class StreamingCallbackListener(
         if (!sawChannelContent && message.channels.values.any { it.isNotEmpty() }) {
             sawChannelContent = true
         }
+        // Thought text goes to JS only: it isn't part of the reply.
+        val thought = thoughtText(message)
+        if (thought.isNotEmpty()) onToken(thinkingMarker(thought), false)
         // Text content plus any SDK-parsed tool calls (arriving on the final
         // message), the latter wrapped in the marker protocol the JS event
         // parser understands.

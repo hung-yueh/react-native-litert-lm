@@ -26,12 +26,24 @@ import {
   type BudgetLevel,
 } from "./core/memoryEstimator";
 import { LiteRTLMError, MemoryError } from "./core/errors";
-import { toLiteRTLMError, type NativePhase } from "./core/nativeError";
-import { legacyMultimodalHint, preflightLoad, type ModelInfo } from "./core/modelInfo";
+import {
+  isContextWindowFull,
+  isWrapperRejection,
+  toLiteRTLMError,
+  type NativePhase,
+} from "./core/nativeError";
+import {
+  legacyMultimodalHint,
+  preflightLoad,
+  sizingConfig,
+  speculativeModeOf,
+  type ModelInfo,
+} from "./core/modelInfo";
 import { warnDeprecated } from "./core/deprecations";
 import { inspectModel, tryGetDeviceInfo } from "./modelInspector";
 import {
   createStreamEventParser,
+  NATIVE_THINKING_CHANNEL,
   DEFAULT_CHANNELS,
   type StreamEvent,
   type StreamChannel,
@@ -247,7 +259,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     return estimateMemory({
       modelFileSizeBytes: fileSize,
       availableMemoryBytes: usage.availableMemoryBytes,
-      config: config ?? loadedConfig,
+      config: config ?? sizingConfig(loadedModelInfo, loadedConfig),
     });
   };
 
@@ -292,11 +304,12 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       typeof download === "object" ? download : { onProgress: download },
     );
 
-    // Bundle pre-flight (LiteRT-LM 0.18 model info, header only): refuse the
-    // wrong model type or a bundle needing a newer runtime, pick the backend
-    // the bundle prefers when none was given, clamp the context to the
-    // bundle's maximum. A missing file fails here; unreadable metadata (older
-    // bundles) only skips this step — the engine still gets the final say.
+    // Bundle pre-flight (model info, header only): refuse the wrong model
+    // type or a bundle needing a newer runtime, pick the backend the bundle
+    // prefers when none was given, and size memory by the context a
+    // fixed-size graph can hold. A missing file fails here; unreadable
+    // metadata (older bundles) only skips this step — the engine still gets
+    // the final say.
     let info: ModelInfo | null = null;
     try {
       info = await inspectModel(modelPath);
@@ -322,6 +335,14 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       if (preflight.changed) effectiveConfig = preflight.config;
       for (const note of preflight.notes) console.warn(`[react-native-litert-lm] ${note}`);
     }
+    // Native gets the speculative-decoding mode alone, resolved here
+    if (effectiveConfig?.enableSpeculativeDecoding !== undefined) {
+      const { enableSpeculativeDecoding, ...rest } = effectiveConfig;
+      effectiveConfig = {
+        ...rest,
+        speculativeDecodingMode: speculativeModeOf(rest.speculativeDecodingMode, enableSpeculativeDecoding),
+      };
+    }
 
     // Pre-flight memory check: refuse loads that would likely OOM-kill the
     // app. `forceLoad: true` opts out.
@@ -331,7 +352,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       const estimate = estimateMemory({
         modelFileSizeBytes: fileSize,
         availableMemoryBytes: usage.availableMemoryBytes,
-        config: effectiveConfig,
+        config: sizingConfig(info, effectiveConfig),
       });
       if (estimate.verdict === "critical") {
         throw new MemoryError(
@@ -355,7 +376,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     // and the messages waiting behind it (the queue does)
     engineEpoch++;
     const result = await native.loadModel(modelPath, effectiveConfig).catch((e: unknown) => {
-      throw toTypedError(e, "load", { modelPath, config: effectiveConfig });
+      throw toTypedError(e, "load", { modelPath, config: sizingConfig(info, effectiveConfig) });
     });
 
     loadedModelPath = modelPath;
@@ -378,13 +399,16 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     if (used < 0) return null;
     return forecastMemory({
       contextTokensUsed: used,
-      maxContextTokens: resolveMaxContextTokens(loadedConfig),
+      maxContextTokens: resolveMaxContextTokens(sizingConfig(loadedModelInfo, loadedConfig)),
       kvCacheBytesPerToken: estimateKvCacheBytesPerToken(loadedModelFileSize),
     });
   };
 
-  /** Single JS inference path — always calls native execute(). */
-  const runExecute = (
+  /**
+   * Single JS inference path — always calls native execute(). The token
+   * stream still carries native's thought markers (NATIVE_THINKING_CHANNEL).
+   */
+  const runExecuteRaw = (
     parts: MultimodalPart[],
     onToken?: TokenCallback,
     options?: ExecuteOptions,
@@ -420,13 +444,34 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
     }, rethrow);
   };
 
+  /** execute(): the reply's tokens, without the thought text. */
+  const runExecute = (
+    parts: MultimodalPart[],
+    onToken?: TokenCallback,
+    options?: ExecuteOptions,
+  ): Promise<string> => {
+    if (!onToken) return runExecuteRaw(parts, undefined, options);
+    const parser = createStreamEventParser([NATIVE_THINKING_CHANNEL]);
+    const replyText = (events: StreamEvent[]) =>
+      events.filter((event) => event.type === "token").map((event) => event.text).join("");
+    return runExecuteRaw(
+      parts,
+      (token, done) => {
+        const text = replyText(parser.push(token));
+        if (done) onToken(text + replyText(parser.finish()), true);
+        else if (text) onToken(text, false);
+      },
+      options,
+    );
+  };
+
   /** Typed-event streaming: raw token stream → token/toolCall/thinking events. */
   const runExecuteWithEvents = (
     parts: MultimodalPart[],
     onEvent: StreamEventCallback,
     options?: ExecuteOptions,
   ): Promise<string> => {
-    const parser = createStreamEventParser(channels);
+    const parser = createStreamEventParser([NATIVE_THINKING_CHANNEL, ...channels]);
     const onToken: TokenCallback = (token, done) => {
       for (const event of parser.push(token)) {
         onEvent(event);
@@ -437,7 +482,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
         }
       }
     };
-    return runExecute(parts, onToken, options);
+    return runExecuteRaw(parts, onToken, options);
   };
 
   // ── Inference queue and multi-conversation manager ─────────────────────
@@ -468,27 +513,23 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
   let queueLength = 0;
 
   /**
-   * A per-conversation speculative-decoding request the loaded bundle can
-   * honor: without a drafter the engine would fail the first message.
+   * The speculative-decoding mode of a per-conversation request, if the
+   * loaded bundle can honor it: without a drafter the engine would fail the
+   * first message, so it gets the engine's default instead.
    */
   const supportedSpeculativeDecoding = (
     requested: boolean | SpeculativeDecodingMode | undefined,
-  ): boolean | SpeculativeDecodingMode | undefined => {
-    const wantsDrafter = requested === true || requested === "on" || requested === "adaptive";
-    if (wantsDrafter && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
+  ): SpeculativeDecodingMode | undefined => {
+    const mode =
+      typeof requested === "string" ? requested : speculativeModeOf(undefined, requested);
+    if ((mode === "on" || mode === "adaptive") && loadedModelInfo?.llm && !loadedModelInfo.llm.speculativeDecoding) {
       console.warn(
         "[react-native-litert-lm] speculativeDecoding: this bundle has no multi-token-prediction drafter — ignoring it.",
       );
       return undefined;
     }
-    return requested;
+    return mode;
   };
-
-  /** Native's two speculative-decoding parameters: the boolean, or the mode. */
-  const nativeSpeculativeDecoding = (
-    value: boolean | SpeculativeDecodingMode | undefined,
-  ): [boolean | undefined, SpeculativeDecodingMode | undefined] =>
-    typeof value === "string" ? [undefined, value] : [value, undefined];
 
   /**
    * Give conversation `id` the native context: save the outgoing
@@ -510,7 +551,8 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
       native.resetConversation(
         transcript.length > 0 ? JSON.stringify(transcript) : undefined,
         switchOptions?.systemPrompt,
-        ...nativeSpeculativeDecoding(supportedSpeculativeDecoding(switchOptions?.speculativeDecoding)),
+        undefined,
+        supportedSpeculativeDecoding(switchOptions?.speculativeDecoding),
       );
     } catch (e) {
       throw toLiteRTLMError(e, "load");
@@ -535,12 +577,20 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
    * through LiteRT-LM 0.19.1 every later message on it fails at once ("Task
    * failed with state: 7"), until a reset. Keep the conversation's answered
    * turns instead, so its next message replays them into a fresh native
-   * conversation (one re-prefill). A cancelled message needs none of this:
-   * whatever cancelled it already replaced the native conversation.
+   * conversation (one re-prefill). Three failures leave the native
+   * conversation as it was, and need none of this:
+   * - a cancelled message: whatever cancelled it already replaced the
+   *   native conversation;
+   * - a message native code rejected before the engine saw it (a missing
+   *   file, say): a replay would cost a re-prefill and turn the images and
+   *   audio of earlier turns into text placeholders;
+   * - a message sent into a window that is already full: the engine fails
+   *   it alone, and a replay would fill the window again only to fail too.
    */
   const retireFailedConversation = (e: unknown) => {
     const code = e instanceof LiteRTLMError ? e.code : undefined;
     if (code === "INFERENCE_CANCELLED" || code === "MODEL_NOT_LOADED") return;
+    if (isWrapperRejection(e) || isContextWindowFull(e)) return;
     if (activeConversationId === undefined) return;
     savedTranscripts.set(activeConversationId, answeredTurns(native.getHistory()));
     activeConversationId = undefined;
@@ -770,7 +820,7 @@ export function createLLM(options?: CreateLLMOptions): LiteRTLMInstance {
           activeConversationId = undefined;
           let result: void;
           try {
-            result = target.resetConversation(historyJson, systemPrompt, ...nativeSpeculativeDecoding(supported));
+            result = target.resetConversation(historyJson, systemPrompt, undefined, supported);
           } catch (e) {
             throw toLiteRTLMError(e, "load");
           }

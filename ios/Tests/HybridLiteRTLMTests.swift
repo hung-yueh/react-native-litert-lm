@@ -606,6 +606,29 @@ class HybridLiteRTLMTests: XCTestCase {
         XCTAssertEqual(HybridLiteRTLM.engineMessagesJson(messages), "[" + expected.joined(separator: ",") + "]")
     }
 
+    func testCountTokensOnTheQueueGivesUpWhileTheQueueIsBusy() {
+        // singleThreadedExecution: a generating message holds `queue` for its whole stream
+        let busy = DispatchSemaphore(value: 0)
+        bridge.queue.async { busy.wait() }
+        let start = Date()
+        XCTAssertEqual(bridge.countTokensOnQueue("hello", wait: .milliseconds(50)), -1)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0)
+        busy.signal()
+        // An idle queue runs it (no engine loaded here, so the engine can't say: -1)
+        XCTAssertEqual(bridge.countTokensOnQueue("hello", wait: .seconds(5)), -1)
+    }
+
+    func testThoughtTextStaysOutOfTheReplyAndStreamsInItsMarkers() {
+        // A thinking chunk as LiteRT-LM 0.19.1 streams it (Gemma 4 E2B)
+        let chunk = #"{"role":"assistant","channels":{"thought":"Two plus two"},"reasoning_content":"Two plus two"}"#
+        XCTAssertEqual(bridge.extractThoughtFromResponse(chunk), "Two plus two")
+        XCTAssertEqual(bridge.extractTextFromResponse(chunk), "")
+        XCTAssertEqual(HybridLiteRTLM.thinkingMarker("Two plus two"),
+                       "<litertlm:thinking>Two plus two</litertlm:thinking>")
+        // A reply chunk has none
+        XCTAssertEqual(bridge.extractThoughtFromResponse(#"{"role":"assistant","content":"It is 4."}"#), "")
+    }
+
     func testToolCallsKeepTheModelsArgumentOrder() {
         let response = #"{"role":"assistant","content":[],"tool_calls":[{"type":"function","function":{"# +
             #""name":"get_current_weather","arguments":{"zeta":1,"alpha":"</tool_call>","mid":{"b":2,"a":1}}}},"# +

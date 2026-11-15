@@ -62,8 +62,9 @@
     The session-level configuration, passed to <code>loadModel()</code> or as
     the second argument to <code>useModel()</code>. All fields are optional.
     <code>loadModel()</code> checks it against the bundle first, filling in an
-    omitted <code>backend</code> and clamping <code>maxContextTokens</code> —
-    see <a href="models.html#load-pre-flight">the load pre-flight</a>.
+    omitted <code>backend</code> and dropping a speculative-decoding request
+    the bundle has no drafter for — see
+    <a href="models.html#load-pre-flight">the load pre-flight</a>.
   </p>
   <div class="tbl-wrap">
     <table>

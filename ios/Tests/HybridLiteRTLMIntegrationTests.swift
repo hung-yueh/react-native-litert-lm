@@ -208,6 +208,24 @@ final class HybridLiteRTLMIntegrationTests: XCTestCase {
         print("[integration] streaming response: \(response)")
     }
 
+    /// A reply with thinking streams its thought text in the wrapper's markers
+    /// (JS turns them into `thinking` events), and keeps it out of the reply.
+    func test1b_ThoughtTextStreamsInItsMarkers() async throws {
+        let bridge = try await ensureLoaded()
+        try bridge.resetConversation(historyJson: nil, systemPrompt: nil)
+        var streamed = ""
+        let response = try await run(
+            bridge,
+            "What is 17 × 23? Reply with the number only.",
+            options: Self.makeOptions(maxOutputTokens: 1024, thinking: ThinkingOptions(enabled: true, tokenBudget: nil))
+        ) { token, _ in streamed += token }
+        print("[integration] thinking stream: \(streamed.prefix(300))… reply: \(response)")
+        XCTAssertTrue(streamed.contains("<litertlm:thinking>"), "no thought text streamed")
+        XCTAssertFalse(response.contains("litertlm:thinking"), "thought text leaked into the reply")
+        XCTAssertTrue(response.contains("391"), "reply: \(response)")
+        XCTAssertFalse(try bridge.getHistory().last?.content.contains("litertlm:thinking") ?? true)
+    }
+
     /// The system-prompt fix: before v0.15.0 phase-5 the prompt rendered EMPTY.
     func test2_SystemPromptIsHonored() async throws {
         let bridge = try await ensureLoaded()

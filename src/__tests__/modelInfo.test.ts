@@ -7,6 +7,7 @@ import {
   normalizeModelInfo,
   recommendBackend,
   preflightLoad,
+  sizingConfig,
   legacyMultimodalHint,
   type DeviceInfo,
 } from "../core/modelInfo";
@@ -237,7 +238,9 @@ describe("preflightLoad", () => {
   it("drops speculative decoding for a bundle without a drafter", () => {
     const plain = normalizeModelInfo("/m/plain.litertlm", native({ hasSpeculativeDecoding: false }));
     const pf = preflightLoad(plain, { backend: "cpu", enableSpeculativeDecoding: true });
-    expect(pf.config.enableSpeculativeDecoding).toBe(false);
+    // The engine's default, not an explicit off
+    expect(pf.config.enableSpeculativeDecoding).toBeUndefined();
+    expect(pf.config.speculativeDecodingMode).toBeUndefined();
     expect(pf.notes[0]).toContain("no multi-token-prediction drafter");
 
     const mtp = normalizeModelInfo("/m/mtp.litertlm", native({ hasSpeculativeDecoding: true }));
@@ -246,11 +249,11 @@ describe("preflightLoad", () => {
     expect(kept.changed).toBe(false);
   });
 
-  it("turns a speculative-decoding mode off for a bundle without a drafter", () => {
+  it("drops a speculative-decoding mode for a bundle without a drafter", () => {
     const plain = normalizeModelInfo("/m/plain.litertlm", native({ hasSpeculativeDecoding: false }));
     for (const mode of ["on", "adaptive"] as const) {
       const pf = preflightLoad(plain, { backend: "cpu", speculativeDecodingMode: mode });
-      expect(pf.config.speculativeDecodingMode).toBe("off");
+      expect(pf.config.speculativeDecodingMode).toBeUndefined();
       expect(pf.changed).toBe(true);
       expect(pf.notes[0]).toContain(`speculativeDecodingMode '${mode}'`);
     }
@@ -304,6 +307,59 @@ describe("preflightLoad", () => {
     const small = normalizeModelInfo("/m/s.litertlm", native({ maxContextTokens: 2048 }));
     expect(preflightLoad(small, { backend: "cpu" }).config.maxContextTokens).toBeUndefined();
     expect(preflightLoad(small, { backend: "cpu", maxTokens: 4096 }).changed).toBe(false);
+  });
+});
+
+describe("speculative decoding reaches native as one mode", () => {
+  it("resolves the legacy boolean in loadModel()", async () => {
+    mockModelInspector.inspect.mockResolvedValueOnce(native({ hasSpeculativeDecoding: true }));
+    const llm = createLLM();
+    await llm.loadModel("/m/mtp.litertlm", { backend: "cpu", enableSpeculativeDecoding: false });
+    const sent = mockLiteRTLM.loadModel.mock.calls.at(-1)![1];
+    expect(sent.speculativeDecodingMode).toBe("off");
+    expect(sent).not.toHaveProperty("enableSpeculativeDecoding");
+
+    mockModelInspector.inspect.mockResolvedValueOnce(native({ hasSpeculativeDecoding: true }));
+    await llm.loadModel("/m/mtp.litertlm", {
+      backend: "cpu",
+      enableSpeculativeDecoding: true,
+      speculativeDecodingMode: "adaptive",
+    });
+    expect(mockLiteRTLM.loadModel.mock.calls.at(-1)![1].speculativeDecodingMode).toBe("adaptive");
+  });
+});
+
+describe("sizingConfig", () => {
+  it("sizes a fixed-size graph by its declared context", () => {
+    const fixed = normalizeModelInfo("/m/f.litertlm", native({ maxContextTokens: 4096, isDynamicContext: false }));
+    expect(sizingConfig(fixed, { maxContextTokens: 32768 })?.maxContextTokens).toBe(4096);
+    // A smaller request, or the 4096 default, is left alone
+    const small = { maxContextTokens: 2048 };
+    expect(sizingConfig(fixed, small)).toBe(small);
+    expect(sizingConfig(fixed, undefined)).toBeUndefined();
+  });
+
+  it("caps nothing for a dynamic graph, an undeclared size or no metadata", () => {
+    const request = { maxContextTokens: 32768 };
+    const dynamic = normalizeModelInfo("/m/d.litertlm", native({ maxContextTokens: 4096, isDynamicContext: true }));
+    const undeclared = normalizeModelInfo("/m/u.litertlm", native({ maxContextTokens: 0, isDynamicContext: false }));
+    expect(sizingConfig(dynamic, request)).toBe(request);
+    expect(sizingConfig(undeclared, request)).toBe(request);
+    expect(sizingConfig(null, request)).toBe(request);
+  });
+
+  it("feeds getMemoryForecast() but not the config native loads with", async () => {
+    mockModelInspector.inspect.mockResolvedValueOnce(
+      native({ maxContextTokens: 4096, isDynamicContext: false }),
+    );
+    mockModelStore.getFileSizeBytes.mockReturnValueOnce(1024 * 1024 * 1024);
+    const llm = createLLM();
+    await llm.loadModel("/m/fixed.litertlm", { backend: "cpu", maxContextTokens: 32768, forceLoad: true });
+    expect(mockLiteRTLM.loadModel).toHaveBeenLastCalledWith(
+      "/m/fixed.litertlm",
+      expect.objectContaining({ maxContextTokens: 32768 }),
+    );
+    expect(llm.getMemoryForecast()?.maxContextTokens).toBe(4096);
   });
 });
 

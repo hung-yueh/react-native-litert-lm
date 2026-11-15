@@ -38,12 +38,12 @@ describe('multi-conversation manager', () => {
     const conv = llm.createConversation({ speculativeDecoding: true });
     await conv.execute([{ type: 'text', text: 'hi' }]);
 
-    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, true, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenCalledWith(undefined, undefined, undefined, 'on');
   });
 
   it('passes speculative decoding through a manual resetConversation()', () => {
     llm.resetConversation(undefined, 'Be brief.', true);
-    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, 'Be brief.', true, undefined);
+    expect(mockLiteRTLM.resetConversation).toHaveBeenLastCalledWith(undefined, 'Be brief.', undefined, 'on');
   });
 
   it('passes a speculative-decoding mode as the mode, not the boolean', async () => {
@@ -294,7 +294,7 @@ describe('multi-conversation manager', () => {
       await conv.execute([{ type: 'text', text: 'in conversation' }]);
 
       await llm.execute([{ type: 'text', text: 'top level' }]);
-      expect(mockReset).toHaveBeenLastCalledWith(undefined, 'You are a pirate.', true, undefined);
+      expect(mockReset).toHaveBeenLastCalledWith(undefined, 'You are a pirate.', undefined, 'on');
     });
 
     it("a load forgets the default conversation's reset options", async () => {
@@ -362,6 +362,28 @@ describe('multi-conversation manager', () => {
       await expect(llm.execute([{ type: 'text', text: 'hi' }])).rejects.toMatchObject({
         code: 'INFERENCE_CANCELLED',
       });
+      await llm.execute([{ type: 'text', text: 'next' }]);
+      expect(mockLiteRTLM.resetConversation).not.toHaveBeenCalled();
+    });
+
+    it('needs no replay after a message native rejected before the engine saw it', async () => {
+      mockExecute.mockImplementationOnce(() =>
+        Promise.reject(new Error('[LiteRTLM:execute:NOT_FOUND:INVALID_INPUT] Image file not found: /nope.jpg')),
+      );
+      await expect(
+        llm.execute([{ type: 'image', path: '/nope.jpg' }]),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      await llm.execute([{ type: 'text', text: 'next' }]);
+      expect(mockLiteRTLM.resetConversation).not.toHaveBeenCalled();
+    });
+
+    it('needs no replay when the window was already full', async () => {
+      mockExecute.mockImplementationOnce(() =>
+        Promise.reject(
+          new Error('[LiteRTLM:execute:RESOURCE_EXHAUSTED] Max number of tokens reached, the context window is full.'),
+        ),
+      );
+      await expect(llm.execute([{ type: 'text', text: 'more' }])).rejects.toMatchObject({ code: 'CONTEXT_FULL' });
       await llm.execute([{ type: 'text', text: 'next' }]);
       expect(mockLiteRTLM.resetConversation).not.toHaveBeenCalled();
     });

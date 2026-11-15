@@ -168,6 +168,47 @@ describe("executeWithEvents", () => {
     expect(events[events.length - 1]!.done).toBe(true);
   });
 
+  it("turns native's thought text into thinking events, which execute() drops", async () => {
+    const stream = (_parts: unknown, onToken?: (t: string, d: boolean) => void) => {
+      onToken?.("<litertlm:thinking>Two plus two</litertlm:thinking>", false);
+      onToken?.("<litertlm:thi", false);
+      onToken?.("nking> is four.</litertlm:thinking>", false);
+      onToken?.("It is 4.", false);
+      onToken?.("", true);
+      return Promise.resolve("It is 4.");
+    };
+    const llm = createLLM();
+
+    mockLiteRTLM.execute.mockImplementationOnce(stream);
+    const events: { type: string; text: string; done: boolean }[] = [];
+    await llm.executeWithEvents([{ type: "text", text: "2+2?" }], (e) => events.push(e));
+    const of = (type: string) => events.filter((e) => e.type === type).map((e) => e.text).join("");
+    expect(of("thinking")).toBe("Two plus two is four.");
+    expect(of("token")).toBe("It is 4.");
+
+    mockLiteRTLM.execute.mockImplementationOnce(stream);
+    const tokens: [string, boolean][] = [];
+    await llm.execute([{ type: "text", text: "2+2?" }], (t, d) => tokens.push([t, d]));
+    expect(tokens.map(([t]) => t).join("")).toBe("It is 4.");
+    expect(tokens[tokens.length - 1]).toEqual(["", true]);
+  });
+
+  it("execute() passes the bundle's own markers through unchanged", async () => {
+    mockLiteRTLM.execute.mockImplementationOnce(
+      (_parts: unknown, onToken?: (t: string, d: boolean) => void) => {
+        onToken?.("<think>raw</think> and <tool_call>{}</tool_call> <", false);
+        onToken?.("b>", true);
+        return Promise.resolve("");
+      },
+    );
+    const llm = createLLM();
+    let streamed = "";
+    await llm.execute([{ type: "text", text: "x" }], (t) => {
+      streamed += t;
+    });
+    expect(streamed).toBe("<think>raw</think> and <tool_call>{}</tool_call> <b>");
+  });
+
   it("behaves like plain streaming when no markers appear", async () => {
     const llm = createLLM();
     const events: { type: string; text: string }[] = [];

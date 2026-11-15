@@ -37,6 +37,20 @@ export const DEFAULT_CHANNELS: StreamChannel[] = [
   { type: "thinking", start: "<thinking>", end: "</thinking>" },
 ];
 
+/**
+ * How native code hands over the thought text the engine keeps apart from
+ * the reply (LiteRT-LM 0.19 parses a bundle's reasoning channel out of the
+ * text). Native wraps each piece in these markers, in the token stream, and
+ * only `executeWithEvents()` turns them into `thinking` events: `execute()`
+ * drops them. They're the wrapper's own, so they don't depend on the bundle's
+ * markers or on `createLLM({ streamChannels })`.
+ */
+export const NATIVE_THINKING_CHANNEL: StreamChannel = {
+  type: "thinking",
+  start: "<litertlm:thinking>",
+  end: "</litertlm:thinking>",
+};
+
 export interface StreamEventParser {
   /**
    * Feed a raw chunk; returns zero or more complete events.

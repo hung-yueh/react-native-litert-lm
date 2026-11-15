@@ -48,6 +48,37 @@ class StreamingCallbackListenerTest {
         assertEquals(listOf("failure", "token(Error: RESOURCE_EXHAUSTED: out of memory, true)"), events)
     }
 
+    @Test
+    fun thoughtTextStreamsInItsMarkersAndStaysOutOfTheReply() {
+        val reply = StringBuilder()
+        val history = mutableListOf<Message>()
+        val listener = StreamingCallbackListener(
+            onToken = { token, done -> events += "token($token, $done)" },
+            responseBuilder = reply,
+            history = history,
+            userMessage = "hi",
+            onStatsReady = {},
+        )
+        listener.onMessage(
+            com.google.ai.edge.litertlm.Message.model(
+                com.google.ai.edge.litertlm.Contents.of(""), emptyList(), mapOf("thought" to "Two plus two"),
+            ),
+        )
+        listener.onMessage(com.google.ai.edge.litertlm.Message.model("It is 4."))
+        listener.onDone()
+        assertEquals(
+            listOf(
+                "token(<litertlm:thinking>Two plus two</litertlm:thinking>, false)",
+                "token(, false)",
+                "token(It is 4., false)",
+                "token(, true)",
+            ),
+            events,
+        )
+        assertEquals("It is 4.", reply.toString())
+        assertEquals("It is 4.", history.single().content)
+    }
+
     private val engine = BenchmarkInfo(
         initTimeInSecond = 1.0,
         // The conversation's first turn: a later message must not report it.

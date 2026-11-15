@@ -338,6 +338,26 @@ class HybridLiteRTLMInstrumentedTest {
         assertTrue(stats.timeToFirstToken > 0 && stats.timeToFirstToken <= stats.totalTime)
     }
 
+    /**
+     * A reply with thinking streams its thought text in the wrapper's markers
+     * (JS turns them into `thinking` events), and keeps it out of the reply.
+     */
+    @Test
+    fun test1b_thoughtTextStreamsInItsMarkers() {
+        val llm = engine(withTools = false)
+        llm.resetConversation(null, null, null, null)
+        val (streamed, _) = generate(
+            llm, "What is 17 × 23? Reply with the number only.",
+            options(maxOutputTokens = 1024.0, thinking = ThinkingOptions(true, null)),
+        )
+        println("[android-int] thinking stream: ${streamed.take(300)}…")
+        assertTrue("no thought text streamed", streamed.contains("<litertlm:thinking>"))
+        val reply = llm.getHistory().last().content
+        println("[android-int] thinking reply: $reply")
+        assertFalse("thought text leaked into the reply", reply.contains("litertlm:thinking"))
+        assertTrue("reply: $reply", reply.contains("391"))
+    }
+
     @Test
     fun test2_systemPromptIsHonored() {
         val llm = engine(withTools = false)

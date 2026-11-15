@@ -194,7 +194,20 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     /// The one engine call made off `queue`: tokenizing reads only the
     /// tokenizer, so it needn't wait behind a generation. `engineLock` keeps
     /// the engine from being freed meanwhile.
+    ///
+    /// With `singleThreadedExecution` the engine must only be called from
+    /// one thread at a time (c/engine.h "Threading model"), so it tokenizes
+    /// on `queue` instead. The JS thread never waits there for long: while
+    /// a message is generating, `queue` runs its stream, so this gives up
+    /// after a moment and returns -1.
     public func countTokens(text: String) throws -> Double {
+        if singleThreadedExecution == true {
+            return countTokensOnQueue(text, wait: .milliseconds(50))
+        }
+        return tokenize(text)
+    }
+
+    private func tokenize(_ text: String) -> Double {
         engineLock.lock()
         defer { engineLock.unlock() }
         guard let engine = engine,
@@ -207,6 +220,37 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             litert_lm_tokenize_result_get_num_tokens(result, $0)
         }
         return count.map(Double.init) ?? -1.0
+    }
+
+    /// Tokenize on `queue`, waiting at most `wait` for it to start. Once it
+    /// has started it runs to the end (tokenizing is quick); if it hasn't,
+    /// it never will, and the count is -1.
+    func countTokensOnQueue(_ text: String, wait: DispatchTimeInterval) -> Double {
+        final class Request {
+            let lock = NSLock()
+            var started = false
+            var abandoned = false
+            var count = -1.0
+        }
+        let request = Request()
+        let done = DispatchSemaphore(value: 0)
+        queue.async {
+            request.lock.lock()
+            if request.abandoned { request.lock.unlock(); return }
+            request.started = true
+            request.lock.unlock()
+            request.count = self.tokenize(text)
+            done.signal()
+        }
+        if done.wait(timeout: .now() + wait) == .timedOut {
+            request.lock.lock()
+            let started = request.started
+            if !started { request.abandoned = true }
+            request.lock.unlock()
+            if !started { return -1.0 }
+            done.wait()
+        }
+        return request.count
     }
 
     /// Tokens in `conversation`'s context (KV cache), or -1 when the engine
@@ -1067,6 +1111,24 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return chars.count
     }
     
+    /// The thought text of a streamed chunk: LiteRT-LM 0.19 parses a bundle's
+    /// reasoning channel out of the reply, into
+    /// `{"role":"assistant","channels":{"thought":…},"reasoning_content":…}`.
+    func extractThoughtFromResponse(_ jsonResponse: String) -> String {
+        guard jsonResponse.contains("\"reasoning_content\""),
+              let data = jsonResponse.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+              let thought = json["reasoning_content"] as? String
+        else { return "" }
+        return thought
+    }
+
+    /// Thought text in the marker pair JS turns into `thinking` events
+    /// (NATIVE_THINKING_CHANNEL in src/core/streamEvents.ts; mirrors Android).
+    static func thinkingMarker(_ text: String) -> String {
+        "<litertlm:thinking>\(text)</litertlm:thinking>"
+    }
+
     func extractTextFromResponse(_ jsonResponse: String) -> String {
         guard let data = jsonResponse.data(using: .utf8) else {
             return stripControlTokens(jsonResponse)
