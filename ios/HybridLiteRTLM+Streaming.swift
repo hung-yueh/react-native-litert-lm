@@ -143,8 +143,10 @@ extension HybridLiteRTLM {
         func read<T>(_ what: String, _ initial: T, _ call: (UnsafeMutablePointer<T>) -> LiteRtLmStatusCode) -> T {
             do {
                 return try LiteRTLMNativeError.read(.execute, "Failed to read a stream chunk's \(what)", initial, call)
+            } catch let error as LiteRTLMNativeError {
+                if ctx.readFailure == nil { ctx.readFailure = error }
+                return initial
             } catch {
-                if ctx.readFailure == nil { ctx.readFailure = error as? LiteRTLMNativeError }
                 return initial
             }
         }
