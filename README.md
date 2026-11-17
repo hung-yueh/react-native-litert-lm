@@ -636,7 +636,7 @@ React Native (TypeScript)
 
 ## Testing
 
-Multi-tier suite that runs on CI without a device:
+Multi-tier suite that runs on CI without a device. From a fresh clone, run `npm install && npm run specs` first: the native builds need the Nitro code that `npm run specs` generates into `nitrogen/generated/`, which isn't checked in.
 
 - **JS/TS (Jest):** `npm test` — memory estimator (golden values), forecast/budget logic, bundle pre-flight, error typing, stream-event and tool-call parsing, embedding helpers, ring-buffer tracker, hook & factory behavior, HTTPS guard.
 - **Android (Robolectric):** `cd example/android && ./gradlew :react-native-litert-lm:testDebugUnitTest` — covers path-traversal/HTTPS guards, memory telemetry, and error paths. Requires a JDK 21+ test launcher (the litertlm-android AAR is built for Java 21); Gradle picks one up via toolchain auto-detection, or set `org.gradle.java.installations.paths`.
