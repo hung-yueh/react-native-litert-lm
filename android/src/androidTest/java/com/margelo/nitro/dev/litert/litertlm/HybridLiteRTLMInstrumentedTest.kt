@@ -1103,12 +1103,13 @@ class HybridLiteRTLMInstrumentedTest {
                 afterThoughtGrew <= afterThought.totalTokens,
             )
 
-            // A stream whose whole budget goes to thinking sends no text: no first
-            // token to time, so 0, as on iOS.
+            // A stream whose whole budget goes to thinking sends no reply text, only its
+            // thought in the markers (test1b): no first token to time, so 0, as on iOS.
             llm.resetConversation(null, null, null, null)
             val (silent, silentGrew, silentReply) =
                 measure("all of the budget to thinking", thoughtPrompt, 8.0, thinking = thinking)
-            assertEquals("the thought should use the whole budget", "", silentReply)
+            val thoughtBlocks = Regex("""<litertlm:thinking>[\s\S]*?</litertlm:thinking>""")
+            assertEquals("the thought should use the whole budget: $silentReply", "", silentReply.replace(thoughtBlocks, ""))
             assertEquals("no text reached the callback", 0.0, silent.timeToFirstToken, 0.0)
             // Its estimated prompt leaves out the chat template, so its total can be
             // below what the context grew (0.19.1 emulator: total 19, grew 33).
