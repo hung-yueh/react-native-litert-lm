@@ -9,6 +9,22 @@ jest.mock("react-native-nitro-modules");
 import * as api from "../index";
 import * as core from "../core";
 import { resetDeprecationWarnings } from "../core/deprecations";
+// Types the documented signatures use; `npm run typecheck` fails if one stops
+// being importable from the root (ExecuteOptions wasn't until 0.9.0, #41).
+import type {
+  ExecuteOptions,
+  GpuOptions,
+  LLMConfig,
+  ThinkingOptions,
+} from "../index";
+
+// Never called: it only has to type-check.
+export function rootConfigTypes(
+  config: LLMConfig,
+  options: ExecuteOptions,
+): [GpuOptions | undefined, ThinkingOptions | undefined, ThinkingOptions | undefined] {
+  return [config.gpu, config.thinking, options.thinking];
+}
 
 const FUNCTIONS = [
   // inference + lifecycle

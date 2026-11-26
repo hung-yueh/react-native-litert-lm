@@ -24,6 +24,9 @@ export type {
   ToolDefinition,
   ToolCall,
   SpeculativeDecodingMode,
+  ExecuteOptions,
+  ThinkingOptions,
+  GpuOptions,
 } from "./specs/LiteRTLM.nitro";
 
 
